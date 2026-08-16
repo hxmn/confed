@@ -50,9 +50,9 @@ pub trait ConfluenceClient: Send + Sync {
     async fn get_space(&self, key: &str) -> Result<Space>;
     fn list_spaces(&self) -> BoxStream<Result<Space>>;
 
-    /// Streams every page in a space (id, title, version, parent, position, status),
+    /// Every page in a space (id, title, version, parent, position, status),
     /// bodies NOT included — bodies are fetched individually by the worker pool.
-    fn list_pages(&self, space: &SpaceId) -> BoxStream<Result<PageSummary>>;
+    async fn list_pages(&self, space: &SpaceId) -> Result<Vec<PageSummary>>;
     async fn get_page(&self, id: &PageId, body: BodyFormat) -> Result<Page>;
     async fn create_page(&self, new: &NewPage) -> Result<Page>;
     /// MUST send `version.number = expected_base + 1`; server rejects stale updates.
@@ -227,3 +227,34 @@ The TUI is a thin optional layer (all functionality exists headless):
 - Merge assist: side-by-side 3-way conflict resolver invoked from `pull`/`resolve`.
 - Interactive prompts (init space picker, `push --interactive` confirmations) use small
   ratatui widgets when TTY, plain line prompts as fallback.
+
+
+## 6. Where the implementation diverged from this design
+
+Recorded here rather than quietly, so the next reader is not surprised.
+
+**List operations return `Vec`, not `BoxStream`.** The trait as sketched above
+used streams throughout. In practice the concrete type keeps the two clients,
+the mock, and every call site markedly simpler, and the memory argument does not
+hold: page *summaries* for a 10k-page space are a few megabytes, while the
+genuinely large payloads — bodies and attachments — are still fetched one page
+at a time by the bounded worker pool, and downloads stream straight to disk.
+Pagination is handled inside the clients by two shared helpers, one per style.
+
+**Fetch concurrency is fetch-parallel, write-serial.** Page fetches run
+concurrently through a `FuturesUnordered` sized by `--concurrency`, but results
+are written to SQLite by a single consumer as they arrive. This keeps each
+page's write atomic without a connection pool, and the network is the
+bottleneck regardless.
+
+**A page's filename is pinned only when the user chose it.** The design said the
+filename is never the identity, which remains true. The refinement is in *when*
+a server-side rename moves the file: confed compares the slug on disk against
+the slug it would derive from the last synced title. If they match, nobody
+renamed it locally and the file follows the server; if they differ, the user's
+choice wins and only the title changes.
+
+**`pages.local_path` is not unique.** Two pages swapping titles transiently want
+the same path mid-pull. Uniqueness is a property of the filesystem, not of the
+state database, and enforcing it there turned a legitimate operation into a
+constraint violation.

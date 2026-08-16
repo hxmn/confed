@@ -139,3 +139,29 @@ Markdown by the same converter. All three are the same representation, so a line
   byte-identical in output.
 - **Golden pairs**: curated `storage.xml ⇄ expected.md` fixtures for every mapped
   element; CI fails on unreviewed snapshot changes.
+
+
+## 7. Where the implementation diverged from this design
+
+**Renderability taint.** A block is classified not only by its shape but by
+whether it can be expressed in Markdown without loss. An unknown macro inside a
+paragraph, a code macro with `collapse=true`, an image with a width attribute, a
+table with `colspan` — any of these demotes the whole top-level block to a
+verbatim `confluence` fence. Half a paragraph cannot be preserved, so the unit
+of preservation has to be the whole block.
+
+**Adjacent lists alternate bullets.** Two Markdown lists using the same bullet
+character are a single list, which would fuse two storage blocks and invalidate
+the block map. Sibling lists therefore alternate `-`/`*` and `1.`/`1)`.
+
+**`status` renders as escaped `**[X]**`.** The design proposed `**[STATUS]**`,
+but that is not a fixed point: the next pull escapes the brackets, and the file
+looks edited when nothing changed.
+
+**`info`, `note` and `panel` all render as `> [!NOTE]`.** GitHub alerts have no
+second informational keyword, so an edited admonition returns to the server as
+`info`.
+
+**One genuine limitation.** Deleting a block that sat between two lists of the
+same type makes those lists adjacent, so Markdown fuses them and both are
+regenerated. The test suite asserts this boundary rather than papering over it.
