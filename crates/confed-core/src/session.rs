@@ -329,7 +329,7 @@ fn check_permissions(path: &Path) -> Result<()> {
     if mode & 0o077 != 0 {
         return Err(ConfedError::state_with_hint(
             format!("{} is readable by other users (mode {:o})", path.display(), mode),
-            format!("run `chmod 600 {}` (or `confed doctor --fix`)", path.display()),
+            format!("run `chmod 600 {}`", path.display()),
         ));
     }
     Ok(())

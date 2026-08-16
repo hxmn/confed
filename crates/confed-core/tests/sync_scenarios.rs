@@ -665,3 +665,37 @@ async fn a_renamed_page_brings_its_sidecar_along() {
     assert!(h.path(".After/comments.md").exists(), "the sidecar followed the page");
     assert!(!h.path(".Before").exists(), "no orphaned sidecar is left behind");
 }
+
+/// A file naming a page confed has no record of — the shape of a fresh git
+/// clone, since `.state.db` is git-ignored — must not be silently overwritten.
+#[tokio::test]
+async fn pull_refuses_to_overwrite_a_page_it_has_no_record_of() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Notes", None, "<p>Server text.</p>");
+    h.pull().await;
+
+    // Simulate a rebuilt state database: the file and its page_id survive, the
+    // base record does not.
+    h.edit_body("Notes.md", "\nUnpushed local work.\n");
+    h.ws.state().delete_page("1001").unwrap();
+    assert_eq!(h.status("1001"), PageState::Untracked);
+
+    let err = h
+        .engine
+        .pull(&mut h.ws, &PullOptions::everything())
+        .await
+        .expect_err("pull must stop rather than overwrite work it cannot compare");
+    assert_eq!(err.exit_code(), confed_core::ExitCode::State);
+    assert!(
+        h.read("Notes.md").contains("Unpushed local work."),
+        "the local edit survives the refusal"
+    );
+
+    // --force is the way through, and it takes the server's copy.
+    h.engine
+        .pull(&mut h.ws, &PullOptions { force: true, ..PullOptions::everything() })
+        .await
+        .expect("forced pull");
+    assert!(!h.read("Notes.md").contains("Unpushed local work."));
+    assert!(h.read("Notes.md").contains("Server text."));
+}

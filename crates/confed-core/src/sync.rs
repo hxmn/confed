@@ -1641,7 +1641,24 @@ fn decide_pull(
     };
 
     match status.state {
-        PageState::RemoteNew | PageState::Untracked => PullAction::Create,
+        // No local file exists, so there is nothing to lose.
+        PageState::RemoteNew => PullAction::Create,
+        // A file exists but confed has no base record for it — a rebuilt or
+        // deleted `.state.db`, which is exactly what a fresh git clone looks
+        // like, since `.state.db` is git-ignored. There is no base to compare
+        // against, so confed cannot tell whether the file holds unpushed work.
+        // Refuse rather than overwrite it.
+        PageState::Untracked => {
+            if opts.force {
+                PullAction::Overwrite
+            } else {
+                PullAction::Blocked(
+                    "this file names a page confed has no record of, so its contents cannot be \
+                     compared with the server"
+                        .into(),
+                )
+            }
+        }
         PageState::Behind => PullAction::Overwrite,
         PageState::Diverged | PageState::Conflicted => {
             if opts.force {
