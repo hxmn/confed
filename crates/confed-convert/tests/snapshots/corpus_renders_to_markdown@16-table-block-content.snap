@@ -1,0 +1,11 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+```confluence
+<table>
+<tbody>
+<tr><th>Step</th><th>Detail</th></tr>
+<tr><td>1</td><td><ul><li>a list inside a cell</li><li>which GFM cannot express</li></ul></td></tr>
+</tbody>
+</table>
+```

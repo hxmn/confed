@@ -1,0 +1,16 @@
+<p>Start the service:</p>
+<ac:structured-macro ac:name="code" ac:schema-version="1" ac:macro-id="a1b2">
+<ac:parameter ac:name="language">bash</ac:parameter>
+<ac:plain-text-body><![CDATA[systemctl start confed
+journalctl -u confed -f]]></ac:plain-text-body>
+</ac:structured-macro>
+<p>And the config:</p>
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+<ac:parameter ac:name="language">yaml</ac:parameter>
+<ac:parameter ac:name="collapse">false</ac:parameter>
+<ac:plain-text-body><![CDATA[server:
+  port: 8080]]></ac:plain-text-body>
+</ac:structured-macro>
+<ac:structured-macro ac:name="code" ac:schema-version="1">
+<ac:plain-text-body><![CDATA[no language here]]></ac:plain-text-body>
+</ac:structured-macro>

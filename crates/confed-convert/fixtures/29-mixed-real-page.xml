@@ -1,0 +1,20 @@
+<ac:structured-macro ac:name="toc" ac:schema-version="1"/>
+<h1>Service: payments-api</h1>
+<p>Owned by <ac:link><ri:user ri:account-id="557058:abcd"/></ac:link>. Runbook: <ac:link><ri:page ri:content-title="Runbook"/><ac:plain-text-link-body><![CDATA[here]]></ac:plain-text-link-body></ac:link>.</p>
+<ac:structured-macro ac:name="warning" ac:schema-version="1">
+<ac:parameter ac:name="title">Production</ac:parameter>
+<ac:rich-text-body><p>Changes here page the on-call.</p></ac:rich-text-body>
+</ac:structured-macro>
+<h2>Endpoints</h2>
+<table><tbody>
+<tr><th>Method</th><th>Path</th><th>Auth</th></tr>
+<tr><td>GET</td><td><code>/v1/payments</code></td><td>bearer</td></tr>
+<tr><td>POST</td><td><code>/v1/payments</code></td><td>bearer</td></tr>
+</tbody></table>
+<h2>Deploy</h2>
+<ac:structured-macro ac:name="code" ac:schema-version="1"><ac:parameter ac:name="language">bash</ac:parameter><ac:plain-text-body><![CDATA[./deploy.sh prod]]></ac:plain-text-body></ac:structured-macro>
+<h2>Open work</h2>
+<ac:structured-macro ac:name="jira" ac:schema-version="1"><ac:parameter ac:name="key">PAY-31</ac:parameter></ac:structured-macro>
+<ac:task-list><ac:task><ac:task-status>incomplete</ac:task-status><ac:task-body>Add idempotency keys</ac:task-body></ac:task></ac:task-list>
+<hr/>
+<p>Last reviewed <time datetime="2026-05-01"/>.</p>

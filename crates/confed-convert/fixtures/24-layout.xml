@@ -1,0 +1,9 @@
+<ac:layout>
+<ac:layout-section ac:type="two_equal">
+<ac:layout-cell><p>Left column.</p></ac:layout-cell>
+<ac:layout-cell><p>Right column.</p></ac:layout-cell>
+</ac:layout-section>
+<ac:layout-section ac:type="single">
+<ac:layout-cell><p>Full width footer.</p></ac:layout-cell>
+</ac:layout-section>
+</ac:layout>

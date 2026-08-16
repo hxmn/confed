@@ -1,0 +1,20 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+Start the service:
+
+```bash
+systemctl start confed
+journalctl -u confed -f
+```
+
+And the config:
+
+```yaml
+server:
+  port: 8080
+```
+
+```
+no language here
+```

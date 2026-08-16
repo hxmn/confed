@@ -1,0 +1,8 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+| Environment | Region | Owner |
+| --- | --- | --- |
+| prod | eu-west-1 | Platform |
+| staging | eu-west-1 | Platform |
+| dev | us-east-1 | Anyone |

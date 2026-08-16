@@ -1,0 +1,4 @@
+<p>Architecture:</p>
+<ac:image ac:alt="System diagram"><ri:attachment ri:filename="architecture.png"/></ac:image>
+<p>Inline logo <ac:image><ri:attachment ri:filename="logo small.svg"/></ac:image> in a sentence.</p>
+<ac:image><ri:url ri:value="https://cdn.example.test/banner.png"/></ac:image>

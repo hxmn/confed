@@ -1,0 +1,4 @@
+<p>A sized image keeps its attributes by being preserved whole.</p>
+<ac:image ac:width="640" ac:height="480" ac:align="center" ac:border="true">
+<ri:attachment ri:filename="screenshot.png"/>
+</ac:image>

@@ -1,0 +1,12 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+- Item with a paragraph
+
+  and a second paragraph
+- Item with code
+
+  ```python
+  print("hi")
+  ```
+- Item with a link to [somewhere](https://example.test)

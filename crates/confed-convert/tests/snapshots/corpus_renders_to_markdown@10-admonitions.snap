@@ -1,0 +1,25 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+> [!NOTE]
+> Plain information, no title.
+
+> [!NOTE]
+> **Remember**
+>
+> Rotate the token every 90 days.
+
+> [!WARNING]
+> **Data loss**
+>
+> This drops the table.
+>
+> There is no undo.
+
+> [!TIP]
+> Use `--dry-run` first.
+
+> [!NOTE]
+> **Scratch space**
+>
+> Anything goes here.

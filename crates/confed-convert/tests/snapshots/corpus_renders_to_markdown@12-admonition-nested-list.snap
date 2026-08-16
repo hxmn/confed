@@ -1,0 +1,14 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+> [!WARNING]
+> **Before you deploy**
+>
+> Check all of these:
+>
+> - migrations applied
+> - feature flag off
+>
+> ```bash
+> make check
+> ```

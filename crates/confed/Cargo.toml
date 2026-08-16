@@ -1,0 +1,38 @@
+[package]
+name = "confed"
+description = "Offline-first Confluence editor: sync a space to Markdown files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "confed"
+
+[[bin]]
+name = "confed"
+path = "src/main.rs"
+
+[dependencies]
+confed-api.workspace = true
+confed-convert.workspace = true
+confed-core.workspace = true
+
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+wiremock.workspace = true

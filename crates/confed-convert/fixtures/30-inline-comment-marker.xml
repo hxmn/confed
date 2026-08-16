@@ -1,0 +1,2 @@
+<p>This sentence has <ac:inline-comment-marker ac:ref="9f2c-1">a commented span</ac:inline-comment-marker> in the middle.</p>
+<p>And this one does not.</p>

@@ -1,0 +1,7 @@
+<ul>
+<li><p>Item with a paragraph</p><p>and a second paragraph</p></li>
+<li>Item with code
+<ac:structured-macro ac:name="code" ac:schema-version="1"><ac:parameter ac:name="language">python</ac:parameter><ac:plain-text-body><![CDATA[print("hi")]]></ac:plain-text-body></ac:structured-macro>
+</li>
+<li>Item with a link to <a href="https://example.test">somewhere</a></li>
+</ul>

@@ -1,0 +1,14 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+Literals that must not become syntax: \* star, \_under\_, \[bracket\], \`tick\`, # hash, > angle.
+
+\- this line starts like a bullet
+
+1\. and this like a numbered item
+
+\# and this like a heading
+
+Path names like snake_case_value and \_\_dunder\_\_ appear a lot.
+
+A raw \<u>tag\</u> written as text.

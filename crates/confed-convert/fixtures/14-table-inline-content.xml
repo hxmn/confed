@@ -1,0 +1,8 @@
+<table>
+<tbody>
+<tr><th><p>Field</p></th><th><p>Notes</p></th></tr>
+<tr><td><p><code>id</code></p></td><td><p>Primary key, <strong>never</strong> reused</p></td></tr>
+<tr><td><p>pipe</p></td><td><p>A literal | in a cell</p></td></tr>
+<tr><td><p>link</p></td><td><p><a href="https://example.test/spec">the spec</a></p></td></tr>
+</tbody>
+</table>

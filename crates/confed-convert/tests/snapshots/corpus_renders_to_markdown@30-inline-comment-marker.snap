@@ -1,0 +1,6 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+This sentence has a commented span in the middle.
+
+And this one does not.

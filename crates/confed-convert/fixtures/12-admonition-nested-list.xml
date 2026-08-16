@@ -1,0 +1,8 @@
+<ac:structured-macro ac:name="warning" ac:schema-version="1">
+<ac:parameter ac:name="title">Before you deploy</ac:parameter>
+<ac:rich-text-body>
+<p>Check all of these:</p>
+<ul><li>migrations applied</li><li>feature flag off</li></ul>
+<ac:structured-macro ac:name="code" ac:schema-version="1"><ac:parameter ac:name="language">bash</ac:parameter><ac:plain-text-body><![CDATA[make check]]></ac:plain-text-body></ac:structured-macro>
+</ac:rich-text-body>
+</ac:structured-macro>

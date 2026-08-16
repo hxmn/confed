@@ -1,0 +1,38 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+<!-- confed:toc -->
+
+# Service: payments-api
+
+Owned by [557058:abcd](https://wiki.example.test/display/~557058:abcd). Runbook: [here](runbook.md).
+
+> [!WARNING]
+> **Production**
+>
+> Changes here page the on-call.
+
+## Endpoints
+
+| Method | Path | Auth |
+| --- | --- | --- |
+| GET | `/v1/payments` | bearer |
+| POST | `/v1/payments` | bearer |
+
+## Deploy
+
+```bash
+./deploy.sh prod
+```
+
+## Open work
+
+```confluence
+<ac:structured-macro ac:name="jira" ac:schema-version="1"><ac:parameter ac:name="key">PAY-31</ac:parameter></ac:structured-macro>
+```
+
+- [ ] Add idempotency keys
+
+---
+
+Last reviewed 2026-05-01.

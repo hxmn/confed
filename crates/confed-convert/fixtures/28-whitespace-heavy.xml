@@ -1,0 +1,9 @@
+
+  <p>Indented paragraph.</p>
+
+  <p>   Leading and trailing spaces inside the tag.   </p>
+
+  <p></p>
+  <p>&nbsp;</p>
+
+  <h2>  Padded heading  </h2>

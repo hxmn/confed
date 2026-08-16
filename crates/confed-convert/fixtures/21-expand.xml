@@ -1,0 +1,7 @@
+<ac:structured-macro ac:name="expand" ac:schema-version="1">
+<ac:parameter ac:name="title">Full error output</ac:parameter>
+<ac:rich-text-body><p>Stack trace was here.</p></ac:rich-text-body>
+</ac:structured-macro>
+<ac:structured-macro ac:name="expand" ac:schema-version="1">
+<ac:rich-text-body><p>Untitled expand.</p></ac:rich-text-body>
+</ac:structured-macro>

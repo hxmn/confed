@@ -1,0 +1,7 @@
+<p>Same-space page: <ac:link><ri:page ri:content-title="Runbook"/><ac:plain-text-link-body><![CDATA[the runbook]]></ac:plain-text-link-body></ac:link></p>
+<p>Other space: <ac:link><ri:page ri:space-key="OPS" ri:content-title="On Call Rota"/></ac:link></p>
+<p>Anchored: <ac:link ac:anchor="Rollback"><ri:page ri:content-title="Runbook"/><ac:plain-text-link-body><![CDATA[rollback steps]]></ac:plain-text-link-body></ac:link></p>
+<p>User: <ac:link><ri:user ri:account-id="557058:aaaa-bbbb"/></ac:link></p>
+<p>Attachment: <ac:link><ri:attachment ri:filename="postmortem.pdf"/><ac:plain-text-link-body><![CDATA[the postmortem]]></ac:plain-text-link-body></ac:link></p>
+<p>External: <a href="https://example.test/docs?a=1&amp;b=2">external docs</a></p>
+<p>Rich body: <ac:link><ri:page ri:content-title="Runbook"/><ac:link-body><strong>bold link</strong></ac:link-body></ac:link></p>

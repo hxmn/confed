@@ -1,0 +1,8 @@
+<table>
+<tbody>
+<tr><th>Environment</th><th>Region</th><th>Owner</th></tr>
+<tr><td>prod</td><td>eu-west-1</td><td>Platform</td></tr>
+<tr><td>staging</td><td>eu-west-1</td><td>Platform</td></tr>
+<tr><td>dev</td><td>us-east-1</td><td>Anyone</td></tr>
+</tbody>
+</table>

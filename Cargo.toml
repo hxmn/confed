@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/confed",
+    "crates/confed-api",
+    "crates/confed-convert",
+    "crates/confed-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hxmn/confed"
+
+[workspace.dependencies]
+confed-api = { path = "crates/confed-api", version = "0.1.0" }
+confed-convert = { path = "crates/confed-convert", version = "0.1.0" }
+confed-core = { path = "crates/confed-core", version = "0.1.0" }
+
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env", "wrap_help"] }
+clap_complete = "4"
+comrak = "0.39"
+crossterm = "0.29"
+diffy = "0.4"
+futures = "0.3"
+globset = "0.4"
+# Pure-Rust Secret Service (zbus) so confed builds with no system dbus headers.
+keyring = { version = "3", default-features = false, features = [
+    "async-secret-service",
+    "crypto-rust",
+    "tokio",
+    "apple-native",
+    "windows-native",
+] }
+percent-encoding = "2"
+quick-xml = "0.38"
+ratatui = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls", "gzip"] }
+rusqlite = { version = "0.37", features = ["bundled", "blob"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+similar = { version = "2", features = ["text", "inline"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time", "signal"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-normalization = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+zstd = "0.13"
+
+insta = { version = "1", features = ["json", "yaml", "filters"] }
+proptest = "1"
+wiremock = "0.6"
+
+[profile.dev]
+incremental = false
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+lto = "thin"
+strip = true

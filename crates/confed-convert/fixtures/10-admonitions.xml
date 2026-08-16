@@ -1,0 +1,18 @@
+<ac:structured-macro ac:name="info" ac:schema-version="1">
+<ac:rich-text-body><p>Plain information, no title.</p></ac:rich-text-body>
+</ac:structured-macro>
+<ac:structured-macro ac:name="note" ac:schema-version="1">
+<ac:parameter ac:name="title">Remember</ac:parameter>
+<ac:rich-text-body><p>Rotate the token every 90 days.</p></ac:rich-text-body>
+</ac:structured-macro>
+<ac:structured-macro ac:name="warning" ac:schema-version="1">
+<ac:parameter ac:name="title">Data loss</ac:parameter>
+<ac:rich-text-body><p>This drops the table.</p><p>There is no undo.</p></ac:rich-text-body>
+</ac:structured-macro>
+<ac:structured-macro ac:name="tip" ac:schema-version="1">
+<ac:rich-text-body><p>Use <code>--dry-run</code> first.</p></ac:rich-text-body>
+</ac:structured-macro>
+<ac:structured-macro ac:name="panel" ac:schema-version="1">
+<ac:parameter ac:name="title">Scratch space</ac:parameter>
+<ac:rich-text-body><p>Anything goes here.</p></ac:rich-text-body>
+</ac:structured-macro>

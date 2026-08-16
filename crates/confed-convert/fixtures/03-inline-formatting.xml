@@ -1,0 +1,5 @@
+<p><strong>bold</strong> <em>italic</em> <del>struck</del> <u>underlined</u> <sub>sub</sub> <sup>sup</sup> <code>code()</code></p>
+<p>Mixed: <strong>bold with <em>nested italic</em> inside</strong>.</p>
+<p>Line one<br/>line two<br/>line three</p>
+<p>Entities: &amp; &lt; &gt; &quot; &nbsp; &mdash; &ndash; &hellip; &rsquo; &copy; &deg;</p>
+<p>A <span style="color: rgb(255,0,0);">red span</span> and a <span>plain span</span>.</p>

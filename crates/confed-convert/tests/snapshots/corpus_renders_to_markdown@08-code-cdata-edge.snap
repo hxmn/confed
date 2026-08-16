@@ -1,0 +1,16 @@
+---
+source: crates/confed-convert/tests/golden.rs
+---
+Awkward code bodies.
+
+```text
+array[i]] = x;
+if (a[b[c]] > 0) { }
+```
+
+````markdown
+Use ``` to open a fence.
+```js
+nested()
+```
+````

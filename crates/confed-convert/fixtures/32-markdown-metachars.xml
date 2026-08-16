@@ -1,0 +1,6 @@
+<p>Literals that must not become syntax: * star, _under_, [bracket], `tick`, # hash, &gt; angle.</p>
+<p>- this line starts like a bullet</p>
+<p>1. and this like a numbered item</p>
+<p># and this like a heading</p>
+<p>Path names like snake_case_value and __dunder__ appear a lot.</p>
+<p>A raw &lt;u&gt;tag&lt;/u&gt; written as text.</p>
