@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/status.schema.json",
+  "title": "confed status result",
+  "description": "The `result` of `confed status --json`. Computed entirely from local state: the working files, the base recorded in .state.db, and the last fetched remote versions.",
+  "type": "object",
+  "required": ["space", "clean", "pages", "untracked_files", "unreadable"],
+  "properties": {
+    "space": { "type": "string", "description": "The space key this directory is bound to." },
+    "last_fetch_at": {
+      "type": ["string", "null"],
+      "description": "RFC 3339 timestamp of the last successful fetch, or null if the space has never been fetched."
+    },
+    "clean": {
+      "type": "boolean",
+      "description": "True when no page differs from base or remote and every page file parsed."
+    },
+    "pages": { "type": "array", "items": { "$ref": "#/$defs/page" } },
+    "untracked_files": {
+      "type": "array",
+      "description": "Markdown files in the workspace with no frontmatter; confed ignores them.",
+      "items": { "type": "string" }
+    },
+    "unreadable": {
+      "type": "array",
+      "description": "Page files that could not be parsed. Each one also appears in the envelope's warnings.",
+      "items": {
+        "type": "object",
+        "required": ["path", "error"],
+        "properties": { "path": { "type": "string" }, "error": { "type": "string" } }
+      }
+    }
+  },
+  "$defs": {
+    "page": {
+      "type": "object",
+      "required": ["path", "title", "state"],
+      "properties": {
+        "page_id": {
+          "type": "string",
+          "description": "Absent for a local file that does not exist on the server yet."
+        },
+        "path": {
+          "type": "string",
+          "description": "Workspace-relative path. Empty for a remote_new page, which has no file yet."
+        },
+        "title": { "type": "string" },
+        "state": {
+          "type": "string",
+          "description": "See docs/sync.md for what causes each state.",
+          "enum": [
+            "unchanged", "modified", "behind", "diverged", "local_new",
+            "remote_new", "local_deleted", "remote_deleted", "conflicted", "untracked"
+          ]
+        },
+        "base_version": {
+          "type": "integer",
+          "description": "The server version this file was last synced with."
+        },
+        "remote_version": {
+          "type": "integer",
+          "description": "The server version seen by the last fetch."
+        },
+        "moved_from": {
+          "type": "string",
+          "description": "Present when the file was renamed or moved since the last sync."
+        },
+        "tampered_fields": {
+          "type": "array",
+          "description": "Fields of the tool-managed `confed:` block that were hand-edited. push refuses these pages.",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

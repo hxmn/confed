@@ -415,6 +415,7 @@ impl SyncEngine {
 
         let mut outcome = PullOutcome { dry_run: opts.dry_run, ..Default::default() };
         let (files, _) = worktree::read_working_files(ws)?;
+        self.reconcile_paths(ws, &files)?;
         let base = ws.state().all_pages()?;
         let remote = ws.state().all_remote()?;
         let statuses = worktree::compute_status(&files, &base, &remote);
@@ -462,6 +463,8 @@ impl SyncEngine {
 
         // Pass two: apply.
         let mut handled: Vec<String> = Vec::new();
+        // (path a rename left behind, path the page moved to)
+        let mut vacated: Vec<(String, String)> = Vec::new();
         for (remote_page, action) in plan {
             handled.push(remote_page.page_id.clone());
             let local = files_by_id.get(remote_page.page_id.as_str()).copied();
@@ -508,7 +511,9 @@ impl SyncEngine {
                 }
             }
 
-            // A page renamed on the server moves its file.
+            // A page renamed on the server moves its file. The old path is not
+            // removed yet: when two pages swap titles, one page's old path is
+            // another page's new one.
             if let (Some(base_record), false) = (base_record, opts.dry_run) {
                 if base_record.local_path != placement.path {
                     outcome.moved.push(MovedPage {
@@ -516,10 +521,7 @@ impl SyncEngine {
                         from: base_record.local_path.clone(),
                         to: placement.path.clone(),
                     });
-                    let old = ws.absolute(&base_record.local_path);
-                    if old.exists() && old != ws.absolute(&placement.path) {
-                        let _ = std::fs::remove_file(&old);
-                    }
+                    vacated.push((base_record.local_path.clone(), placement.path.clone()));
                 }
             }
 
@@ -534,6 +536,32 @@ impl SyncEngine {
                     &remote_page.title,
                     &placement.path,
                 )?;
+            }
+        }
+
+        // Now that every page has been written, remove the files left behind by
+        // renames — but never one that another page has just claimed.
+        let claimed: Vec<&str> = placements.values().map(|p| p.path.as_str()).collect();
+        let claimed_sidecars: Vec<String> =
+            placements.values().map(|p| p.sidecar.clone()).collect();
+
+        for (old_path, new_path) in vacated {
+            // The page's attachments and comments move with it — unless another
+            // page now owns that sidecar, in which case it is not ours to move.
+            let old_sidecar_rel = paths::sidecar_for(&old_path);
+            if !claimed_sidecars.contains(&old_sidecar_rel) {
+                move_sidecar(
+                    &ws.absolute(&old_sidecar_rel),
+                    &ws.absolute(&paths::sidecar_for(&new_path)),
+                );
+            }
+
+            if claimed.contains(&old_path.as_str()) {
+                continue;
+            }
+            let old = ws.absolute(&old_path);
+            if old.exists() {
+                let _ = std::fs::remove_file(&old);
             }
         }
 
@@ -555,6 +583,39 @@ impl SyncEngine {
         Ok(outcome)
     }
 
+    /// Learn where files actually are.
+    ///
+    /// A page is identified by `page_id`, so a user is free to rename or move
+    /// its file. Recording that choice here is what lets a later server-side
+    /// rename leave their filename alone while still updating the title.
+    fn reconcile_paths(&self, ws: &mut Workspace, files: &[LocalFile]) -> Result<()> {
+        for local in files {
+            let Some(page_id) = local.file.frontmatter.page_id() else { continue };
+            let Some(record) = ws.state().get_page(page_id)? else { continue };
+            if record.local_path == local.path {
+                continue;
+            }
+            let slug = local
+                .path
+                .rsplit('/')
+                .next()
+                .and_then(|f| f.strip_suffix(".md"))
+                .unwrap_or(&local.path)
+                .to_string();
+
+            tracing::debug!(
+                target: "confed::sync",
+                page = page_id, from = %record.local_path, to = %local.path,
+                "page file was moved locally"
+            );
+            let mut updated = record;
+            updated.local_path = local.path.clone();
+            updated.slug = slug;
+            ws.state().upsert_page(&updated)?;
+        }
+        Ok(())
+    }
+
     fn plan_placements(
         &self,
         remote: &[RemotePage],
@@ -570,8 +631,15 @@ impl SyncEngine {
                 position: r.position,
             })
             .collect();
-        let existing: HashMap<String, String> =
-            base.iter().map(|b| (b.page_id.clone(), b.slug.clone())).collect();
+        // Pin a filename only when the user chose it. If the slug on disk is
+        // still the one confed derived from the title it last synced, a rename
+        // on the server should move the file; if the user renamed it themselves,
+        // that choice wins and only the title changes.
+        let existing: HashMap<String, String> = base
+            .iter()
+            .filter(|b| b.slug != crate::slug::slugify(&b.title))
+            .map(|b| (b.page_id.clone(), b.slug.clone()))
+            .collect();
         paths::plan_paths(&pages, &existing)
     }
 
@@ -1633,6 +1701,35 @@ pub fn path_matches(pattern: &str, path: &str) -> bool {
         // A plain prefix like `Handbook` selects the subtree.
         Err(_) => path.starts_with(pattern),
     }
+}
+
+/// Move a page's sidecar to follow a rename.
+///
+/// The destination may already exist, because pull writes the new page's
+/// comment sidecar before it gets here; anything not already at the destination
+/// is carried over, then the old directory is removed.
+fn move_sidecar(old: &Path, new: &Path) {
+    if !old.is_dir() || old == new {
+        return;
+    }
+    if !new.exists() && std::fs::rename(old, new).is_ok() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(old) else { return };
+    let _ = std::fs::create_dir_all(new);
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let destination = new.join(entry.file_name());
+        if destination.exists() {
+            // The destination copy is the fresh one — pull regenerates the
+            // comment sidecar and re-downloads attachments under the new name —
+            // so the old copy is redundant rather than lost.
+            let _ = std::fs::remove_file(entry.path());
+        } else {
+            let _ = std::fs::rename(entry.path(), &destination);
+        }
+    }
+    // Only removes the directory if it is now empty, so nothing is lost.
+    let _ = std::fs::remove_dir(old);
 }
 
 /// Write via a temp file + rename so an interrupted write never truncates a page.

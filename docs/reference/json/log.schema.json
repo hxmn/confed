@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/log.schema.json",
+  "title": "confed log result",
+  "description": "The `result` of `confed log --json`. Without --local it is the server's version history; with --local it is confed's own sync log for the page.",
+  "anyOf": [
+    { "$ref": "#/$defs/server_history" },
+    { "$ref": "#/$defs/local_history" }
+  ],
+  "$defs": {
+    "server_history": {
+      "type": "object",
+      "required": ["page_id", "versions"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "base_version": {
+          "type": ["integer", "null"],
+          "description": "The version the local file is based on, null if the page has not been pulled."
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["number"],
+            "properties": {
+              "number": { "type": "integer", "minimum": 1 },
+              "author": { "type": ["string", "null"] },
+              "when": { "type": ["string", "null"], "description": "RFC 3339 timestamp." },
+              "message": { "type": ["string", "null"], "description": "Version comment; empty ones normalize to null." }
+            }
+          }
+        }
+      }
+    },
+    "local_history": {
+      "type": "object",
+      "required": ["page_id", "entries"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["ts", "op", "result"],
+            "properties": {
+              "ts": { "type": "string" },
+              "op": {
+                "type": "string",
+                "description": "e.g. `pull-merge`, `push-update`, `push-create`, `push-delete`."
+              },
+              "result": { "type": "string", "description": "e.g. `ok`, `merged`, `conflict`." },
+              "from_version": { "type": ["integer", "null"] },
+              "to_version": { "type": ["integer", "null"] },
+              "detail": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

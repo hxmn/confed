@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/pull.schema.json",
+  "title": "confed pull result",
+  "description": "The `result` of `confed pull --json`. With --dry-run the lists describe what would have been written and `dry_run` is true.",
+  "type": "object",
+  "required": ["created", "updated", "merged", "conflicted", "deleted", "moved", "skipped_dirty", "attachments_downloaded", "dry_run"],
+  "properties": {
+    "created": {
+      "type": "array",
+      "description": "Pages materialized for the first time.",
+      "items": { "$ref": "#/$defs/page_change" }
+    },
+    "updated": {
+      "type": "array",
+      "description": "Pages overwritten from the server because there was nothing local to lose.",
+      "items": { "$ref": "#/$defs/page_change" }
+    },
+    "merged": {
+      "type": "array",
+      "description": "Diverged pages that merged cleanly.",
+      "items": { "$ref": "#/$defs/page_change" }
+    },
+    "conflicted": {
+      "type": "array",
+      "description": "Diverged pages whose merge left conflict markers. The command exits 4.",
+      "items": { "$ref": "#/$defs/page_change" }
+    },
+    "deleted": {
+      "type": "array",
+      "description": "Local files removed because the page is gone on the server.",
+      "items": { "$ref": "#/$defs/page_change" }
+    },
+    "moved": {
+      "type": "array",
+      "description": "Files relocated because the page was renamed or re-parented on the server.",
+      "items": {
+        "type": "object",
+        "required": ["page_id", "from", "to"],
+        "properties": {
+          "page_id": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" }
+        }
+      }
+    },
+    "skipped_dirty": {
+      "type": "array",
+      "description": "Pages pull refused to touch. Non-empty means the whole command failed with exit 7 unless --force was given.",
+      "items": { "$ref": "#/$defs/blocked_page" }
+    },
+    "attachments_downloaded": { "type": "integer", "minimum": 0 },
+    "dry_run": { "type": "boolean" }
+  },
+  "$defs": {
+    "page_change": {
+      "type": "object",
+      "required": ["page_id", "path", "title", "from_version", "to_version"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "path": { "type": "string" },
+        "title": { "type": "string" },
+        "from_version": { "type": ["integer", "null"], "description": "Base version before the change." },
+        "to_version": { "type": ["integer", "null"], "description": "Base version after it; null for a deletion." },
+        "ops": {
+          "type": "array",
+          "description": "Omitted on the pull side, which always rewrites the whole file.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "blocked_page": {
+      "type": "object",
+      "required": ["page_id", "path", "reason"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "path": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

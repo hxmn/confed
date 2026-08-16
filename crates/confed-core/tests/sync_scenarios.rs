@@ -590,3 +590,78 @@ async fn deleting_an_attachment_requires_allow_delete() {
         .unwrap();
     assert!(gone.is_empty(), "with --allow-delete it is removed");
 }
+
+/// Two pages swapping titles makes each want the path the other still holds.
+#[tokio::test]
+async fn pages_that_swap_titles_still_pull() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Alpha", None, "<p>First page.</p>");
+    h.mock.seed_page("1002", "Beta", None, "<p>Second page.</p>");
+    h.pull().await;
+    assert!(h.path("Alpha.md").exists() && h.path("Beta.md").exists());
+
+    h.mock.rename_page("1001", "Beta");
+    h.mock.rename_page("1002", "Alpha");
+
+    let outcome = h.pull().await;
+    assert!(outcome.skipped_dirty.is_empty(), "nothing is blocked: {outcome:?}");
+    assert_eq!(outcome.moved.len(), 2, "both files follow their page's new title");
+
+    // Whatever names they end up with, both pages exist exactly once and the
+    // bodies followed their page ids rather than their filenames.
+    let alpha = h.ws.state().get_page("1001").unwrap().unwrap();
+    let beta = h.ws.state().get_page("1002").unwrap().unwrap();
+    assert_ne!(alpha.local_path, beta.local_path, "two pages cannot share a file");
+    assert!(h.path(&alpha.local_path).exists(), "{} is missing", alpha.local_path);
+    assert!(h.path(&beta.local_path).exists(), "{} is missing", beta.local_path);
+    assert!(h.read(&alpha.local_path).contains("First page."));
+    assert!(h.read(&beta.local_path).contains("Second page."));
+}
+
+/// A server-side rename moves the file, unless the user renamed it locally
+/// first — in which case their choice of filename wins and only the title
+/// changes.
+#[tokio::test]
+async fn a_locally_renamed_file_keeps_its_name_through_a_server_rename() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Original", None, "<p>Body.</p>");
+    h.pull().await;
+
+    // The user renames the file (not the title) — a local naming preference.
+    std::fs::rename(h.path("Original.md"), h.path("My Preferred Name.md")).unwrap();
+    h.engine
+        .pull(&mut h.ws, &PullOptions { no_fetch: true, ..PullOptions::everything() })
+        .await
+        .expect("pull");
+    // confed re-associates by page_id, so the record now points at the new file.
+    let record = h.ws.state().get_page("1001").unwrap().unwrap();
+    assert_eq!(record.local_path, "My Preferred Name.md");
+
+    h.mock.rename_page("1001", "Renamed On Server");
+    h.pull().await;
+
+    assert!(h.path("My Preferred Name.md").exists(), "the chosen filename survives");
+    assert!(!h.path("Renamed On Server.md").exists());
+    assert!(
+        h.read("My Preferred Name.md").contains("title: Renamed On Server"),
+        "but the title follows the server"
+    );
+}
+
+/// A page renamed on the server takes its attachments and comments with it.
+#[tokio::test]
+async fn a_renamed_page_brings_its_sidecar_along() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Before", None, "<p>Body.</p>");
+    h.mock.seed_comment("1001", "<p>A comment.</p>", confed_api::CommentKind::Footer);
+    h.pull().await;
+    assert!(h.path(".Before/comments.md").exists());
+
+    h.mock.rename_page("1001", "After");
+    h.pull().await;
+
+    assert!(h.path("After.md").exists());
+    assert!(!h.path("Before.md").exists(), "the old file is cleaned up");
+    assert!(h.path(".After/comments.md").exists(), "the sidecar followed the page");
+    assert!(!h.path(".Before").exists(), "no orphaned sidecar is left behind");
+}

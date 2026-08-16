@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/fetch.schema.json",
+  "title": "confed fetch result",
+  "description": "The `result` of `confed fetch --json`. fetch only updates .state.db; it never writes a page file.",
+  "type": "object",
+  "required": ["fetched", "unchanged", "deleted_on_remote", "failed", "resumed"],
+  "properties": {
+    "fetched": { "type": "integer", "minimum": 0, "description": "Pages whose body was downloaded." },
+    "unchanged": { "type": "integer", "minimum": 0, "description": "Pages already at the server's version." },
+    "deleted_on_remote": {
+      "type": "array",
+      "description": "Page ids that disappeared from the space listing.",
+      "items": { "type": "string" }
+    },
+    "failed": {
+      "type": "array",
+      "description": "Pages that could not be fetched. Non-empty means exit 8.",
+      "items": {
+        "type": "object",
+        "required": ["page_id", "title", "error"],
+        "properties": {
+          "page_id": { "type": "string" },
+          "title": { "type": "string" },
+          "error": { "type": "string" }
+        }
+      }
+    },
+    "resumed": {
+      "type": "boolean",
+      "description": "True when an interrupted fetch was continued rather than restarted."
+    }
+  }
+}

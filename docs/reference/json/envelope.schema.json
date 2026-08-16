@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/envelope.schema.json",
+  "title": "confed JSON envelope",
+  "description": "Every confed command run with --json prints exactly this object on stdout, whether it succeeded or failed. Diagnostics and warnings also go to stderr, so stdout stays parseable. `confed.schema` is bumped only for a breaking change; adding a field to a command's `result` is additive and does not bump it.",
+  "type": "object",
+  "required": ["confed", "result", "errors", "warnings"],
+  "additionalProperties": false,
+  "properties": {
+    "confed": {
+      "type": "object",
+      "required": ["schema", "version", "command", "ok", "exit_code", "duration_ms"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "type": "integer",
+          "const": 1,
+          "description": "Envelope schema version."
+        },
+        "version": {
+          "type": "string",
+          "description": "The confed release that produced this output."
+        },
+        "command": {
+          "type": "string",
+          "description": "The subcommand that ran, in its canonical spelling.",
+          "enum": [
+            "init", "clone", "fetch", "pull", "push", "status", "diff", "resolve",
+            "new", "mv", "rm", "attach", "comment", "log", "open", "search",
+            "spaces", "whoami", "config", "doctor", "export", "completion"
+          ]
+        },
+        "ok": {
+          "type": "boolean",
+          "description": "True for exit codes 0 and 10; false for every error."
+        },
+        "exit_code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "The process exit status. See docs/troubleshooting.md."
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "result": {
+      "type": ["object", "null"],
+      "description": "The command's payload, described by <command>.schema.json. Null when the command failed."
+    },
+    "errors": {
+      "type": "array",
+      "description": "Empty on success. At most one entry today: confed stops at the first fatal error.",
+      "items": { "$ref": "#/$defs/error" }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "Non-fatal notes, also printed to stderr as `warning: …`.",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "error": {
+      "type": "object",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Stable machine-readable name of the exit code.",
+          "enum": [
+            "OK", "ERROR", "USAGE", "AUTH", "CONFLICT", "NETWORK",
+            "NOT_FOUND", "STATE", "PARTIAL", "UNSUPPORTED", "DIFFERENCES"
+          ]
+        },
+        "message": { "type": "string" },
+        "hint": {
+          "type": "string",
+          "description": "The actionable next step, when confed knows one. Absent otherwise."
+        }
+      }
+    }
+  }
+}

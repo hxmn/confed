@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/push.schema.json",
+  "title": "confed push result",
+  "description": "The `result` of `confed push --json`. With --dry-run nothing is uploaded and the lists describe the plan. `push --interactive` is the one variant with a different shape: cancelling at the prompt returns {\"cancelled\": true}, and an empty interactive plan returns only the three page lists.",
+  "anyOf": [
+    { "$ref": "#/$defs/outcome" },
+    { "$ref": "#/$defs/cancelled" },
+    { "$ref": "#/$defs/empty_interactive_plan" }
+  ],
+  "$defs": {
+    "outcome": {
+      "type": "object",
+      "required": ["pushed", "created", "deleted", "attachments_uploaded", "comments_added", "skipped", "failed", "dry_run"],
+      "properties": {
+        "pushed": {
+          "type": "array",
+          "description": "Existing pages updated on the server.",
+          "items": { "$ref": "#/$defs/page_change" }
+        },
+        "created": {
+          "type": "array",
+          "description": "Pages that had no `confed:` block and were created on the server.",
+          "items": { "$ref": "#/$defs/page_change" }
+        },
+        "deleted": {
+          "type": "array",
+          "description": "Pages deleted on the server. Only ever non-empty with --allow-delete.",
+          "items": { "$ref": "#/$defs/page_change" }
+        },
+        "attachments_uploaded": { "type": "array", "items": { "type": "string" } },
+        "comments_added": {
+          "type": "array",
+          "description": "Ids of comments posted from `confed:new` markers in comment sidecars.",
+          "items": { "type": "string" }
+        },
+        "skipped": {
+          "type": "array",
+          "description": "Pages push refused: unresolved conflicts, tampered frontmatter, a stale base, or a local deletion without --allow-delete.",
+          "items": { "$ref": "#/$defs/blocked_page" }
+        },
+        "failed": {
+          "type": "array",
+          "description": "Pages the server rejected. Non-empty means exit 8.",
+          "items": {
+            "type": "object",
+            "required": ["page_id", "title", "error"],
+            "properties": {
+              "page_id": { "type": "string" },
+              "title": { "type": "string" },
+              "error": { "type": "string" }
+            }
+          }
+        },
+        "dry_run": { "type": "boolean" }
+      }
+    },
+    "cancelled": {
+      "type": "object",
+      "required": ["cancelled"],
+      "properties": { "cancelled": { "type": "boolean" } }
+    },
+    "empty_interactive_plan": {
+      "type": "object",
+      "required": ["pushed", "created", "deleted"],
+      "additionalProperties": false,
+      "properties": {
+        "pushed": { "type": "array" },
+        "created": { "type": "array" },
+        "deleted": { "type": "array" }
+      }
+    },
+    "page_change": {
+      "type": "object",
+      "required": ["page_id", "path", "title", "from_version", "to_version"],
+      "properties": {
+        "page_id": { "type": "string", "description": "Empty string for a page created by this very run's dry run." },
+        "path": { "type": "string" },
+        "title": { "type": "string" },
+        "from_version": { "type": ["integer", "null"] },
+        "to_version": { "type": ["integer", "null"] },
+        "ops": {
+          "type": "array",
+          "description": "Which aspects of the page change.",
+          "items": { "type": "string", "enum": ["body", "title", "labels", "parent", "delete"] }
+        }
+      }
+    },
+    "blocked_page": {
+      "type": "object",
+      "required": ["page_id", "path", "reason"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "path": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

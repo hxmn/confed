@@ -39,7 +39,10 @@ CREATE TABLE pages (
   sync_state    TEXT NOT NULL DEFAULT 'clean',
   synced_at     TEXT NOT NULL
 );
-CREATE UNIQUE INDEX pages_local_path ON pages(local_path);
+-- Deliberately not UNIQUE: while a pull is rewriting a set of pages, two of
+-- them can transiently claim the same path (two pages swapping titles is the
+-- clearest case). Uniqueness is enforced by the filesystem, not by this index.
+CREATE INDEX pages_local_path ON pages(local_path);
 
 CREATE TABLE remote_pages (
   page_id      TEXT PRIMARY KEY,

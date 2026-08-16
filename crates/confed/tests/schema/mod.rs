@@ -4,7 +4,7 @@
 //! Pulling in a full JSON Schema implementation for this would add a dependency
 //! tree larger than the thing being tested, so the subset the schemas actually
 //! use is implemented here with `serde_json`: `$ref` to `#/$defs/…`, `type`,
-//! `required`, `properties`, `items`, `enum`, `const`, `minimum` and
+//! `required`, `properties`, `items`, `enum`, `const`, `minimum`, `anyOf` and
 //! `additionalProperties: false`.
 //!
 //! Unknown *instance* fields are allowed unless a schema says otherwise: adding
@@ -62,12 +62,23 @@ pub fn validate(root: &Value, schema: &Value, instance: &Value, path: &str) -> V
         return validate(root, target, instance, path);
     }
 
+    // A command whose `result` has more than one shape (`push --interactive`,
+    // `log --local`) lists them under `anyOf`; one match is enough.
+    for keyword in ["anyOf", "oneOf"] {
+        if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+            let matched = branches
+                .iter()
+                .any(|branch| validate(root, branch, instance, path).is_empty());
+            if !matched {
+                errors.push(format!("{path}: matched none of the {keyword} branches"));
+            }
+        }
+    }
+
     if let Some(expected) = schema.get("type") {
         if !type_matches(expected, instance) {
-            return vec![format!(
-                "{path}: expected type {expected}, found {}",
-                type_name(instance)
-            )];
+            errors.push(format!("{path}: expected type {expected}, found {}", type_name(instance)));
+            return errors;
         }
     }
 
@@ -81,10 +92,16 @@ pub fn validate(root: &Value, schema: &Value, instance: &Value, path: &str) -> V
             errors.push(format!("{path}: expected the constant {expected}, found {instance}"));
         }
     }
-    if let (Some(minimum), Some(actual)) = (schema.get("minimum").and_then(Value::as_f64), instance.as_f64())
-    {
-        if actual < minimum {
-            errors.push(format!("{path}: {actual} is below the minimum {minimum}"));
+    if let Some(actual) = instance.as_f64() {
+        if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
+            if actual < minimum {
+                errors.push(format!("{path}: {actual} is below the minimum {minimum}"));
+            }
+        }
+        if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64) {
+            if actual > maximum {
+                errors.push(format!("{path}: {actual} is above the maximum {maximum}"));
+            }
         }
     }
 
@@ -167,7 +184,6 @@ fn type_name(instance: &Value) -> &'static str {
     }
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;

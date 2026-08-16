@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/whoami.schema.json",
+  "title": "confed whoami result",
+  "description": "The `result` of `confed whoami --json`: who the stored credentials authenticate as, and what this server can do.",
+  "type": "object",
+  "required": ["user", "base_url", "flavor", "capabilities"],
+  "properties": {
+    "user": {
+      "type": "object",
+      "required": ["display_name"],
+      "properties": {
+        "account_id": { "type": ["string", "null"], "description": "Cloud only." },
+        "username": { "type": ["string", "null"], "description": "Data Center only." },
+        "display_name": { "type": "string" },
+        "email": { "type": ["string", "null"] }
+      }
+    },
+    "base_url": { "type": "string" },
+    "flavor": { "type": "string", "enum": ["cloud", "datacenter"] },
+    "capabilities": {
+      "type": "object",
+      "required": ["inline_comment_create", "comment_resolve", "adf", "max_request_concurrency"],
+      "properties": {
+        "inline_comment_create": {
+          "type": "boolean",
+          "description": "False on Data Center, which has no inline comment API. Attempting it exits 9."
+        },
+        "comment_resolve": { "type": "boolean", "description": "False on Data Center." },
+        "adf": { "type": "boolean", "description": "Whether the server speaks Atlassian Document Format." },
+        "max_request_concurrency": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

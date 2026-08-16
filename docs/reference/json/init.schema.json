@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/init.schema.json",
+  "title": "confed init result",
+  "description": "The `result` of `confed init --json`. Nothing is written until the credentials have been verified against the server, so a failed init leaves the directory untouched.",
+  "type": "object",
+  "required": ["base_url", "flavor", "user", "space", "credential_store", "created", "gitignore_added"],
+  "properties": {
+    "base_url": { "type": "string" },
+    "flavor": { "type": "string", "enum": ["cloud", "datacenter"] },
+    "user": {
+      "type": "object",
+      "required": ["display_name"],
+      "properties": {
+        "account_id": { "type": ["string", "null"] },
+        "display_name": { "type": "string" },
+        "email": { "type": ["string", "null"] }
+      }
+    },
+    "space": {
+      "type": "object",
+      "required": ["key", "name"],
+      "properties": {
+        "key": { "type": "string" },
+        "id": { "type": ["string", "null"], "description": "Numeric space id, when the server exposes one." },
+        "name": { "type": "string" }
+      }
+    },
+    "credential_store": {
+      "type": "string",
+      "description": "Where the token ended up. `sqlite` means .session.db (mode 0600) because no OS keyring was available.",
+      "enum": ["keyring", "sqlite"]
+    },
+    "created": {
+      "type": "array",
+      "description": "Files init created in this directory.",
+      "items": { "type": "string" }
+    },
+    "gitignore_added": {
+      "type": "array",
+      "description": "Lines appended to .gitignore. Empty when they were already there.",
+      "items": { "type": "string" }
+    }
+  }
+}

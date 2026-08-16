@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/doctor.schema.json",
+  "title": "confed doctor result",
+  "description": "The `result` of `confed doctor --json`. Any failed check makes the command exit 1; warnings do not.",
+  "type": "object",
+  "required": ["checks", "failed", "warnings", "state_db"],
+  "properties": {
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "detail", "fix_applied"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Check identity, e.g. `workspace`, `state database`, `gitignore`, `credentials`, `credential store`, `keyring`, `session file permissions`, `frontmatter`, `page files`, `last fetch`, `agent docs`, `converter`, `server`, `capabilities`."
+          },
+          "status": { "type": "string", "enum": ["pass", "warn", "fail"] },
+          "detail": { "type": "string" },
+          "fix_applied": {
+            "type": "boolean",
+            "description": "True when --fix repaired this check during the run."
+          }
+        }
+      }
+    },
+    "failed": { "type": "integer", "minimum": 0 },
+    "warnings": { "type": "integer", "minimum": 0 },
+    "state_db": { "type": "string", "description": "Filename of the state database." }
+  }
+}

@@ -193,6 +193,21 @@ impl MockClient {
         self.state.lock().expect("mock poisoned").pages.get(id).map(|p| p.summary.title.clone())
     }
 
+    /// Rename a page server-side without going through the API.
+    pub fn rename_page(&self, id: &str, title: &str) -> u32 {
+        let mut state = self.state.lock().expect("mock poisoned");
+        let page = state.pages.get_mut(id).expect("page seeded");
+        page.summary.version += 1;
+        page.summary.title = title.to_string();
+        page.history.push(VersionInfo {
+            number: page.summary.version,
+            author: Some("Alice Ng".into()),
+            when: Some("2026-08-14T12:00:00Z".into()),
+            message: Some("renamed".into()),
+        });
+        page.summary.version
+    }
+
     /// Delete a page server-side without going through the API, to simulate
     /// somebody else removing it.
     pub fn delete_page_directly(&self, id: &str) {

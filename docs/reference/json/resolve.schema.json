@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/resolve.schema.json",
+  "title": "confed resolve result",
+  "description": "The `result` of `confed resolve --json`. With --list it reports the outstanding conflicts instead of clearing any.",
+  "anyOf": [
+    {
+      "type": "object",
+      "required": ["resolved"],
+      "properties": {
+        "resolved": {
+          "type": "array",
+          "description": "Pages whose conflicted state was cleared.",
+          "items": {
+            "type": "object",
+            "required": ["page_id", "path"],
+            "properties": { "page_id": { "type": "string" }, "path": { "type": "string" } }
+          }
+        },
+        "remaining": {
+          "type": "array",
+          "description": "Pages that still contain conflict markers. Non-empty means exit 4.",
+          "items": { "type": "object" }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["conflicted"],
+      "properties": {
+        "conflicted": { "type": "array", "items": { "type": "object" } }
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/clone.schema.json",
+  "title": "confed clone result",
+  "description": "The `result` of `confed clone --json`: the init result and the first pull's outcome, side by side.",
+  "type": "object",
+  "required": ["init", "pull"],
+  "properties": {
+    "init": { "description": "As described by init.schema.json.", "type": "object" },
+    "pull": { "description": "As described by pull.schema.json.", "type": "object" }
+  }
+}

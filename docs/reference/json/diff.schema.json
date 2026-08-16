@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/diff.schema.json",
+  "title": "confed diff result",
+  "description": "The `result` of `confed diff --json`. Pages with no textual and no frontmatter change are omitted entirely.",
+  "type": "object",
+  "required": ["pages"],
+  "properties": {
+    "pages": { "type": "array", "items": { "$ref": "#/$defs/page_diff" } }
+  },
+  "$defs": {
+    "page_diff": {
+      "type": "object",
+      "required": ["page_id", "path", "title", "change", "additions", "deletions"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "path": { "type": "string" },
+        "title": { "type": "string" },
+        "change": {
+          "type": "string",
+          "description": "`modified` compares base with the working file; `differs_from_remote` is what --remote compares.",
+          "enum": ["modified", "differs_from_remote"]
+        },
+        "additions": { "type": "integer", "minimum": 0 },
+        "deletions": { "type": "integer", "minimum": 0 },
+        "hunks": {
+          "type": "array",
+          "description": "Absent with --stat and --name-only.",
+          "items": {
+            "type": "object",
+            "required": ["header", "lines"],
+            "properties": {
+              "header": { "type": "string", "description": "Unified-diff hunk header." },
+              "lines": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["tag", "text"],
+                  "properties": {
+                    "tag": { "type": "string", "enum": ["+", "-", " "] },
+                    "text": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "frontmatter_changes": {
+          "type": "object",
+          "description": "Present only when a writable frontmatter field changed.",
+          "properties": {
+            "title": {
+              "type": "object",
+              "properties": { "from": { "type": "string" }, "to": { "type": "string" } }
+            },
+            "parent_id": {
+              "type": "object",
+              "properties": {
+                "from": { "type": ["string", "null"] },
+                "to": { "type": ["string", "null"] }
+              }
+            },
+            "labels": {
+              "type": "object",
+              "properties": {
+                "added": { "type": "array", "items": { "type": "string" } },
+                "removed": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

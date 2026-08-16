@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/search.schema.json",
+  "title": "confed search result",
+  "description": "The `result` of `confed search --json`. Plain words are wrapped into a CQL text query scoped to the bound space; anything that already looks like CQL is passed through untouched.",
+  "type": "object",
+  "required": ["cql", "results"],
+  "properties": {
+    "cql": { "type": "string", "description": "The query actually sent to the server." },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page_id", "title", "url"],
+        "properties": {
+          "page_id": { "type": "string" },
+          "title": { "type": "string" },
+          "space": { "type": ["string", "null"] },
+          "url": { "type": "string", "description": "Absolute browser URL." },
+          "local_path": {
+            "type": ["string", "null"],
+            "description": "Workspace-relative path when the page has been pulled, null otherwise."
+          },
+          "excerpt": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}
