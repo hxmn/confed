@@ -136,11 +136,8 @@ fn editing_a_random_subset_leaves_the_rest_untouched() {
             continue;
         }
         for _ in 0..16 {
-            let chosen: Vec<usize> = candidates
-                .iter()
-                .copied()
-                .filter(|_| next() % 2 == 0)
-                .collect();
+            let chosen: Vec<usize> =
+                candidates.iter().copied().filter(|_| next() % 2 == 0).collect();
             if chosen.is_empty() {
                 continue;
             }
@@ -272,7 +269,13 @@ fn inserting_a_block_does_not_disturb_its_neighbours() {
             )
             .unwrap_or_else(|e| panic!("{} insert at {at}: {e}", f.name));
             assert!(out.contains("ZZQINSERT"), "{}: insertion missing", f.name);
-            assert_untouched_blocks_are_byte_identical(&f.name, &f.storage, &c.block_map, &[], &out);
+            assert_untouched_blocks_are_byte_identical(
+                &f.name,
+                &f.storage,
+                &c.block_map,
+                &[],
+                &out,
+            );
         }
     }
 }
@@ -311,12 +314,7 @@ fn a_stale_block_map_is_reported_rather_than_guessed_at() {
 fn a_corrupted_preserved_fence_fails_the_push() {
     for f in corpus::load() {
         let c = storage_to_markdown(&f.storage, &corpus::options()).unwrap();
-        let Some(i) = c
-            .block_map
-            .blocks
-            .iter()
-            .position(|b| b.kind == BlockKind::Preserved)
-        else {
+        let Some(i) = c.block_map.blocks.iter().position(|b| b.kind == BlockKind::Preserved) else {
             continue;
         };
         // Chop the closing tag off the preserved storage.

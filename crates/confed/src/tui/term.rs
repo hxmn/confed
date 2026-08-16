@@ -6,7 +6,6 @@
 //! leaves a shell the user has to `reset`.
 
 use confed_core::error::{ConfedError, Result};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -28,7 +27,9 @@ impl TerminalGuard {
         install_panic_hook(restore_terminal);
 
         enable_raw_mode().map_err(|e| ConfedError::io("switching the terminal to raw mode", e))?;
-        execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)
+        // The mouse is deliberately not captured: the terminal's own selection
+        // and copy keep working, which matters more here than click handling.
+        execute!(stdout(), EnterAlternateScreen)
             .map_err(|e| ConfedError::io("entering the alternate screen", e))?;
 
         let terminal = Terminal::new(CrosstermBackend::new(stdout()))
@@ -55,7 +56,6 @@ impl Drop for TerminalGuard {
 fn restore_terminal() {
     // Raw mode first — if anything below fails, the shell is at least usable.
     let _ = disable_raw_mode();
-    let _ = stdout().execute(DisableMouseCapture);
     let _ = stdout().execute(LeaveAlternateScreen);
     let _ = stdout().execute(crossterm::cursor::Show);
 }

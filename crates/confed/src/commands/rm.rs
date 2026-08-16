@@ -64,13 +64,26 @@ pub async fn run(ctx: &mut Context, args: &RmArgs) -> Result<Output> {
     let mut output_json = json!({ "removed": removed });
 
     if args.push {
+        // Deleting on the server is not undoable from confed's side, so ask
+        // unless the user has already said yes.
+        if !ctx.global.yes && ctx.is_interactive() {
+            let question = format!(
+                "Delete {} on the server?",
+                crate::output::plural(removed.len(), "page", "pages")
+            );
+            if !crate::prompt::confirm(&question, false)? {
+                return Ok(Output::new(
+                    json!({ "removed": removed, "cancelled": true }),
+                    format!("{human}Cancelled: nothing was deleted on the server.\n"),
+                ));
+            }
+        }
         let client = ctx.build_client()?;
         let engine = ctx.engine(client)?;
         let ws = ctx.workspace_mut()?;
         let _lock = ws.lock()?;
-        let outcome = engine
-            .push(ws, &PushOptions { allow_delete: true, ..Default::default() })
-            .await?;
+        let outcome =
+            engine.push(ws, &PushOptions { allow_delete: true, ..Default::default() }).await?;
         let _ = writeln!(human, "Deleted {} page(s) on the server.", outcome.deleted.len());
         output_json["push"] = serde_json::to_value(&outcome)?;
     } else {

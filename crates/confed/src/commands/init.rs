@@ -116,10 +116,9 @@ pub async fn initialize(
 
     // Verify before storing anything: a bad token should not leave state behind.
     let user = client.whoami().await.map_err(|e| match e {
-        confed_api::ApiError::Auth(msg) => ConfedError::Auth(format!(
-            "could not authenticate against {}: {msg}",
-            input.base_url
-        )),
+        confed_api::ApiError::Auth(msg) => {
+            ConfedError::Auth(format!("could not authenticate against {}: {msg}", input.base_url))
+        }
         other => other.into(),
     })?;
 
@@ -166,7 +165,12 @@ pub async fn initialize(
         style.bold(&user.display_name),
         flavor
     );
-    let _ = writeln!(human, "Bound this directory to space {} ({})", style.bold(&space.id.key), space.name);
+    let _ = writeln!(
+        human,
+        "Bound this directory to space {} ({})",
+        style.bold(&space.id.key),
+        space.name
+    );
     let _ = writeln!(
         human,
         "Credentials stored in {}",

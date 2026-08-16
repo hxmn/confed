@@ -37,7 +37,9 @@ impl WorkspaceLock {
                 }
                 Err(ConfedError::state_with_hint(
                     match holder {
-                        Some(pid) => format!("another confed process (pid {pid}) is using this directory"),
+                        Some(pid) => {
+                            format!("another confed process (pid {pid}) is using this directory")
+                        }
                         None => "another confed process is using this directory".to_string(),
                     },
                     format!("wait for it to finish, or remove {} if it is stale", path.display()),

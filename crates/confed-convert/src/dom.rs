@@ -79,10 +79,7 @@ impl Element {
     }
 
     pub fn attr(&self, name: &str) -> Option<&str> {
-        self.attrs
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.as_str())
+        self.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
     }
 
     /// Attribute lookup ignoring the namespace prefix (`ac:name` matches `name`).
@@ -160,9 +157,8 @@ pub fn parse_fragment(src: &str) -> ConvertResult<Vec<Node>> {
 
     loop {
         let start = reader.buffer_position() as usize;
-        let event = reader
-            .read_event()
-            .map_err(|e| ConvertError::Parse(format!("byte {start}: {e}")))?;
+        let event =
+            reader.read_event().map_err(|e| ConvertError::Parse(format!("byte {start}: {e}")))?;
         let end = reader.buffer_position() as usize;
 
         match event {
@@ -418,10 +414,7 @@ fn expand_entity(name: &str) -> Option<String> {
         };
         return char::from_u32(code).map(|c| c.to_string());
     }
-    NAMED_ENTITIES
-        .iter()
-        .find(|(k, _)| *k == name)
-        .map(|(_, v)| (*v).to_string())
+    NAMED_ENTITIES.iter().find(|(k, _)| *k == name).map(|(_, v)| (*v).to_string())
 }
 
 /// Escape text for insertion into storage-format character data.
@@ -480,9 +473,9 @@ pub fn check_well_formed(fragment: &str) -> Result<(), String> {
                 }
             }
             Ok(Event::End(_)) => {
-                depth = depth.checked_sub(1).ok_or_else(|| {
-                    format!("unexpected closing tag at byte {pos}")
-                })?;
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| format!("unexpected closing tag at byte {pos}"))?;
             }
             Ok(_) => {}
             Err(e) => return Err(format!("byte {pos}: {e}")),

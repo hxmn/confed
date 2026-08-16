@@ -27,7 +27,7 @@
           "enum": [
             "init", "clone", "fetch", "pull", "push", "status", "diff", "resolve",
             "new", "mv", "rm", "attach", "comment", "log", "open", "search",
-            "spaces", "whoami", "config", "doctor", "export", "completion"
+            "spaces", "whoami", "config", "doctor", "export", "completion", "tui"
           ]
         },
         "ok": {

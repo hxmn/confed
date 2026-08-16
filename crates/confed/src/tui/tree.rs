@@ -64,7 +64,8 @@ impl Tree {
 
         for page in &scan.pages {
             let record = page.page_id.as_deref().and_then(|id| base_by_id.get(id).copied());
-            let remote_record = page.page_id.as_deref().and_then(|id| remote_by_id.get(id).copied());
+            let remote_record =
+                page.page_id.as_deref().and_then(|id| remote_by_id.get(id).copied());
 
             let parent = record
                 .and_then(|r| r.parent_id.clone())
@@ -115,11 +116,7 @@ impl Tree {
     /// Confluence order: explicit position first, then title, then path.
     fn sort(&mut self) {
         fn key(node: &Node) -> (i64, String, String) {
-            (
-                node.position.unwrap_or(i64::MAX),
-                node.title.to_lowercase(),
-                node.path.to_lowercase(),
-            )
+            (node.position.unwrap_or(i64::MAX), node.title.to_lowercase(), node.path.to_lowercase())
         }
         let keys: Vec<(i64, String, String)> = self.nodes.iter().map(key).collect();
         let by_key = |a: &usize, b: &usize| keys[*a].cmp(&keys[*b]);
@@ -130,10 +127,6 @@ impl Tree {
             children.sort_by(by_key);
             self.nodes[index].children = children;
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
     }
 
     /// The visible rows, honoring collapse state and the search filter.
@@ -194,10 +187,6 @@ impl Tree {
                 node.expanded = false;
             }
         }
-    }
-
-    pub fn index_of_path(&self, path: &str) -> Option<usize> {
-        self.nodes.iter().position(|n| n.path == path)
     }
 }
 
@@ -289,6 +278,10 @@ mod tests {
     use super::fixtures::*;
     use super::*;
 
+    fn node_at(tree: &Tree, path: &str) -> usize {
+        tree.nodes.iter().position(|n| n.path == path).expect("node")
+    }
+
     fn labels(tree: &Tree, filter: &str) -> Vec<String> {
         tree.rows(filter)
             .iter()
@@ -300,10 +293,7 @@ mod tests {
     fn the_hierarchy_follows_parent_ids_from_the_state_db() {
         let (scan, records) = sample();
         let tree = Tree::build(&scan, &records, &[]);
-        assert_eq!(
-            labels(&tree, ""),
-            ["Handbook", "  Onboarding", "    Week One", "Runbook"]
-        );
+        assert_eq!(labels(&tree, ""), ["Handbook", "  Onboarding", "    Week One", "Runbook"]);
     }
 
     #[test]
@@ -329,7 +319,7 @@ mod tests {
     fn collapsing_hides_descendants() {
         let (scan, records) = sample();
         let mut tree = Tree::build(&scan, &records, &[]);
-        let handbook = tree.index_of_path("Handbook.md").unwrap();
+        let handbook = node_at(&tree, "Handbook.md");
         tree.set_expanded(handbook, false);
         assert_eq!(labels(&tree, ""), ["Handbook", "Runbook"]);
         assert!(tree.has_children(handbook));
@@ -367,7 +357,7 @@ mod tests {
     fn collapse_state_survives_a_refresh() {
         let (scan, records) = sample();
         let mut old = Tree::build(&scan, &records, &[]);
-        let handbook = old.index_of_path("Handbook.md").unwrap();
+        let handbook = node_at(&old, "Handbook.md");
         old.set_expanded(handbook, false);
 
         let mut fresh = Tree::build(&scan, &records, &[]);

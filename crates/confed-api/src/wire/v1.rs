@@ -359,10 +359,7 @@ impl Content {
             .is_some_and(|s| s.eq_ignore_ascii_case("resolved"));
         let (kind, anchor) = match ext.inline_properties {
             Some(props) => {
-                let text = props
-                    .original_selection
-                    .or(props.original_text)
-                    .unwrap_or_default();
+                let text = props.original_selection.or(props.original_text).unwrap_or_default();
                 let orphaned = text.is_empty()
                     || ext
                         .resolution
@@ -423,7 +420,10 @@ pub struct SearchResult {
 
 impl SearchResult {
     /// `resolve_url` turns the server-relative `url` into something a browser can open.
-    pub fn into_domain(self, resolve_url: impl Fn(&str) -> String) -> Option<crate::types::SearchResult> {
+    pub fn into_domain(
+        self,
+        resolve_url: impl Fn(&str) -> String,
+    ) -> Option<crate::types::SearchResult> {
         let content = self.content?;
         let space_key = content.space_key().or_else(|| {
             self.result_global_container

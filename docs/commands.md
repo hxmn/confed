@@ -1,0 +1,547 @@
+# Command reference
+
+Every flag listed here is one the binary actually accepts today; every example was run
+against the mock server the end-to-end tests use. Run `confed <command> --help` for the
+same list from the binary itself.
+
+- [Global flags](#global-flags)
+- [Output and JSON](#output-and-json)
+- [Exit codes](#exit-codes)
+- Setting up: [`init`](#confed-init), [`clone`](#confed-clone)
+- Syncing: [`fetch`](#confed-fetch), [`pull`](#confed-pull), [`push`](#confed-push)
+- Inspecting: [`status`](#confed-status), [`diff`](#confed-diff), [`log`](#confed-log)
+- Resolving: [`resolve`](#confed-resolve)
+- Authoring: [`new`](#confed-new), [`mv`](#confed-mv), [`rm`](#confed-rm),
+  [`attach`](#confed-attach), [`comment`](#confed-comment)
+- Finding things: [`search`](#confed-search), [`spaces`](#confed-spaces),
+  [`open`](#confed-open)
+- Maintenance: [`whoami`](#confed-whoami), [`config`](#confed-config),
+  [`doctor`](#confed-doctor), [`export`](#confed-export),
+  [`completion`](#confed-completion)
+- Interactive: [`tui`](#confed-tui)
+
+## Global flags
+
+These work before or after the subcommand: `confed --json status` and
+`confed status --json` are the same command.
+
+| Flag | Environment | Meaning |
+|---|---|---|
+| `--json` | `CONFED_JSON` | Machine-readable output on stdout. Implies `--non-interactive`. |
+| `--non-interactive` | `CONFED_NON_INTERACTIVE` | Never prompt; a missing required value exits 2. |
+| `--base-url <URL>` | `CONFED_BASE_URL` | Confluence base URL (Cloud includes `/wiki`; Data Center is the context root). |
+| `--token <TOKEN>` | `CONFED_TOKEN` | API token (Cloud) or Personal Access Token (Data Center). |
+| `--user <NAME>` | `CONFED_USERNAME` | Cloud account e-mail, or a Data Center basic-auth username. |
+| `--space <KEY>` | `CONFED_SPACE` | Space key bound to this directory. |
+| `--flavor <cloud\|dc\|datacenter>` | `CONFED_FLAVOR` | Skip flavor auto-detection. |
+| `--concurrency <N>` | `CONFED_CONCURRENCY` | Maximum concurrent API requests. 0 or unset uses the client's default. |
+| `-C <DIR>` | — | Run as if confed had been started in `<DIR>`. |
+| `-y`, `--yes` | — | Answer yes to confirmations. *Accepted, but nothing prompts for confirmation today; see [known gaps](#known-gaps).* |
+| `-v`, `-vv`, `-vvv` | — | More detail on stderr. |
+| `-q`, `--quiet` | — | Errors only. Conflicts with `-v`. |
+| `--log <FILTER>` | `CONFED_LOG` | Tracing filter, e.g. `confed_api=debug`. Overrides `-v`/`-q`. |
+
+Resolution order for every parameter is flag → environment → stored config → prompt; see
+[auth.md](auth.md#precedence).
+
+Pages are addressed by workspace-relative path *or* by page id almost everywhere, and
+where a command takes several it also takes globs: `Handbook/**` matches a subtree, `*.md`
+matches the top level, and a plain prefix such as `Handbook` selects everything under it.
+
+## Output and JSON
+
+Human output goes to stdout; log lines, warnings and errors go to stderr. Colour is
+enabled only when stdout is a terminal and `NO_COLOR` is unset.
+
+With `--json`, stdout carries exactly one envelope, success or failure:
+
+```json
+{
+  "confed": {
+    "schema": 1,
+    "version": "0.1.0",
+    "command": "status",
+    "ok": true,
+    "exit_code": 0,
+    "duration_ms": 12
+  },
+  "result": { "space": "DOCS", "clean": true, "pages": [] },
+  "errors": [],
+  "warnings": []
+}
+```
+
+`confed.schema` is bumped only for a breaking change. Adding a field to a `result` is
+additive and does not bump it, so parse defensively and ignore what you do not know.
+`errors[]` entries carry `code` (the exit code's name), `message`, and often `hint`.
+`ok` is true for exit codes 0 and 10.
+
+The schemas live in [`reference/json/`](reference/json/) — `envelope.schema.json` plus one
+per command — and the end-to-end tests validate real output against them.
+
+## Exit codes
+
+| Code | Name | Meaning |
+|---|---|---|
+| 0 | `OK` | Success, including "nothing to do". |
+| 1 | `ERROR` | Unexpected or internal failure: I/O, SQLite, a conversion bug. Also `doctor` with a failing check. |
+| 2 | `USAGE` | Bad arguments, or a required value that could not be resolved without prompting. |
+| 3 | `AUTH` | The server rejected the credentials (401/403). |
+| 4 | `CONFLICT` | A version conflict, or an unresolved merge conflict. |
+| 5 | `NETWORK` | Connectivity, TLS, timeout, or rate limiting that survived the retries. |
+| 6 | `NOT_FOUND` | No such page, space, attachment, or comment. |
+| 7 | `STATE` | A local precondition failed: not a workspace, local edits would be clobbered, tool-managed frontmatter was edited, the lock is held, `.session.db` is too permissive. |
+| 8 | `PARTIAL` | Some operations succeeded and some failed; the details are in `result`. |
+| 9 | `UNSUPPORTED` | The operation does not exist on this Confluence flavor (inline comment creation and comment resolution on Data Center). |
+| 10 | `DIFFERENCES` | Differences exist. Only ever produced by `--exit-code`, and deliberately outside the error range. |
+
+Two behaviours are worth knowing because they are not obvious from the table:
+
+- **`status` and `pull` exit 4 whenever a page is conflicted**, with or without
+  `--exit-code`. A conflict is not a difference to be reported, it is a state that blocks
+  pushing.
+- **`resolve` exits 7, not 4, when markers remain.** The file is a local state problem at
+  that point: you were asked to edit it and it still has markers in it.
+
+[troubleshooting.md](troubleshooting.md) has one section per code with symptoms and fixes.
+
+---
+
+## confed init
+
+Authenticate, bind the directory to a space, and create local state. Verifies the
+credential with a `whoami` call before writing anything, so a failure leaves no
+half-built workspace behind.
+
+| Flag | Meaning |
+|---|---|
+| `--credential-store <keyring\|sqlite>` | Force where the token is stored instead of preferring the keyring. |
+| `--no-agent-docs` | Do not generate `CLAUDE.md` and `AGENTS.md`. |
+| `--force` | Re-bind a directory that is already bound to a different space. |
+
+Creates `.state.db` and `.session.db`, extends `.gitignore` with `.state.db`,
+`.session.db` and `.confed.lock`, and writes the two agent contract files.
+
+```bash
+# Human, Cloud: prompts for the token with hidden input.
+confed init --base-url https://acme.atlassian.net/wiki --user you@example.com --space DOCS
+
+# Agent or CI: nothing prompts, everything is checked from the envelope.
+CONFED_TOKEN=$TOKEN confed init --json \
+  --base-url https://wiki.corp.example.com/confluence --space DOCS \
+  --credential-store sqlite
+
+# Point an existing workspace at a different space, deliberately.
+confed init --space RUNBOOKS --force
+```
+
+## confed clone
+
+`init` plus a first `pull`, into a new directory.
+
+```
+confed clone <SOURCE> [DIRECTORY] [init flags]
+```
+
+`SOURCE` is a space key or a space URL. A URL supplies both the base URL and the key, and
+both Cloud (`/wiki/spaces/DOCS/...`) and Data Center (`/display/DOCS/...`, with or without
+a context path) are understood. `DIRECTORY` defaults to the space key and must not already
+exist with content in it.
+
+```bash
+confed clone https://acme.atlassian.net/wiki/spaces/DOCS --user you@example.com
+confed clone DOCS ./docs --base-url https://wiki.corp.example.com/confluence
+confed clone DOCS --json | jq '.result.pull.created | length'
+```
+
+## confed fetch
+
+Download remote state into `.state.db`. Working files are never touched, so this is the
+safe way to find out what changed. Interrupted fetches resume rather than restart.
+
+| Flag | Meaning |
+|---|---|
+| `--page <PAGE>` | Restrict to these pages (path or id). Repeatable. |
+| `--since <RFC3339>` | Only pages modified at or after this timestamp. |
+
+Exits 8 if some pages failed after retries; the failures are listed in `result.failed` and
+repeated as warnings.
+
+```bash
+confed fetch
+confed fetch --since 2026-08-01T00:00:00Z --json
+confed fetch --json | jq '{fetched: .result.fetched, unchanged: .result.unchanged}'
+```
+
+## confed pull
+
+Fetch, then materialize pages, attachments and comment sidecars into files.
+
+| Flag | Meaning |
+|---|---|
+| *(positional)* | Paths or globs to pull. Default is the whole space. |
+| `--page <ID>` | Restrict to these page ids. Repeatable. |
+| `--label <LABEL>` | Only pages carrying this label (resolved on the server with CQL). |
+| `--cql <QUERY>` | Restrict with an arbitrary CQL query. |
+| `--no-fetch` | Use the state already in `.state.db`. |
+| `--force` | Overwrite local changes instead of stopping. |
+| `--no-merge` | Do not three-way merge diverged pages; stop instead. |
+| `--dry-run` | Report what would be written without writing it. |
+| `--no-attachments` | Skip downloading attachments. |
+| `--no-comments` | Skip writing comment sidecars. |
+
+Safety rule: `pull` decides the whole plan before writing anything. If any page in scope
+would lose local work, nothing is written at all and the command exits 7 listing what was
+blocked. Diverged pages are merged by default; a merge that leaves markers exits 4.
+
+```bash
+confed pull                                  # the whole space
+confed pull "Team Handbook/**"               # one subtree
+confed pull --cql 'label = "runbook"' --dry-run
+confed pull --json | jq '.result | {created: (.created|length), merged: (.merged|length), conflicted: (.conflicted|length)}'
+```
+
+## confed push
+
+Upload local changes: bodies, titles, labels, parents, new pages, deletions, attachments,
+and comment drafts.
+
+| Flag | Meaning |
+|---|---|
+| *(positional)* | Paths or globs to push. Default is everything with local changes. |
+| `--dry-run`, `--preview` | Show exactly what would be sent, without sending it. |
+| `--interactive` | Confirm each page before uploading. Requires a terminal; exits 2 without one. |
+| `-m`, `--message <TEXT>` | Version comment recorded on the server. |
+| `--allow-delete` | Actually delete pages on the server that were deleted locally. |
+| `--no-attachments` | Do not upload attachments. |
+| `--no-comments` | Do not post comment drafts. |
+
+`push` refuses, rather than forces, three situations, listing them under `result.skipped`:
+an unresolved conflict, hand-edited tool-managed frontmatter, and a base version older
+than the last fetched remote version. The first and third make the command exit 4; a
+local deletion without `--allow-delete` is merely skipped and the command still exits 0.
+A page the server rejects lands in `result.failed` and the command exits 8.
+
+```bash
+confed push --dry-run                                    # always look first
+confed push "Runbooks/**" -m "quarterly review"
+confed push --interactive                                # confirm page by page
+confed push --dry-run --json | jq -r '.result.pushed[] | "\(.path) v\(.from_version)->\(.to_version) [\(.ops|join(","))]"'
+```
+
+## confed status
+
+A git-style summary, computed from local state only.
+
+| Flag | Meaning |
+|---|---|
+| `--fetch` | Refresh remote state from the server first. |
+| `--short` | One line per changed page: a status letter and the path. |
+| `--exit-code` | Exit 10 when anything differs. |
+
+Status letters, in the spirit of `git status --short`: `M` modified, `B` behind, `V`
+diverged, `A` new locally, `R` new on the server, `D` deleted locally, `X` deleted on the
+server, `C` conflicted, `?` untracked.
+
+```bash
+confed status
+confed status --short
+confed status --fetch --json | jq -r '.result.pages[] | select(.state=="diverged") | .path'
+```
+
+## confed diff
+
+Compare snapshots. By default it is base against your working file — what `push` would
+change — and it needs no network at all.
+
+| Flag | Meaning |
+|---|---|
+| *(positional)* | Paths or globs to diff. |
+| `--remote` | Fetch, then compare local files against the remote state. |
+| `--storage` | Diff the Confluence storage XML that `push` would upload, not the Markdown. |
+| `--stat` | Summarize with per-page insertion and deletion counts. |
+| `--name-only` | List changed paths only. |
+| `--exit-code` | Exit 10 when there are differences. |
+| `--base` | Also show what the *server* changed since the same base, so both sides of a divergence are visible together. |
+
+```bash
+confed diff "Team Handbook/Onboarding.md"
+confed diff --remote --name-only --exit-code     # scriptable "has the server moved?"
+confed diff --json | jq -r '.result.pages[] | "\(.path) +\(.additions) -\(.deletions)"'
+```
+
+## confed resolve
+
+Finish a merge and clear the conflicted state.
+
+| Flag | Meaning |
+|---|---|
+| *(positional)* | Pages to mark resolved. Default is every conflicted page. |
+| `--ours` | Keep the local side of every conflict block and drop the markers. |
+| `--theirs` | Keep the remote side instead. |
+| `--list` | List unresolved conflicts and change nothing. |
+
+Without `--ours`/`--theirs`, confed checks that you removed the markers yourself. If any
+remain, nothing is cleared and the command exits 7 naming the line numbers.
+
+```bash
+confed resolve --list
+confed resolve "Team Handbook/Onboarding.md"
+confed resolve --theirs "Drafts/Scratch.md" --json | jq '.result.resolved'
+```
+
+## confed new
+
+Scaffold a page file with writable frontmatter and no `confed:` block, so the next `push`
+creates it on the server. The parent is inferred from the directory.
+
+| Flag | Meaning |
+|---|---|
+| `--title <TEXT>` | Page title. Defaults to the filename. |
+| `--label <LABEL>` | Label to apply. Repeatable. |
+| `--template <FILE>` | Start from this Markdown file. |
+| `--push` | Create it on the server immediately. |
+
+```bash
+confed new "Runbooks/Database Failover" --label runbook
+confed new "Notes/2026-08-16" --push --json | jq -r '.result.push.created[0].page_id'
+```
+
+## confed mv
+
+Rename, move, or reorder a page. The change is applied on the server by the next `push`
+unless `--push` is given.
+
+| Flag | Meaning |
+|---|---|
+| *(positional)* | `<SOURCE> [DESTINATION]` — source is a path or id. |
+| `--before <SIBLING>` | Place before this sibling. |
+| `--after <SIBLING>` | Place after this sibling. |
+| `--position <N>` | Absolute position among siblings. |
+| `--rename-title` | Also change the page title to match the new filename. |
+| `--push` | Apply on the server immediately. |
+
+```bash
+confed mv "Drafts/Plan.md" "Roadmap/2026 Plan.md" --rename-title
+confed mv "Roadmap/2026 Plan.md" --after "Roadmap/2025 Plan.md" --push
+```
+
+## confed rm
+
+Delete a page locally and record the deletion. The server is not touched until
+`confed push --allow-delete`, or immediately with `--push`.
+
+| Flag | Meaning |
+|---|---|
+| `--keep-local` | Record the deletion but keep the file on disk. |
+| `--push` | Delete on the server immediately. |
+
+```bash
+confed rm "Drafts/Obsolete.md"
+confed push --allow-delete
+confed rm 163842 --push --json
+```
+
+## confed attach
+
+Manage a page's attachments. Files are copied into the page's sidecar directory and
+uploaded by the next `push`.
+
+| Flag | Meaning |
+|---|---|
+| *(positional)* | `<PAGE> [FILES...]` |
+| `--list` | List the page's attachments. |
+| `--rm <FILENAME>` | Remove an attachment by filename. |
+| `--push` | Upload immediately. |
+
+```bash
+confed attach "Team Handbook/Onboarding.md" ./diagram.png
+confed attach "Team Handbook/Onboarding.md" --list --json | jq -r '.result.attachments[].file'
+confed attach 163842 --rm old-diagram.png --push
+```
+
+## confed comment
+
+Read and write page comments. The sidecar file `.<page>/comments.md` is the primary
+store; these subcommands are structured accessors over it, and `--push` syncs
+immediately.
+
+| Subcommand | Flags |
+|---|---|
+| `comment list <PAGE>` | `--unresolved`, `--inline` |
+| `comment add <PAGE>` | `-m`, `--body <TEXT>`, `--anchor <TEXT>` (Cloud only), `--push` |
+| `comment reply <COMMENT_ID>` | `-m`, `--body <TEXT>` (required), `--push` |
+| `comment resolve <COMMENT_ID>` | `--push` (Cloud only) |
+
+Creating an inline comment and resolving a comment do not exist in the Data Center API;
+both exit 9 there with a message saying so.
+
+```bash
+confed comment list "Team Handbook/Onboarding.md" --unresolved
+confed comment add 163842 -m "Reviewed for Q3." --push
+confed comment list 163842 --json | jq -r '.result.comments[] | "\(.author): \(.body_markdown)"'
+```
+
+## confed log
+
+Version history for one page.
+
+| Flag | Meaning |
+|---|---|
+| `--limit <N>` | How many versions to show. Default 20. |
+| `--local` | Show confed's own sync log for the page instead of the server's history. |
+
+The human output marks the version your local file is based on with `*`.
+
+```bash
+confed log "Team Handbook/Onboarding.md"
+confed log 163842 --limit 5 --json | jq -r '.result.versions[] | "v\(.number) \(.author)"'
+confed log 163842 --local --json | jq -r '.result.entries[] | "\(.ts) \(.op) \(.result)"'
+```
+
+## confed search
+
+Search the server. Plain words are wrapped into a CQL text query scoped to the bound
+space; anything containing a CQL operator is passed through untouched. Results that exist
+locally are annotated with their path.
+
+| Flag | Meaning |
+|---|---|
+| `--limit <N>` | Maximum results. Default 25. |
+| `--all-spaces` | Search every space, not just the bound one. |
+
+```bash
+confed search "database failover"
+confed search 'label = "runbook" and lastmodified > now("-7d")'
+confed search "vpn" --json | jq -r '.result.results[] | "\(.title)\t\(.local_path // .url)"'
+```
+
+## confed spaces
+
+List the spaces visible to your credentials. `--limit <N>` defaults to 50. Useful before
+`init` when you do not know the key.
+
+```bash
+confed spaces
+confed spaces --limit 200 --json | jq -r '.result.spaces[] | "\(.key)\t\(.name)"'
+```
+
+## confed open
+
+Open a page in the browser using the stored base URL. Omit the page to open the space.
+`--print` prints the URL instead of launching anything.
+
+```bash
+confed open "Team Handbook/Onboarding.md"
+confed open 163842 --print
+confed open --print --json | jq -r '.result.url'
+```
+
+## confed whoami
+
+Verify the credentials and report the user and the server's capabilities. The cheapest
+possible CI probe: exit 3 means the token is wrong or expired.
+
+```bash
+confed whoami
+confed whoami --json | jq '{user: .result.user.display_name, flavor: .result.flavor}'
+confed whoami --json | jq -e '.result.capabilities.inline_comment_create'  # 1 on Data Center
+```
+
+## confed config
+
+Inspect and change stored settings. Writable keys are `space`, `concurrency`, `editor`,
+`base_url` and `flavor`.
+
+| Flag | Meaning |
+|---|---|
+| `--list` | Show every resolved value and where it came from. Secrets show as `***`. |
+| `--get <KEY>` | Read one value. |
+| `--set <KEY> <VALUE>` | Write one value. |
+| `--unset <KEY>` | Remove one value. |
+
+```bash
+confed config --list
+confed config --set concurrency 4
+confed config --list --json | jq -r '.result.entries[] | "\(.key)=\(.value) (\(.source))"'
+```
+
+## confed doctor
+
+Check connectivity, credentials, and local state. Each check reports `pass`, `warn` or
+`fail` with a specific next step; any failure exits 1. `--fix` applies the safe repairs:
+`.gitignore` entries and missing agent docs.
+
+Checks cover the workspace root, `.state.db` integrity and schema version, `.gitignore`
+coverage, the stored credential and its backend, keyring availability, `.session.db`
+permissions, hand-edited frontmatter, unparseable page files, fetch age, the agent
+contract files, a converter round-trip self-test, and a live `whoami` against the server.
+
+```bash
+confed doctor
+confed doctor --fix
+confed doctor --json | jq -r '.result.checks[] | select(.status!="pass") | "\(.status)\t\(.name)\t\(.detail)"'
+```
+
+## confed export
+
+Write pages out in another format, from local state — no server access needed.
+
+| Flag | Meaning |
+|---|---|
+| *(positional)* | Paths or globs to export. |
+| `--format <html\|storage>` | Output format. Default `html`. |
+| `--out <DIR>` | Output directory. Default `export`. |
+
+```bash
+confed export "Runbooks/**" --format html --out /tmp/runbooks
+confed export --format storage --json | jq -r '.result.exported[].out'
+```
+
+## confed completion
+
+Print a shell completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish`. Needs
+neither a workspace nor credentials.
+
+```bash
+confed completion zsh > ~/.zfunc/_confed
+confed completion bash | sudo tee /etc/bash_completion.d/confed
+```
+
+## confed tui
+
+Browse the space, read diffs, resolve conflicts and sync, interactively. It takes no
+flags. Everything it does goes through the same sync engine and the same resolution helper
+the headless commands use, so anything the TUI can do a script can do without it.
+
+It needs a real terminal on both stdin and stdout and refuses to run otherwise — exit 2,
+with nothing drawn into the pipe. It also fails early with the usual "run `confed init`"
+error rather than opening on a blank screen. A workspace with no usable credentials still
+opens: browsing, diffing and resolving are entirely offline.
+
+```bash
+confed tui
+confed -C ~/docs/DOCS tui
+```
+
+## Known gaps
+
+Places where the accepted command line is ahead of the behaviour, or where
+[design 04](design/04-command-reference.md) describes something that has not shipped:
+
+- **`confed doctor --fix`** repairs `.gitignore` and the agent contract files. It cannot
+  repair `.session.db` permissions: it opens the session file itself, so a too-permissive
+  one makes `doctor` exit 7 before any fix runs. Use `chmod 600 .session.db`.
+- **`-y` / `--yes`** applies to `push --interactive` (approves every page) and to
+  `rm --push` (skips the "delete on the server?" confirmation). Nothing else prompts, so
+  it has no effect elsewhere.
+- **`push --force-version`** (design 04) does not exist. There is no way to push over a
+  newer remote version; pull and merge instead.
+- **`--json --stream`** NDJSON output (design 04) does not exist.
+- **`spaces --mine`**, **`open --space` / `--comment`**, **`comment add --editor`**,
+  **`export --format pdf`** and **`config --set default-labels`** are described in
+  design 04 but are not implemented.
+- **`confed --version`** prints only the binary version, not the JSON-schema and
+  state-schema versions.
+- **`errors[]` entries carry `code`, `message` and `hint` only** — the `page_id` and
+  `path` fields sketched in design 04 are not emitted.

@@ -38,12 +38,17 @@ pub enum View {
 }
 
 /// A long operation running on the tokio runtime.
+///
+/// The sync engine's futures are not `Send` — they borrow the SQLite connection
+/// across awaits — so a job runs on its own thread that drives the runtime
+/// through a handle, rather than as a spawned task. Cancellation is a `select!`
+/// against a oneshot: the workspace always comes back, cancelled or not.
 pub struct Job {
     pub label: &'static str,
     pub started: Instant,
     cancelled: bool,
     rx: Receiver<Finished>,
-    handle: tokio::task::JoinHandle<()>,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 struct Finished {
@@ -126,6 +131,7 @@ impl App {
         Ok(app)
     }
 
+    #[cfg(test)]
     pub fn workspace(&self) -> Option<&Workspace> {
         self.ws.as_ref()
     }
@@ -255,6 +261,8 @@ impl App {
             KeyCode::Enter | KeyCode::Char(' ') => self.toggle_expand(),
             KeyCode::Right | KeyCode::Char('l') => self.set_expanded(true),
             KeyCode::Left | KeyCode::Char('h') => self.set_expanded(false),
+            KeyCode::Char('E') => self.expand_all(true),
+            KeyCode::Char('C') => self.expand_all(false),
             KeyCode::Char('/') => {
                 self.mode = Mode::Filter;
                 self.filter.clear();
@@ -264,13 +272,18 @@ impl App {
                 self.refresh_content();
             }
             KeyCode::Char('r') => {
-                self.diff_side =
-                    if self.diff_side == DiffSide::Base { DiffSide::Remote } else { DiffSide::Base };
+                self.diff_side = if self.diff_side == DiffSide::Base {
+                    DiffSide::Remote
+                } else {
+                    DiffSide::Base
+                };
                 self.view = View::Diff;
                 self.refresh_content();
             }
             KeyCode::PageDown => self.scroll_content(self.page_height as i32),
             KeyCode::PageUp => self.scroll_content(-(self.page_height as i32)),
+            KeyCode::Char('n') => self.jump_hunk(true),
+            KeyCode::Char('N') => self.jump_hunk(false),
             KeyCode::Char('R') => self.status = self.reload_status(),
             KeyCode::Char('f') => self.start_fetch(),
             KeyCode::Char('p') => self.start_pull(),
@@ -336,7 +349,9 @@ impl App {
             KeyCode::Char('T') => resolver.choose_all(Choice::Theirs),
             KeyCode::Char('n') | KeyCode::Tab => resolver.next(),
             KeyCode::Char('N') | KeyCode::BackTab => resolver.previous(),
-            KeyCode::Char('j') | KeyCode::Down => resolver.scroll = resolver.scroll.saturating_add(1),
+            KeyCode::Char('j') | KeyCode::Down => {
+                resolver.scroll = resolver.scroll.saturating_add(1)
+            }
             KeyCode::Char('k') | KeyCode::Up => resolver.scroll = resolver.scroll.saturating_sub(1),
             KeyCode::Char('w') | KeyCode::Enter => self.commit_resolution(),
             KeyCode::Char('?') => self.mode = Mode::Help,
@@ -362,12 +377,37 @@ impl App {
         self.scroll = (self.scroll as i32 + delta).clamp(0, max.max(0)) as u16;
     }
 
+    /// Scroll to the next `@@` header, wrapping at the end of the diff.
+    fn jump_hunk(&mut self, forward: bool) {
+        let headers: Vec<u16> = self
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.kind == LineKind::Hunk)
+            .map(|(index, _)| index as u16)
+            .collect();
+        let (Some(&first), Some(&last)) = (headers.first(), headers.last()) else {
+            self.status = "No hunks here — press d for the diff.".into();
+            return;
+        };
+        self.scroll = if forward {
+            headers.iter().copied().find(|&i| i > self.scroll).unwrap_or(first)
+        } else {
+            headers.iter().rev().copied().find(|&i| i < self.scroll).unwrap_or(last)
+        };
+    }
+
     fn toggle_expand(&mut self) {
         if let Some(row) = self.selected() {
             let expanded = self.tree.nodes[row.node].expanded;
             self.tree.set_expanded(row.node, !expanded);
             self.clamp_cursor();
         }
+    }
+
+    fn expand_all(&mut self, expanded: bool) {
+        self.tree.set_all_expanded(expanded);
+        self.clamp_cursor();
     }
 
     fn set_expanded(&mut self, expanded: bool) {
@@ -545,20 +585,42 @@ impl App {
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
-        let handle = runtime.spawn(async move {
-            let outcome = run_work(&engine, &mut ws, work).await.map_err(|e| e.to_string());
-            let _ = tx.send(Finished { ws, outcome });
-        });
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let spawned =
+            std::thread::Builder::new().name(format!("confed-tui-{label}")).spawn(move || {
+                let outcome = runtime.block_on(async {
+                    tokio::select! {
+                        result = run_work(&engine, &mut ws, work) => {
+                            result.map_err(|e| e.to_string())
+                        }
+                        _ = cancel_rx => Ok(format!("Cancelled {label}.")),
+                    }
+                });
+                let _ = tx.send(Finished { ws, outcome });
+            });
+
+        if let Err(e) = spawned {
+            self.status = format!("Could not start {label}: {e}");
+            // The workspace never left, so put it back where it came from.
+            self.ws = Workspace::open(&self.root).ok();
+            return;
+        }
         self.status = format!("Running {label}…");
-        self.job = Some(Job { label, started: Instant::now(), cancelled: false, rx, handle });
+        self.job = Some(Job {
+            label,
+            started: Instant::now(),
+            cancelled: false,
+            rx,
+            cancel: Some(cancel_tx),
+        });
     }
 
-    /// True cancellation would have to reach into the sync engine; what the TUI
-    /// can do is stop waiting, drop the task, and re-open the workspace.
+    /// Ask the operation to stop at its next await point. Whatever it already
+    /// wrote stays written — the engine's own steps are individually atomic.
     fn cancel_job(&mut self) {
         if let Some(job) = &mut self.job {
-            if !job.cancelled {
-                job.handle.abort();
+            if let Some(cancel) = job.cancel.take() {
+                let _ = cancel.send(());
                 job.cancelled = true;
                 self.status = format!("Cancelling {}…", job.label);
             }
@@ -569,10 +631,10 @@ impl App {
     pub fn poll_jobs(&mut self) {
         self.frames += 1;
         let Some(job) = &self.job else { return };
+        let label = job.label;
 
         match job.rx.try_recv() {
             Ok(Finished { ws, outcome }) => {
-                let label = job.label;
                 self.ws = Some(ws);
                 self.job = None;
                 self.status = match outcome {
@@ -583,33 +645,29 @@ impl App {
                     self.status = format!("{} (refresh failed: {e})", self.status);
                 }
             }
-            Err(TryRecvError::Empty) => {
-                // An aborted task drops the workspace instead of sending it back,
-                // so re-open it from disk once the task is really gone.
-                if job.cancelled && job.handle.is_finished() {
-                    let label = job.label;
-                    self.job = None;
-                    self.status = match Workspace::open(&self.root) {
-                        Ok(ws) => {
-                            self.ws = Some(ws);
-                            let _ = self.reload();
-                            format!("Cancelled {label}.")
-                        }
-                        Err(e) => format!("Cancelled {label}, but the workspace is gone: {e}"),
-                    };
-                }
-            }
+            Err(TryRecvError::Empty) => {}
+            // The worker died without reporting: re-open the workspace so the
+            // TUI stays usable instead of freezing with no state.
             Err(TryRecvError::Disconnected) => {
-                let label = job.label;
                 self.job = None;
-                if self.ws.is_none() {
-                    match Workspace::open(&self.root) {
-                        Ok(ws) => self.ws = Some(ws),
-                        Err(e) => self.status = format!("{label}: {e}"),
-                    }
-                }
+                self.status = format!("{label} stopped unexpectedly.");
+                self.ws = Workspace::open(&self.root).ok();
                 let _ = self.reload();
             }
+        }
+    }
+
+    /// Stop a running job and wait briefly for the workspace to come back, so
+    /// the runtime is not torn down underneath a live SQLite transaction.
+    pub fn shutdown(&mut self) {
+        if !self.busy() {
+            return;
+        }
+        self.cancel_job();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.busy() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            self.poll_jobs();
         }
     }
 
@@ -619,15 +677,42 @@ impl App {
     }
 }
 
+#[cfg(test)]
+impl App {
+    /// An app with no workspace behind it, for tests that only render.
+    pub fn for_render(space: &str, tree: Tree, content: Vec<PaneLine>) -> Self {
+        Self {
+            space: space.to_string(),
+            tree,
+            cursor: 0,
+            filter: String::new(),
+            mode: Mode::Browse,
+            view: View::Preview,
+            diff_side: DiffSide::Base,
+            content,
+            scroll: 0,
+            status: String::new(),
+            plan: None,
+            resolver: None,
+            job: None,
+            should_quit: false,
+            frames: 0,
+            page_height: 20,
+            root: PathBuf::new(),
+            ws: None,
+            engine: None,
+            client: None,
+            runtime: None,
+        }
+    }
+}
+
 async fn run_work(engine: &SyncEngine, ws: &mut Workspace, work: Work) -> Result<String> {
     let _lock = ws.lock()?;
     match work {
         Work::Fetch => {
             let outcome = engine.fetch(ws, &FetchOptions::default()).await?;
-            Ok(format!(
-                "Fetched {} page(s), {} unchanged.",
-                outcome.fetched, outcome.unchanged
-            ))
+            Ok(format!("Fetched {} page(s), {} unchanged.", outcome.fetched, outcome.unchanged))
         }
         Work::Pull(options) => {
             let outcome = engine.pull(ws, &options).await?;
@@ -667,4 +752,337 @@ fn open_url(url: &str) -> Result<()> {
         .spawn()
         .map_err(|e| ConfedError::io(format!("launching {opener}"), e))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::pane::LineKind;
+    use confed_api::{Flavor, MockClient, SpaceId};
+    use confed_core::worktree::PageState;
+    use std::time::Duration;
+
+    /// A real workspace against the stateful mock server, driven only by key
+    /// presses — the same path a person takes.
+    struct Harness {
+        app: App,
+        mock: Arc<MockClient>,
+        runtime: tokio::runtime::Runtime,
+        _dir: tempfile::TempDir,
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let mut ws = Workspace::create(dir.path()).expect("workspace");
+            ws.state().set_meta("space_key", "DOCS").unwrap();
+            ws.state().set_meta("base_url", "https://mock.test").unwrap();
+            ws.state().set_meta("flavor", Flavor::Cloud.as_str()).unwrap();
+
+            let mock = Arc::new(MockClient::new(Flavor::Cloud));
+            mock.seed_page("1001", "Runbook", None, "<p>Original text.</p>");
+            mock.seed_page("1002", "Failover", Some("1001"), "<p>Steps.</p>");
+
+            let client: Arc<dyn ConfluenceClient> = mock.clone();
+            let engine = Arc::new(SyncEngine::new(
+                Arc::clone(&client),
+                SpaceId { key: "DOCS".into(), numeric: Some("1001".into()) },
+                2,
+            ));
+
+            let runtime =
+                tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
+            runtime
+                .block_on(engine.pull(&mut ws, &PullOptions::everything()))
+                .expect("initial pull");
+
+            let app = App::new(ws, Some(engine), Some(client), Some(runtime.handle().clone()))
+                .expect("app");
+            Self { app, mock, runtime, _dir: dir }
+        }
+
+        fn press(&mut self, code: KeyCode) {
+            self.app.on_key(key(code));
+        }
+
+        /// Wait for the running job, the way the event loop would.
+        fn settle(&mut self) {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while self.app.busy() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+                self.app.poll_jobs();
+            }
+            assert!(!self.app.busy(), "the job never finished: {}", self.app.status);
+        }
+
+        fn select(&mut self, path: &str) {
+            let rows = self.app.rows();
+            let index = rows
+                .iter()
+                .position(|row| self.app.tree.nodes[row.node].path == path)
+                .unwrap_or_else(|| panic!("no row for {path}"));
+            self.app.cursor = index;
+            self.app.refresh_content();
+        }
+
+        fn state_of(&self, path: &str) -> PageState {
+            self.app
+                .tree
+                .nodes
+                .iter()
+                .find(|node| node.path == path)
+                .unwrap_or_else(|| panic!("no node for {path}"))
+                .state
+        }
+
+        fn path(&self, relative: &str) -> std::path::PathBuf {
+            self.app.workspace().expect("workspace").absolute(relative)
+        }
+
+        fn edit(&mut self, relative: &str, addition: &str) {
+            let file = self.path(relative);
+            let mut content = std::fs::read_to_string(&file).expect("read");
+            content.push_str(addition);
+            std::fs::write(&file, content).expect("write");
+            self.app.reload().expect("reload");
+        }
+    }
+
+    #[test]
+    fn the_tree_shows_the_pulled_hierarchy() {
+        let harness = Harness::new();
+        let labels: Vec<&str> =
+            harness.app.rows().iter().map(|row| harness.app.tree.nodes[row.node].label()).collect();
+        assert_eq!(labels, ["Runbook", "Failover"]);
+        assert_eq!(harness.state_of("Runbook.md"), PageState::Unchanged);
+    }
+
+    #[test]
+    fn a_local_edit_shows_up_in_the_tree_and_the_diff_pane() {
+        let mut harness = Harness::new();
+        harness.edit("Runbook.md", "\nA new paragraph.\n");
+        harness.select("Runbook.md");
+        assert_eq!(harness.state_of("Runbook.md"), PageState::Modified);
+
+        harness.press(KeyCode::Char('d'));
+        assert_eq!(harness.app.view, View::Diff);
+        let added: Vec<&str> = harness
+            .app
+            .content
+            .iter()
+            .filter(|line| line.kind == LineKind::Add)
+            .map(|line| line.text.as_str())
+            .collect();
+        assert!(added.contains(&"+A new paragraph."), "{:?}", harness.app.content);
+    }
+
+    #[test]
+    fn hunk_navigation_walks_the_diff_and_wraps() {
+        let mut harness = Harness::new();
+        // Two edits far enough apart to produce two hunks.
+        let file = harness.path("Runbook/Failover.md");
+        let content = std::fs::read_to_string(&file).unwrap();
+        let body: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&file, format!("{content}{body}")).unwrap();
+        harness.app.reload().unwrap();
+        harness.select("Runbook/Failover.md");
+        harness.press(KeyCode::Char('d'));
+
+        let headers: Vec<usize> = harness
+            .app
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.kind == LineKind::Hunk)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!headers.is_empty(), "{:?}", harness.app.content);
+
+        harness.press(KeyCode::Char('n'));
+        assert_eq!(harness.app.scroll as usize, headers[0]);
+        harness.press(KeyCode::Char('N'));
+        assert_eq!(harness.app.scroll as usize, *headers.last().unwrap(), "wraps backwards");
+    }
+
+    /// The acceptance test for the whole action path: plan, confirm, upload.
+    #[test]
+    fn pushing_from_the_tui_reaches_the_server_and_leaves_the_page_clean() {
+        let mut harness = Harness::new();
+        harness.edit("Runbook.md", "\nA new paragraph.\n");
+        harness.select("Runbook.md");
+
+        // Push always shows the plan first; nothing has been uploaded yet.
+        harness.press(KeyCode::Char('P'));
+        assert_eq!(harness.app.mode, Mode::PushPlan);
+        let plan = harness.app.plan.as_ref().expect("a plan");
+        assert_eq!(plan.ops.len(), 1);
+        assert_eq!(plan.ops[0].path, "Runbook.md");
+        assert_eq!(harness.mock.page_version("1001"), Some(1), "no upload before confirming");
+
+        harness.press(KeyCode::Enter);
+        harness.settle();
+
+        assert!(harness.app.status.starts_with("Pushed: 1 updated"), "{}", harness.app.status);
+        let body = harness.mock.page_body("1001").expect("page");
+        assert!(body.contains("A new paragraph"), "the edit reached the server: {body}");
+        assert!(body.contains("Original text"), "untouched content survives: {body}");
+        assert_eq!(harness.mock.page_version("1001"), Some(2));
+        assert_eq!(harness.state_of("Runbook.md"), PageState::Unchanged);
+    }
+
+    #[test]
+    fn cancelling_the_plan_uploads_nothing() {
+        let mut harness = Harness::new();
+        harness.edit("Runbook.md", "\nA new paragraph.\n");
+        harness.select("Runbook.md");
+        harness.press(KeyCode::Char('P'));
+        harness.press(KeyCode::Esc);
+
+        assert_eq!(harness.app.mode, Mode::Browse);
+        assert!(harness.app.plan.is_none());
+        assert_eq!(harness.app.status, "Push cancelled.");
+        assert!(harness.mock.mutating_calls().is_empty(), "{:?}", harness.mock.mutating_calls());
+    }
+
+    #[test]
+    fn fetch_then_pull_brings_in_a_page_created_by_somebody_else() {
+        let mut harness = Harness::new();
+        harness.mock.seed_page("1003", "Escalation", Some("1001"), "<p>Who to call.</p>");
+
+        harness.press(KeyCode::Char('f'));
+        harness.settle();
+        assert!(harness.app.status.starts_with("Fetched"), "{}", harness.app.status);
+        assert_eq!(harness.state_of(""), PageState::RemoteNew, "known, but not written yet");
+
+        // Pull is scoped to the selection, so select the page that is missing.
+        let index = harness
+            .app
+            .rows()
+            .iter()
+            .position(|row| harness.app.tree.nodes[row.node].page_id.as_deref() == Some("1003"))
+            .expect("a row for the new page");
+        harness.app.cursor = index;
+        harness.press(KeyCode::Char('p'));
+        harness.settle();
+
+        assert!(harness.path("Runbook/Escalation.md").exists(), "{}", harness.app.status);
+        assert_eq!(harness.state_of("Runbook/Escalation.md"), PageState::Unchanged);
+    }
+
+    /// A diverged page merges into conflict markers; the resolver clears them
+    /// and the page ends up clean, exactly like `confed resolve`.
+    #[test]
+    fn a_conflicted_page_is_resolved_from_the_three_pane_view() {
+        let mut harness = Harness::new();
+        harness.edit("Runbook.md", "\nOur addition.\n");
+        harness.mock.remote_edit("1001", "<p>Original text.</p><p>Their addition.</p>");
+
+        harness.select("Runbook.md");
+        harness.press(KeyCode::Char('p'));
+        harness.settle();
+        assert_eq!(harness.state_of("Runbook.md"), PageState::Conflicted, "{}", harness.app.status);
+
+        harness.select("Runbook.md");
+        harness.press(KeyCode::Char('c'));
+        assert_eq!(harness.app.mode, Mode::Conflict);
+        let resolver = harness.app.resolver.as_ref().expect("a resolver");
+        assert!(resolver.hunk_count() >= 1);
+        assert!(!resolver.hunk().ours.is_empty() || !resolver.hunk().theirs.is_empty());
+
+        // Writing with hunks still open is refused.
+        harness.press(KeyCode::Char('w'));
+        assert_eq!(harness.app.mode, Mode::Conflict);
+        assert!(harness.app.status.contains("unresolved"), "{}", harness.app.status);
+
+        harness.press(KeyCode::Char('U')); // take ours everywhere
+        harness.press(KeyCode::Char('w'));
+
+        assert_eq!(harness.app.mode, Mode::Browse);
+        assert_eq!(harness.state_of("Runbook.md"), PageState::Modified, "{}", harness.app.status);
+        let file = std::fs::read_to_string(harness.path("Runbook.md")).unwrap();
+        assert!(!confed_core::merge::has_conflict_markers(&file));
+        assert!(file.contains("Our addition."));
+
+        // And the resolved page pushes like any other.
+        harness.select("Runbook.md");
+        harness.press(KeyCode::Char('P'));
+        assert_eq!(harness.app.mode, Mode::PushPlan);
+        harness.press(KeyCode::Enter);
+        harness.settle();
+        assert!(harness.mock.page_body("1001").unwrap().contains("Our addition"));
+    }
+
+    #[test]
+    fn a_second_action_is_refused_while_one_is_running() {
+        let mut harness = Harness::new();
+        harness.press(KeyCode::Char('f'));
+        if harness.app.busy() {
+            harness.press(KeyCode::Char('f'));
+            assert!(harness.app.status.starts_with("Already running"), "{}", harness.app.status);
+        }
+        harness.settle();
+    }
+
+    #[test]
+    fn quitting_shuts_a_running_job_down() {
+        let mut harness = Harness::new();
+        harness.press(KeyCode::Char('f'));
+        harness.app.shutdown();
+        assert!(!harness.app.busy());
+        assert!(harness.app.workspace().is_some(), "the workspace always comes back");
+        drop(harness.runtime);
+    }
+
+    #[test]
+    fn without_a_client_the_network_keys_explain_themselves() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ws = Workspace::create(dir.path()).expect("workspace");
+        ws.state().set_meta("space_key", "DOCS").unwrap();
+        let mut app = App::new(ws, None, None, None).expect("app");
+        assert!(app.status.starts_with("Offline"));
+
+        app.on_key(key(KeyCode::Char('f')));
+        assert!(app.status.contains("Not connected"), "{}", app.status);
+        app.on_key(key(KeyCode::Char('P')));
+        assert!(app.status.contains("Not connected"), "{}", app.status);
+    }
+
+    #[test]
+    fn keys_move_the_cursor_filter_the_tree_and_toggle_help() {
+        let mut harness = Harness::new();
+        assert_eq!(harness.app.cursor, 0);
+        harness.press(KeyCode::Char('j'));
+        assert_eq!(harness.app.cursor, 1);
+        harness.press(KeyCode::Char('k'));
+        assert_eq!(harness.app.cursor, 0);
+
+        harness.press(KeyCode::Char('h')); // collapse Runbook
+        assert_eq!(harness.app.rows().len(), 1);
+        harness.press(KeyCode::Char('l'));
+        assert_eq!(harness.app.rows().len(), 2);
+
+        harness.press(KeyCode::Char('/'));
+        assert_eq!(harness.app.mode, Mode::Filter);
+        for c in "fail".chars() {
+            harness.press(KeyCode::Char(c));
+        }
+        let labels: Vec<&str> =
+            harness.app.rows().iter().map(|row| harness.app.tree.nodes[row.node].label()).collect();
+        assert_eq!(labels, ["Runbook", "Failover"], "the parent stays for context");
+        harness.press(KeyCode::Esc);
+        assert_eq!(harness.app.mode, Mode::Browse);
+        assert!(harness.app.filter.is_empty());
+
+        harness.press(KeyCode::Char('?'));
+        assert_eq!(harness.app.mode, Mode::Help);
+        harness.press(KeyCode::Char('x'));
+        assert_eq!(harness.app.mode, Mode::Browse);
+
+        harness.press(KeyCode::Char('q'));
+        assert!(harness.app.should_quit);
+    }
 }

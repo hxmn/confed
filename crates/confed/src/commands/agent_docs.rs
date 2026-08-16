@@ -166,7 +166,8 @@ mod tests {
     #[test]
     fn both_agent_files_are_written_with_identical_content() {
         let dir = tempfile::tempdir().unwrap();
-        let written = write(dir.path(), "https://x.atlassian.net/wiki", Flavor::Cloud, "DOCS").unwrap();
+        let written =
+            write(dir.path(), "https://x.atlassian.net/wiki", Flavor::Cloud, "DOCS").unwrap();
         assert_eq!(written, ["CLAUDE.md", "AGENTS.md"]);
 
         let claude = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();

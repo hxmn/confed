@@ -73,7 +73,9 @@ impl BlockMap {
                 return Err(format!("block {i}: inverted storage span {s}..{e}"));
             }
             if e > storage_len {
-                return Err(format!("block {i}: storage span {s}..{e} exceeds body length {storage_len}"));
+                return Err(format!(
+                    "block {i}: storage span {s}..{e} exceeds body length {storage_len}"
+                ));
             }
             if s < prev_end {
                 return Err(format!("block {i}: storage span {s}..{e} overlaps previous block"));

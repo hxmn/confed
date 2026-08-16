@@ -131,7 +131,9 @@ impl ConfedError {
         match self {
             ConfedError::Usage { hint, .. } | ConfedError::State { hint, .. } => hint.as_deref(),
             ConfedError::Conflict(_) => Some("run `confed pull` to merge, then retry"),
-            ConfedError::Auth(_) => Some("run `confed init` to refresh credentials, or check CONFED_TOKEN"),
+            ConfedError::Auth(_) => {
+                Some("run `confed init` to refresh credentials, or check CONFED_TOKEN")
+            }
             _ => None,
         }
     }

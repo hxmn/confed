@@ -77,7 +77,10 @@ impl PageState {
     pub fn has_local_work(self) -> bool {
         matches!(
             self,
-            PageState::Modified | PageState::LocalNew | PageState::LocalDeleted | PageState::Diverged
+            PageState::Modified
+                | PageState::LocalNew
+                | PageState::LocalDeleted
+                | PageState::Diverged
         )
     }
 
@@ -85,7 +88,10 @@ impl PageState {
     pub fn has_remote_work(self) -> bool {
         matches!(
             self,
-            PageState::Behind | PageState::RemoteNew | PageState::RemoteDeleted | PageState::Diverged
+            PageState::Behind
+                | PageState::RemoteNew
+                | PageState::RemoteDeleted
+                | PageState::Diverged
         )
     }
 }
@@ -497,8 +503,11 @@ mod tests {
         ];
         for (file, remote_version, expected) in cases {
             let base = base_record("1", 7, &clean.content_hash);
-            let status =
-                compute_status(std::slice::from_ref(file), &[base], &[remote_record("1", remote_version, false)]);
+            let status = compute_status(
+                std::slice::from_ref(file),
+                &[base],
+                &[remote_record("1", remote_version, false)],
+            );
             assert_eq!(status[0].state, expected, "remote v{remote_version}");
         }
     }

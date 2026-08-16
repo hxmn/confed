@@ -234,16 +234,9 @@ impl Renderer<'_> {
     fn render_list(&mut self, el: &Element, bullet: char, delim: char) -> String {
         let ordered = el.local() == "ol";
         let mut out = String::new();
-        let start = el
-            .attr("start")
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(1);
+        let start = el.attr("start").and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
         for (index, li) in (start..).zip(el.child_elements().filter(|c| c.local() == "li")) {
-            let marker = if ordered {
-                format!("{index}{delim} ")
-            } else {
-                format!("{bullet} ")
-            };
+            let marker = if ordered { format!("{index}{delim} ") } else { format!("{bullet} ") };
             let content = self.render_item_content(&li.children);
             if content.trim().is_empty() {
                 out.push_str(marker.trim_end());
@@ -293,11 +286,7 @@ impl Renderer<'_> {
     }
 
     fn render_children_blocks(&mut self, nodes: &[Node]) -> String {
-        self.blocks_in(nodes)
-            .into_iter()
-            .map(|(_, t)| t)
-            .collect::<Vec<_>>()
-            .join("\n\n")
+        self.blocks_in(nodes).into_iter().map(|(_, t)| t).collect::<Vec<_>>().join("\n\n")
     }
 
     /// Split a run of children into block-level chunks, gathering loose inline
@@ -481,11 +470,7 @@ impl Renderer<'_> {
     }
 
     fn render_image(&mut self, el: &Element) -> String {
-        let alt = el
-            .attr_local("alt")
-            .or_else(|| el.attr_local("title"))
-            .unwrap_or("")
-            .to_string();
+        let alt = el.attr_local("alt").or_else(|| el.attr_local("title")).unwrap_or("").to_string();
         let src = el
             .child_elements()
             .find_map(|c| match c.local() {
@@ -507,9 +492,8 @@ impl Renderer<'_> {
 
     fn render_link(&mut self, el: &Element, out: &mut String) {
         let anchor = el.attr_local("anchor").unwrap_or("").to_string();
-        let body = el
-            .child_elements()
-            .find(|c| matches!(c.local(), "plain-text-link-body" | "link-body"));
+        let body =
+            el.child_elements().find(|c| matches!(c.local(), "plain-text-link-body" | "link-body"));
         let mut label = match body {
             Some(b) if b.local() == "plain-text-link-body" => escape_md(&b.text()),
             Some(b) => self.inline(&b.children),
@@ -523,10 +507,8 @@ impl Renderer<'_> {
         let mut href = match target {
             Some(t) if matches!(t.local(), "page" | "blog-post") => {
                 let title = t.attr_local("content-title").unwrap_or("").to_string();
-                let space = t
-                    .attr_local("space-key")
-                    .unwrap_or(self.opts.space_key.as_str())
-                    .to_string();
+                let space =
+                    t.attr_local("space-key").unwrap_or(self.opts.space_key.as_str()).to_string();
                 let id = t.attr_local("content-id").unwrap_or("").to_string();
                 if !label_from_body {
                     label = escape_md(&title);
@@ -765,13 +747,15 @@ fn escape_line_starts(text: &str) -> String {
 
 fn prefix_lines(text: &str, prefix: &str, blank_prefix: &str) -> String {
     text.split('\n')
-        .map(|l| {
-            if l.trim().is_empty() {
-                blank_prefix.to_string()
-            } else {
-                format!("{prefix}{l}")
-            }
-        })
+        .map(
+            |l| {
+                if l.trim().is_empty() {
+                    blank_prefix.to_string()
+                } else {
+                    format!("{prefix}{l}")
+                }
+            },
+        )
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -796,10 +780,7 @@ fn indent_item(content: &str, marker: &str) -> String {
 }
 
 fn squeeze_blank_lines(text: &str) -> String {
-    text.split('\n')
-        .filter(|l| !l.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    text.split('\n').filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
 }
 
 fn trim_hard_breaks(text: &str) -> String {
@@ -841,10 +822,7 @@ mod tests {
     #[test]
     fn headings_and_emphasis() {
         assert_eq!(md("<h2>Title</h2>"), "## Title\n");
-        assert_eq!(
-            md("<p><strong>a</strong> <em>b</em> <del>c</del></p>"),
-            "**a** *b* ~~c~~\n"
-        );
+        assert_eq!(md("<p><strong>a</strong> <em>b</em> <del>c</del></p>"), "**a** *b* ~~c~~\n");
         assert_eq!(
             md("<p><u>u</u><sub>s</sub><sup>p</sup></p>"),
             "<u>u</u><sub>s</sub><sup>p</sup>\n"
@@ -895,19 +873,25 @@ mod tests {
 
     #[test]
     fn code_macro_becomes_a_fence() {
-        let out = md(r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">rust</ac:parameter><ac:plain-text-body><![CDATA[fn a() {}]]></ac:plain-text-body></ac:structured-macro>"#);
+        let out = md(
+            r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">rust</ac:parameter><ac:plain-text-body><![CDATA[fn a() {}]]></ac:plain-text-body></ac:structured-macro>"#,
+        );
         assert_eq!(out, "```rust\nfn a() {}\n```\n");
     }
 
     #[test]
     fn code_body_with_backticks_gets_a_longer_fence() {
-        let out = md(r#"<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[a ``` b]]></ac:plain-text-body></ac:structured-macro>"#);
+        let out = md(
+            r#"<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[a ``` b]]></ac:plain-text-body></ac:structured-macro>"#,
+        );
         assert_eq!(out, "````\na ``` b\n````\n");
     }
 
     #[test]
     fn admonitions_become_alerts() {
-        let out = md(r#"<ac:structured-macro ac:name="warning"><ac:parameter ac:name="title">Careful</ac:parameter><ac:rich-text-body><p>Do not.</p></ac:rich-text-body></ac:structured-macro>"#);
+        let out = md(
+            r#"<ac:structured-macro ac:name="warning"><ac:parameter ac:name="title">Careful</ac:parameter><ac:rich-text-body><p>Do not.</p></ac:rich-text-body></ac:structured-macro>"#,
+        );
         assert_eq!(out, "> [!WARNING]\n> **Careful**\n>\n> Do not.\n");
     }
 
@@ -965,7 +949,10 @@ mod tests {
         for (i, b) in c.block_map.blocks.iter().enumerate() {
             let text = c.block_map.block_markdown(i, &c.markdown).unwrap();
             assert_eq!(b.hash, hash_text(&text));
-            assert_eq!(&storage[b.storage_span.0..b.storage_span.1].len(), &(b.storage_span.1 - b.storage_span.0));
+            assert_eq!(
+                &storage[b.storage_span.0..b.storage_span.1].len(),
+                &(b.storage_span.1 - b.storage_span.0)
+            );
         }
     }
 
@@ -983,7 +970,9 @@ mod tests {
 
     #[test]
     fn expand_becomes_a_single_html_block() {
-        let out = md(r#"<ac:structured-macro ac:name="expand"><ac:parameter ac:name="title">More</ac:parameter><ac:rich-text-body><p>hidden</p></ac:rich-text-body></ac:structured-macro>"#);
+        let out = md(
+            r#"<ac:structured-macro ac:name="expand"><ac:parameter ac:name="title">More</ac:parameter><ac:rich-text-body><p>hidden</p></ac:rich-text-body></ac:structured-macro>"#,
+        );
         assert_eq!(out, "<details><summary>More</summary>\nhidden\n</details>\n");
     }
 
@@ -998,10 +987,8 @@ mod tests {
 
     #[test]
     fn unresolvable_page_links_fall_back_to_an_absolute_url() {
-        let opts = ConvertOptions {
-            base_url: "https://wiki.example.com".into(),
-            ..Default::default()
-        };
+        let opts =
+            ConvertOptions { base_url: "https://wiki.example.com".into(), ..Default::default() };
         let src = r#"<p><ac:link><ri:page ri:space-key="DEV" ri:content-title="Other Page"/></ac:link></p>"#;
         let out = crate::storage_to_markdown(src, &opts).unwrap().markdown;
         assert_eq!(out, "[Other Page](https://wiki.example.com/display/DEV/Other%20Page)\n");

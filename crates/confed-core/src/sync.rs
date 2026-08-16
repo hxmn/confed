@@ -279,8 +279,7 @@ impl SyncEngine {
             }
         }
 
-        let queue: Vec<String> =
-            state.pending_fetches()?.into_iter().map(|(id, _)| id).collect();
+        let queue: Vec<String> = state.pending_fetches()?.into_iter().map(|(id, _)| id).collect();
         let titles: HashMap<&str, &str> =
             summaries.iter().map(|s| (s.id.0.as_str(), s.title.as_str())).collect();
 
@@ -365,9 +364,7 @@ impl SyncEngine {
                 file_size: attachment.file_size,
                 version: attachment.version,
                 // A new server version invalidates the hash of what we downloaded.
-                sha256: existing
-                    .filter(|e| e.version == attachment.version)
-                    .and_then(|e| e.sha256),
+                sha256: existing.filter(|e| e.version == attachment.version).and_then(|e| e.sha256),
                 downloaded: false,
             })?;
         }
@@ -388,10 +385,7 @@ impl SyncEngine {
                 body_markdown: confed_convert::storage_fragment_to_markdown(&comment.body_storage)
                     .unwrap_or_else(|_| comment.body_storage.clone()),
                 resolved: comment.resolved,
-                anchor: comment
-                    .anchor
-                    .as_ref()
-                    .and_then(|a| serde_json::to_string(a).ok()),
+                anchor: comment.anchor.as_ref().and_then(|a| serde_json::to_string(a).ok()),
                 synced_at: Some(now()),
             })?;
         }
@@ -422,10 +416,8 @@ impl SyncEngine {
 
         let placements = self.plan_placements(&remote, &base);
         let links = link_map(&placements);
-        let files_by_id: HashMap<&str, &LocalFile> = files
-            .iter()
-            .filter_map(|f| f.file.frontmatter.page_id().map(|id| (id, f)))
-            .collect();
+        let files_by_id: HashMap<&str, &LocalFile> =
+            files.iter().filter_map(|f| f.file.frontmatter.page_id().map(|id| (id, f))).collect();
         let base_by_id: HashMap<&str, &PageRecord> =
             base.iter().map(|p| (p.page_id.as_str(), p)).collect();
 
@@ -436,8 +428,14 @@ impl SyncEngine {
             if !self.in_scope(&opts.scope, &placements, &remote_page.page_id) {
                 continue;
             }
-            let status = statuses.iter().find(|s| s.page_id.as_deref() == Some(&remote_page.page_id));
-            let action = decide_pull(remote_page, status, base_by_id.get(remote_page.page_id.as_str()).copied(), opts);
+            let status =
+                statuses.iter().find(|s| s.page_id.as_deref() == Some(&remote_page.page_id));
+            let action = decide_pull(
+                remote_page,
+                status,
+                base_by_id.get(remote_page.page_id.as_str()).copied(),
+                opts,
+            );
             if let PullAction::Blocked(reason) = &action {
                 outcome.skipped_dirty.push(BlockedPage {
                     page_id: remote_page.page_id.clone(),
@@ -493,7 +491,8 @@ impl SyncEngine {
                 PullAction::Nothing | PullAction::Blocked(_) if !opts.force => continue,
                 PullAction::Nothing | PullAction::Delete => continue,
                 PullAction::Create | PullAction::Overwrite | PullAction::Blocked(_) => {
-                    let change = self.write_page(ws, &remote_page, placement, local, &links, opts, None)?;
+                    let change =
+                        self.write_page(ws, &remote_page, placement, local, &links, opts, None)?;
                     if base_record.is_some() {
                         outcome.updated.push(change);
                     } else {
@@ -501,8 +500,15 @@ impl SyncEngine {
                     }
                 }
                 PullAction::Merge => {
-                    let (change, conflicted) =
-                        self.merge_page(ws, &remote_page, placement, local, base_record, &links, opts)?;
+                    let (change, conflicted) = self.merge_page(
+                        ws,
+                        &remote_page,
+                        placement,
+                        local,
+                        base_record,
+                        &links,
+                        opts,
+                    )?;
                     if conflicted {
                         outcome.conflicted.push(change);
                     } else {
@@ -681,7 +687,15 @@ impl SyncEngine {
 
         if !opts.dry_run {
             write_atomic(&ws.absolute(&placement.path), &rendered)?;
-            self.record_base(ws, remote, placement, &file, &storage, &converted.block_map, SyncState::Clean)?;
+            self.record_base(
+                ws,
+                remote,
+                placement,
+                &file,
+                &storage,
+                &converted.block_map,
+                SyncState::Clean,
+            )?;
         }
 
         Ok(PageChange {
@@ -779,7 +793,8 @@ impl SyncEngine {
         };
 
         let convert_opts = convert_options(ws, &placement.path, links);
-        let base_md = confed_convert::storage_to_markdown(&base_record.storage_body, &convert_opts)?;
+        let base_md =
+            confed_convert::storage_to_markdown(&base_record.storage_body, &convert_opts)?;
         let remote_storage = remote.storage_body.clone().unwrap_or_default();
         let remote_md = confed_convert::storage_to_markdown(&remote_storage, &convert_opts)?;
 
@@ -788,12 +803,8 @@ impl SyncEngine {
             author: remote.author.clone(),
             when: remote.updated_at.clone(),
         };
-        let merged = merge::merge_bodies(
-            &base_md.markdown,
-            &local.file.body,
-            &remote_md.markdown,
-            &label,
-        );
+        let merged =
+            merge::merge_bodies(&base_md.markdown, &local.file.body, &remote_md.markdown, &label);
         let conflicted = merged.is_conflicted();
 
         // Frontmatter merges field by field.
@@ -826,7 +837,15 @@ impl SyncEngine {
         if !opts.dry_run {
             write_atomic(&ws.absolute(&placement.path), &rendered)?;
             let state = if conflicted { SyncState::Conflicted } else { SyncState::Clean };
-            self.record_base(ws, remote, placement, &file, &remote_storage, &remote_md.block_map, state)?;
+            self.record_base(
+                ws,
+                remote,
+                placement,
+                &file,
+                &remote_storage,
+                &remote_md.block_map,
+                state,
+            )?;
             ws.state().log(
                 "pull-merge",
                 Some(&remote.page_id),
@@ -879,11 +898,8 @@ impl SyncEngine {
         if records.is_empty() {
             return Ok(0);
         }
-        let remote_attachments = self
-            .client
-            .list_attachments(&PageId::new(page_id))
-            .await
-            .unwrap_or_default();
+        let remote_attachments =
+            self.client.list_attachments(&PageId::new(page_id)).await.unwrap_or_default();
 
         let dir = ws.absolute(&placement.sidecar);
         let mut count = 0;
@@ -994,9 +1010,11 @@ impl SyncEngine {
 
         let mut plan = PushPlan::default();
         for status in &statuses {
-            if !opts.scope.is_empty() && !opts.scope.iter().any(|s| {
-                Some(s.as_str()) == status.page_id.as_deref() || path_matches(s, &status.path)
-            }) {
+            if !opts.scope.is_empty()
+                && !opts.scope.iter().any(|s| {
+                    Some(s.as_str()) == status.page_id.as_deref() || path_matches(s, &status.path)
+                })
+            {
                 continue;
             }
             // Checked before `has_local_work`, which excludes conflicted pages:
@@ -1068,8 +1086,9 @@ impl SyncEngine {
                         plan.skipped.push(BlockedPage {
                             page_id: status.page_id.clone().unwrap_or_default(),
                             path: status.path.clone(),
-                            reason: "deleted locally; pass --allow-delete to delete it on the server"
-                                .into(),
+                            reason:
+                                "deleted locally; pass --allow-delete to delete it on the server"
+                                    .into(),
                         });
                     }
                 }
@@ -1150,8 +1169,11 @@ impl SyncEngine {
     /// Upload local changes.
     pub async fn push(&self, ws: &mut Workspace, opts: &PushOptions) -> Result<PushOutcome> {
         let plan = self.plan_push(ws, opts)?;
-        let mut outcome =
-            PushOutcome { dry_run: opts.dry_run, skipped: plan.skipped.clone(), ..Default::default() };
+        let mut outcome = PushOutcome {
+            dry_run: opts.dry_run,
+            skipped: plan.skipped.clone(),
+            ..Default::default()
+        };
 
         if opts.dry_run {
             for op in &plan.ops {
@@ -1380,7 +1402,8 @@ impl SyncEngine {
                     .await?;
 
                 if op.ops.iter().any(|o| o == "labels") {
-                    self.sync_labels(&page_id, &base_record.labels, &file.frontmatter.labels).await?;
+                    self.sync_labels(&page_id, &base_record.labels, &file.frontmatter.labels)
+                        .await?;
                 }
 
                 self.commit_page(ws, &updated, &path, &file)?;
@@ -1512,12 +1535,8 @@ impl SyncEngine {
 
         write_atomic(&ws.absolute(path), &file.render()?)?;
 
-        let slug = path
-            .rsplit('/')
-            .next()
-            .and_then(|f| f.strip_suffix(".md"))
-            .unwrap_or(path)
-            .to_string();
+        let slug =
+            path.rsplit('/').next().and_then(|f| f.strip_suffix(".md")).unwrap_or(path).to_string();
 
         ws.state().upsert_page(&PageRecord {
             page_id: summary.id.0.clone(),
@@ -1630,9 +1649,9 @@ fn decide_pull(
 ) -> PullAction {
     if remote.deleted {
         return match status.map(|s| s.local_dirty) {
-            Some(true) if !opts.force => PullAction::Blocked(
-                "deleted on the server but modified locally".to_string(),
-            ),
+            Some(true) if !opts.force => {
+                PullAction::Blocked("deleted on the server but modified locally".to_string())
+            }
             _ => PullAction::Delete,
         };
     }
@@ -1683,17 +1702,10 @@ fn decide_pull(
 }
 
 /// Conversion context for one page file.
-fn convert_options(
-    ws: &Workspace,
-    path: &str,
-    links: &HashMap<String, String>,
-) -> ConvertOptions {
-    let page_links: HashMap<String, String> = links
-        .iter()
-        .map(|(id, target)| (id.clone(), paths::relative_link(path, target)))
-        .collect();
-    let link_targets =
-        page_links.iter().map(|(id, link)| (link.clone(), id.clone())).collect();
+fn convert_options(ws: &Workspace, path: &str, links: &HashMap<String, String>) -> ConvertOptions {
+    let page_links: HashMap<String, String> =
+        links.iter().map(|(id, target)| (id.clone(), paths::relative_link(path, target))).collect();
+    let link_targets = page_links.iter().map(|(id, link)| (link.clone(), id.clone())).collect();
 
     ConvertOptions {
         attachment_dir: paths::sidecar_ref(path),

@@ -26,10 +26,7 @@ pub fn macro_params(el: &Element) -> Vec<(String, String)> {
 }
 
 pub fn macro_param<'a>(params: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    params
-        .iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.as_str())
+    params.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
 
 /// A parameter we can ignore without losing information: either it is empty or
@@ -40,9 +37,7 @@ pub fn param_is_inert(value: &str) -> bool {
 }
 
 pub fn plain_text_body(el: &Element) -> Option<String> {
-    el.child_elements()
-        .find(|c| c.local() == "plain-text-body")
-        .map(|c| c.text())
+    el.child_elements().find(|c| c.local() == "plain-text-body").map(|c| c.text())
 }
 
 pub fn rich_text_body(el: &Element) -> Option<&Element> {
@@ -205,16 +200,10 @@ pub fn macro_is_renderable(el: &Element, name: &str) -> bool {
         // A code fence carries a language and nothing else. `collapse`,
         // `linenumbers`, `theme`… have no Markdown spelling, so a macro that
         // sets one goes to a preserved block rather than losing it.
-        "code" | "noformat" => params
-            .iter()
-            .all(|(k, v)| k == "language" || param_is_inert(v)),
+        "code" | "noformat" => params.iter().all(|(k, v)| k == "language" || param_is_inert(v)),
         // Admonitions carry an optional title, rendered as a bold first line.
-        n if is_admonition(n) => params
-            .iter()
-            .all(|(k, v)| k == "title" || param_is_inert(v)),
-        "expand" => params
-            .iter()
-            .all(|(k, v)| k == "title" || param_is_inert(v)),
+        n if is_admonition(n) => params.iter().all(|(k, v)| k == "title" || param_is_inert(v)),
+        "expand" => params.iter().all(|(k, v)| k == "title" || param_is_inert(v)),
         "status" => params
             .iter()
             .all(|(k, v)| k == "title" || k == "colour" || k == "color" || param_is_inert(v)),
@@ -312,8 +301,7 @@ fn cell_is_inline(cell: &Element) -> bool {
 }
 
 fn contains_block(el: &Element) -> bool {
-    el.child_elements()
-        .any(|c| is_block_tag(c) || contains_block(c))
+    el.child_elements().any(|c| is_block_tag(c) || contains_block(c))
 }
 
 /// Whether a subtree can be rendered to Markdown with no loss of *structure*.
@@ -364,7 +352,9 @@ mod tests {
 
     #[test]
     fn code_macro_language_is_renderable() {
-        let e = el(r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">rust</ac:parameter><ac:plain-text-body><![CDATA[fn main(){}]]></ac:plain-text-body></ac:structured-macro>"#);
+        let e = el(
+            r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">rust</ac:parameter><ac:plain-text-body><![CDATA[fn main(){}]]></ac:plain-text-body></ac:structured-macro>"#,
+        );
         assert!(renderable(&e));
         assert_eq!(macro_param(&macro_params(&e), "language"), Some("rust"));
         assert_eq!(plain_text_body(&e).as_deref(), Some("fn main(){}"));
@@ -372,25 +362,33 @@ mod tests {
 
     #[test]
     fn code_macro_with_unmapped_param_is_preserved() {
-        let e = el(r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="collapse">true</ac:parameter><ac:plain-text-body><![CDATA[x]]></ac:plain-text-body></ac:structured-macro>"#);
+        let e = el(
+            r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="collapse">true</ac:parameter><ac:plain-text-body><![CDATA[x]]></ac:plain-text-body></ac:structured-macro>"#,
+        );
         assert!(!renderable(&e));
     }
 
     #[test]
     fn inert_params_do_not_force_preservation() {
-        let e = el(r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="collapse">false</ac:parameter><ac:parameter ac:name="theme"></ac:parameter><ac:plain-text-body><![CDATA[x]]></ac:plain-text-body></ac:structured-macro>"#);
+        let e = el(
+            r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="collapse">false</ac:parameter><ac:parameter ac:name="theme"></ac:parameter><ac:plain-text-body><![CDATA[x]]></ac:plain-text-body></ac:structured-macro>"#,
+        );
         assert!(renderable(&e));
     }
 
     #[test]
     fn unknown_macro_is_never_renderable() {
-        let e = el(r#"<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">PROJ-1</ac:parameter></ac:structured-macro>"#);
+        let e = el(
+            r#"<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">PROJ-1</ac:parameter></ac:structured-macro>"#,
+        );
         assert!(!renderable(&e));
     }
 
     #[test]
     fn unknown_macro_nested_in_a_paragraph_taints_the_block() {
-        let e = el(r#"<p>see <ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">P-1</ac:parameter></ac:structured-macro> please</p>"#);
+        let e = el(
+            r#"<p>see <ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">P-1</ac:parameter></ac:structured-macro> please</p>"#,
+        );
         assert!(!renderable(&e));
     }
 

@@ -18,9 +18,9 @@ pub mod wire;
 pub use client::ConfluenceClient;
 pub use cloud::CloudClient;
 pub use dc::DcClient;
-pub use mock::MockClient;
 pub use error::{ApiError, ApiResult};
 pub use http::{Auth, Http, RetryPolicy};
+pub use mock::MockClient;
 pub use secret::Secret;
 pub use types::*;
 

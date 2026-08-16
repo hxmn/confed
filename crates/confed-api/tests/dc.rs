@@ -573,7 +573,8 @@ async fn a_403_also_maps_to_an_auth_error() {
         .mount(&server)
         .await;
 
-    let err = client(&server).get_page(&PageId::new("1001"), BodyFormat::Storage).await.unwrap_err();
+    let err =
+        client(&server).get_page(&PageId::new("1001"), BodyFormat::Storage).await.unwrap_err();
     assert!(matches!(err, ApiError::Auth(_)), "got {err:?}");
 }
 

@@ -154,7 +154,8 @@ impl CloudClient {
 fn as_conflict(err: ApiError) -> ApiError {
     match err {
         ApiError::Server { status, body }
-            if status == 409 || (status == 400 && body.to_ascii_lowercase().contains("version")) =>
+            if status == 409
+                || (status == 400 && body.to_ascii_lowercase().contains("version")) =>
         {
             ApiError::Conflict(body)
         }
@@ -196,13 +197,9 @@ impl ConfluenceClient for CloudClient {
 
     async fn list_spaces(&self, limit: Option<usize>) -> ApiResult<Vec<Space>> {
         let per_page = limit.unwrap_or(PAGE_SIZE).clamp(1, PAGE_SIZE);
-        let raw: Vec<v2::Space> = collect_cursor(
-            &self.http,
-            "api/v2/spaces",
-            &[("limit", per_page.to_string())],
-            limit,
-        )
-        .await?;
+        let raw: Vec<v2::Space> =
+            collect_cursor(&self.http, "api/v2/spaces", &[("limit", per_page.to_string())], limit)
+                .await?;
         let spaces: Vec<Space> = raw.into_iter().map(|s| s.into_domain()).collect();
         for space in &spaces {
             if let Some(numeric) = &space.id.numeric {
@@ -338,9 +335,7 @@ impl ConfluenceClient for CloudClient {
     }
 
     async fn remove_label(&self, id: &PageId, label: &str) -> ApiResult<()> {
-        self.http
-            .delete(&format!("rest/api/content/{id}/label?name={}", encode(label)))
-            .await
+        self.http.delete(&format!("rest/api/content/{id}/label?name={}", encode(label))).await
     }
 
     async fn list_attachments(&self, id: &PageId) -> ApiResult<Vec<Attachment>> {
@@ -385,8 +380,7 @@ impl ConfluenceClient for CloudClient {
     }
 
     async fn list_comments(&self, page: &PageId) -> ApiResult<Vec<Comment>> {
-        let query =
-            [("body-format", "storage".to_string()), ("limit", PAGE_SIZE.to_string())];
+        let query = [("body-format", "storage".to_string()), ("limit", PAGE_SIZE.to_string())];
         let footer: Vec<v2::Comment> = collect_cursor(
             &self.http,
             &format!("api/v2/pages/{page}/footer-comments"),

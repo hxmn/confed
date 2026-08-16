@@ -79,9 +79,8 @@ impl<'a> Generator<'a> {
                     // only thing standing between a mangled edit and a corrupted
                     // page is this check.
                     let raw = c.literal.strip_suffix('\n').unwrap_or(&c.literal);
-                    dom::check_well_formed(raw).map_err(|detail| {
-                        ConvertError::InvalidPreservedBlock { line, detail }
-                    })?;
+                    dom::check_well_formed(raw)
+                        .map_err(|detail| ConvertError::InvalidPreservedBlock { line, detail })?;
                     out.push_str(raw);
                 } else {
                     let lang = info.split_whitespace().next().unwrap_or("");
@@ -154,8 +153,8 @@ impl<'a> Generator<'a> {
     /// writes its own lists; anything richer keeps its block structure.
     fn item_content(&self, node: &'a AstNode<'a>, out: &mut String) -> ConvertResult<()> {
         let children: Vec<_> = node.children().collect();
-        let single_para = children.len() == 1
-            && matches!(children[0].data.borrow().value, NodeValue::Paragraph);
+        let single_para =
+            children.len() == 1 && matches!(children[0].data.borrow().value, NodeValue::Paragraph);
         if single_para {
             self.inlines(children[0], out)?;
             return Ok(());
@@ -240,15 +239,11 @@ impl<'a> Generator<'a> {
 
     fn html_block(&self, literal: &str, out: &mut String) -> ConvertResult<()> {
         if literal.contains("confed:toc") {
-            out.push_str(
-                r#"<ac:structured-macro ac:name="toc" ac:schema-version="1" />"#,
-            );
+            out.push_str(r#"<ac:structured-macro ac:name="toc" ac:schema-version="1" />"#);
             return Ok(());
         }
         if let Some((title, body)) = split_details(literal) {
-            out.push_str(
-                r#"<ac:structured-macro ac:name="expand" ac:schema-version="1">"#,
-            );
+            out.push_str(r#"<ac:structured-macro ac:name="expand" ac:schema-version="1">"#);
             let title = dom::unescape(&title);
             if !title.trim().is_empty() && title.trim() != "Details" {
                 out.push_str(&format!(
@@ -345,10 +340,7 @@ impl<'a> Generator<'a> {
             let body = if label.contains('<') {
                 format!("<ac:link-body>{label}</ac:link-body>")
             } else {
-                format!(
-                    "<ac:plain-text-link-body>{}</ac:plain-text-link-body>",
-                    cdata_text(label)
-                )
+                format!("<ac:plain-text-link-body>{}</ac:plain-text-link-body>", cdata_text(label))
             };
             return format!("<ac:link><ri:page {attr} />{body}</ac:link>");
         }
@@ -411,10 +403,8 @@ pub fn patch(
 
     let new_ranges = mdblock::split_blocks(new_markdown);
     let base_hashes: Vec<String> = base_map.blocks.iter().map(|b| b.hash.clone()).collect();
-    let new_texts: Vec<String> = new_ranges
-        .iter()
-        .map(|(s, e)| slice_lines(new_markdown, *s, *e))
-        .collect();
+    let new_texts: Vec<String> =
+        new_ranges.iter().map(|(s, e)| slice_lines(new_markdown, *s, *e)).collect();
     let new_hashes: Vec<String> = new_texts.iter().map(|t| hash_text(t)).collect();
 
     // Everything before the first block (a stray comment, indentation) is not
@@ -475,11 +465,7 @@ fn self_generate(
 /// a run of unchanged blocks reproduces the base byte-for-byte.
 fn verbatim_with_gap<'s>(storage: &'s str, map: &BlockMap, index: usize) -> &'s str {
     let (start, end) = map.blocks[index].storage_span;
-    let gap_end = map
-        .blocks
-        .get(index + 1)
-        .map(|b| b.storage_span.0)
-        .unwrap_or(storage.len());
+    let gap_end = map.blocks.get(index + 1).map(|b| b.storage_span.0).unwrap_or(storage.len());
     &storage[start..gap_end.max(end)]
 }
 
@@ -493,12 +479,8 @@ fn check_map_matches(
     base_map: &BlockMap,
     base_markdown: &str,
 ) -> ConvertResult<()> {
-    base_map
-        .validate_spans(base_storage.len())
-        .map_err(ConvertError::StaleBlockMap)?;
-    base_map
-        .validate_md_spans()
-        .map_err(ConvertError::StaleBlockMap)?;
+    base_map.validate_spans(base_storage.len()).map_err(ConvertError::StaleBlockMap)?;
+    base_map.validate_md_spans().map_err(ConvertError::StaleBlockMap)?;
 
     let ranges = mdblock::split_blocks(base_markdown);
     if ranges.len() != base_map.blocks.len() {
@@ -555,10 +537,7 @@ fn strip_tags(s: &str) -> String {
 
 /// Undo `to_markdown`'s angle-bracket wrapping of destinations with spaces.
 fn unwrap_destination(url: &str) -> String {
-    url.strip_prefix('<')
-        .and_then(|u| u.strip_suffix('>'))
-        .unwrap_or(url)
-        .to_string()
+    url.strip_prefix('<').and_then(|u| u.strip_suffix('>')).unwrap_or(url).to_string()
 }
 
 /// The title and body of a `<details><summary>…</summary>…</details>` block.

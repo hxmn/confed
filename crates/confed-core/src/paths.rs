@@ -76,10 +76,7 @@ pub fn plan_paths(
             parts.push(sidecar_dir_name(slug));
             parts.join("/")
         };
-        out.insert(
-            page.page_id.clone(),
-            Placement { slug: slug.clone(), path, sidecar },
-        );
+        out.insert(page.page_id.clone(), Placement { slug: slug.clone(), path, sidecar });
     }
     out
 }
@@ -100,10 +97,7 @@ fn ancestor_slugs(
             break;
         }
         let Some(parent) = by_id.get(parent_id.as_str()) else { break };
-        let slug = slugs
-            .get(&parent_id)
-            .cloned()
-            .unwrap_or_else(|| slugify(&parent.title));
+        let slug = slugs.get(&parent_id).cloned().unwrap_or_else(|| slugify(&parent.title));
         chain.push(slug);
         seen.push(parent_id.clone());
         current = parent.parent_id.clone();
@@ -122,11 +116,7 @@ pub fn relative_link(from: &str, to: &str) -> String {
     };
     let to_parts: Vec<&str> = to.split('/').collect();
 
-    let common = from_dir
-        .iter()
-        .zip(to_parts.iter())
-        .take_while(|(a, b)| a == b)
-        .count();
+    let common = from_dir.iter().zip(to_parts.iter()).take_while(|(a, b)| a == b).count();
 
     let mut out: Vec<String> = std::iter::repeat_n("..".to_string(), from_dir.len() - common)
         .chain(to_parts[common..].iter().map(|s| (*s).to_string()))
@@ -189,8 +179,11 @@ mod tests {
 
     #[test]
     fn siblings_with_the_same_title_get_distinct_files() {
-        let pages =
-            vec![page("1", "Parent", None), page("2", "Plan", Some("1")), page("3", "Plan", Some("1"))];
+        let pages = vec![
+            page("1", "Parent", None),
+            page("2", "Plan", Some("1")),
+            page("3", "Plan", Some("1")),
+        ];
         let placed = plan_paths(&pages, &HashMap::new());
         assert_ne!(placed["2"].path, placed["3"].path);
         assert!(placed["3"].path.contains('~'));
@@ -248,10 +241,7 @@ mod tests {
         assert_eq!(relative_link("Handbook/Onboarding.md", "Handbook/Policies.md"), "Policies.md");
         assert_eq!(relative_link("Handbook/Onboarding.md", "Index.md"), "../Index.md");
         assert_eq!(relative_link("Index.md", "Handbook/Onboarding.md"), "Handbook/Onboarding.md");
-        assert_eq!(
-            relative_link("A/B/Deep.md", "A/C/Other.md"),
-            "../C/Other.md"
-        );
+        assert_eq!(relative_link("A/B/Deep.md", "A/C/Other.md"), "../C/Other.md");
         assert_eq!(relative_link("Page.md", "Page.md"), "Page.md");
     }
 

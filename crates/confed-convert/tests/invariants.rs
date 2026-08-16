@@ -19,17 +19,8 @@ fn parser_survives_the_corpus_and_spans_reproduce_the_source() {
             assert!(e <= f.storage.len(), "{}: span past the end", f.name);
             assert!(s >= prev_end, "{}: overlapping spans", f.name);
             // The invariant the whole patcher rests on.
-            assert_eq!(
-                &f.storage[s..e].len(),
-                &(e - s),
-                "{}: span is not a byte range",
-                f.name
-            );
-            assert!(
-                !f.storage[s..e].trim().is_empty(),
-                "{}: a block cannot be blank",
-                f.name
-            );
+            assert_eq!(&f.storage[s..e].len(), &(e - s), "{}: span is not a byte range", f.name);
+            assert!(!f.storage[s..e].trim().is_empty(), "{}: a block cannot be blank", f.name);
             prev_end = e;
         }
     }
@@ -39,12 +30,8 @@ fn parser_survives_the_corpus_and_spans_reproduce_the_source() {
 fn block_map_spans_are_valid_for_every_fixture() {
     for f in corpus::load() {
         let c = storage_to_markdown(&f.storage, &corpus::options()).unwrap();
-        c.block_map
-            .validate_spans(f.storage.len())
-            .unwrap_or_else(|e| panic!("{}: {e}", f.name));
-        c.block_map
-            .validate_md_spans()
-            .unwrap_or_else(|e| panic!("{}: {e}", f.name));
+        c.block_map.validate_spans(f.storage.len()).unwrap_or_else(|e| panic!("{}: {e}", f.name));
+        c.block_map.validate_md_spans().unwrap_or_else(|e| panic!("{}: {e}", f.name));
     }
 }
 
@@ -56,8 +43,7 @@ fn rendered_markdown_re_splits_into_the_same_blocks() {
     for f in corpus::load() {
         let c = storage_to_markdown(&f.storage, &corpus::options()).unwrap();
         let ranges = mdblock::split_blocks(&c.markdown);
-        let expected: Vec<(usize, usize)> =
-            c.block_map.blocks.iter().map(|b| b.md_span).collect();
+        let expected: Vec<(usize, usize)> = c.block_map.blocks.iter().map(|b| b.md_span).collect();
         assert_eq!(
             ranges, expected,
             "{}: re-splitting the Markdown disagrees with the block map\n--- markdown ---\n{}",

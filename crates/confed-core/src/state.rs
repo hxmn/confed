@@ -294,9 +294,7 @@ impl StateDb {
 
     /// Cheap corruption check, used by `confed doctor`.
     pub fn integrity_check(&self) -> Result<String> {
-        Ok(self
-            .conn
-            .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))?)
+        Ok(self.conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))?)
     }
 
     // ---- meta -------------------------------------------------------------
@@ -558,8 +556,9 @@ impl StateDb {
     }
 
     pub fn pending_fetches(&self) -> Result<Vec<(String, Vec<String>)>> {
-        let mut stmt =
-            self.conn.prepare("SELECT page_id, needs FROM fetch_queue WHERE done = 0 ORDER BY page_id")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT page_id, needs FROM fetch_queue WHERE done = 0 ORDER BY page_id")?;
         let rows = stmt.query_map([], |r| {
             let needs: String = r.get(1)?;
             Ok((r.get::<_, String>(0)?, needs))
@@ -584,9 +583,11 @@ impl StateDb {
     }
 
     pub fn fetch_queue_len(&self) -> Result<(usize, usize)> {
-        let total: i64 = self.conn.query_row("SELECT COUNT(*) FROM fetch_queue", [], |r| r.get(0))?;
+        let total: i64 =
+            self.conn.query_row("SELECT COUNT(*) FROM fetch_queue", [], |r| r.get(0))?;
         let done: i64 =
-            self.conn.query_row("SELECT COUNT(*) FROM fetch_queue WHERE done = 1", [], |r| r.get(0))?;
+            self.conn
+                .query_row("SELECT COUNT(*) FROM fetch_queue WHERE done = 1", [], |r| r.get(0))?;
         Ok((done as usize, total as usize))
     }
 
@@ -755,8 +756,7 @@ fn remote_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RemotePage> {
 
 /// Bodies are stored compressed: a space of a few thousand pages is mostly XHTML.
 fn compress(text: &str) -> Result<Vec<u8>> {
-    zstd::encode_all(text.as_bytes(), 3)
-        .map_err(|e| ConfedError::io("compressing page body", e))
+    zstd::encode_all(text.as_bytes(), 3).map_err(|e| ConfedError::io("compressing page body", e))
 }
 
 fn decompress(bytes: &[u8]) -> Result<String> {

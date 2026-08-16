@@ -15,11 +15,8 @@ use std::fmt::Write;
 pub fn run(ctx: &mut Context, args: &ResolveArgs) -> Result<Output> {
     let ws = ctx.workspace()?;
     let scan = worktree::scan(ws)?;
-    let conflicted: Vec<_> = scan
-        .pages
-        .iter()
-        .filter(|p| p.state == PageState::Conflicted)
-        .collect();
+    let conflicted: Vec<_> =
+        scan.pages.iter().filter(|p| p.state == PageState::Conflicted).collect();
 
     if args.list {
         let mut human = String::new();
@@ -63,11 +60,8 @@ pub fn run(ctx: &mut Context, args: &ResolveArgs) -> Result<Output> {
         let content = std::fs::read_to_string(&path)
             .map_err(|e| ConfedError::io(format!("reading {}", record.local_path), e))?;
 
-        let cleaned = if args.ours || args.theirs {
-            take_side(&content, args.ours)
-        } else {
-            content.clone()
-        };
+        let cleaned =
+            if args.ours || args.theirs { take_side(&content, args.ours) } else { content.clone() };
 
         let ws = ctx.workspace_mut()?;
         let markers = finish_resolution(ws, &record, &content, &cleaned)?;
@@ -98,10 +92,7 @@ pub fn run(ctx: &mut Context, args: &ResolveArgs) -> Result<Output> {
         );
     }
 
-    let mut output = Output::new(
-        json!({ "resolved": resolved, "remaining": remaining }),
-        human,
-    );
+    let mut output = Output::new(json!({ "resolved": resolved, "remaining": remaining }), human);
     if !remaining.is_empty() {
         output.exit = confed_core::ExitCode::State;
     }
@@ -205,9 +196,7 @@ fn take_side(content: &str, ours: bool) -> String {
     for segment in split_conflicts(content) {
         match segment {
             Segment::Text(text) => out.push_str(&text),
-            Segment::Conflict(hunk) => {
-                out.push_str(if ours { &hunk.ours } else { &hunk.theirs })
-            }
+            Segment::Conflict(hunk) => out.push_str(if ours { &hunk.ours } else { &hunk.theirs }),
         }
     }
     out
@@ -233,11 +222,14 @@ pub fn finish_resolution(
         write_atomic(&ws.absolute(&record.local_path), resolved)?;
     }
 
-    // Recompute the hash so the file's new content becomes the base.
-    let file = confed_core::frontmatter::parse(resolved, &record.local_path)?;
+    // Parse to be sure the resolution is still a valid page, but leave
+    // `markdown_hash` pointing at what the last sync wrote: the resolved text is
+    // a local edit on top of it, so `status` says "modified" and `push` has
+    // something to send. Adopting the resolved hash here would mark the page
+    // clean and silently strand the merge on disk.
+    confed_core::frontmatter::parse(resolved, &record.local_path)?;
     let mut updated = record.clone();
     updated.sync_state = SyncState::Clean;
-    updated.markdown_hash = file.content_hash();
 
     ws.state().upsert_page(&updated)?;
     ws.state().log("resolve", Some(&record.page_id), None, Some(updated.version), "ok", None)?;
@@ -277,6 +269,89 @@ mod tests {
         let plain = "just\nsome\nlines\n";
         assert_eq!(take_side(plain, true), plain);
         assert_eq!(split_conflicts(plain), [Segment::Text(plain.into())]);
+    }
+
+    /// A page file with one conflict in its body, as `pull` leaves it.
+    fn merged_page() -> String {
+        use confed_core::frontmatter::{Frontmatter, Managed, MarkdownFile};
+        let mut managed = Managed::new("1", "DOCS", 2);
+        managed.status = "current".into();
+        MarkdownFile::new(
+            Frontmatter {
+                title: "Runbook".into(),
+                labels: Vec::new(),
+                parent_id: None,
+                managed: Some(managed),
+                extra: Default::default(),
+            },
+            "<<<<<<< local\nours\n||||||| base\nbase\n=======\ntheirs\n>>>>>>> remote (v2)\n",
+        )
+        .render()
+        .expect("render")
+    }
+
+    fn conflicted_workspace() -> (tempfile::TempDir, Workspace, PageRecord, String) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ws = Workspace::create(dir.path()).expect("workspace");
+        let page = merged_page();
+        std::fs::write(dir.path().join("Runbook.md"), &page).expect("write");
+
+        let merged = confed_core::frontmatter::parse(&page, "Runbook.md").expect("parse");
+        let record = PageRecord {
+            page_id: "1".into(),
+            title: "Runbook".into(),
+            slug: "Runbook".into(),
+            local_path: "Runbook.md".into(),
+            parent_id: None,
+            position: None,
+            version: 2,
+            status: "current".into(),
+            labels: Vec::new(),
+            author: None,
+            created_at: None,
+            updated_at: None,
+            storage_body: "<p>theirs</p>".into(),
+            storage_hash: "sh".into(),
+            markdown_hash: merged.content_hash(),
+            block_map: None,
+            sync_state: SyncState::Conflicted,
+            synced_at: confed_core::state::now(),
+        };
+        ws.state().upsert_page(&record).expect("upsert");
+        (dir, ws, record, page)
+    }
+
+    /// Resolving clears the conflict, but the merge result is a local edit that
+    /// still has to reach the server — the page must not come back "clean".
+    #[test]
+    fn a_resolved_page_stays_pushable() {
+        let (_dir, mut ws, record, page) = conflicted_workspace();
+        let resolved = take_side(&page, true);
+
+        let markers = finish_resolution(&mut ws, &record, &page, &resolved).unwrap();
+        assert!(markers.is_empty());
+
+        let stored = ws.state().get_page("1").unwrap().unwrap();
+        assert_eq!(stored.sync_state, SyncState::Clean);
+        assert_eq!(stored.markdown_hash, record.markdown_hash, "the base is what pull wrote");
+
+        let scan = worktree::scan(&ws).unwrap();
+        assert_eq!(scan.pages[0].state, PageState::Modified);
+        assert!(!merge::has_conflict_markers(
+            &std::fs::read_to_string(ws.absolute("Runbook.md")).unwrap()
+        ));
+    }
+
+    #[test]
+    fn a_file_that_still_has_markers_is_reported_and_left_alone() {
+        let (_dir, mut ws, record, page) = conflicted_workspace();
+        let markers = finish_resolution(&mut ws, &record, &page, &page).unwrap();
+        assert_eq!(markers.len(), 3, "one `<<<`, one `|||`, one `>>>`: {markers:?}");
+        assert_eq!(
+            ws.state().get_page("1").unwrap().unwrap().sync_state,
+            SyncState::Conflicted,
+            "nothing is cleared while the file still has markers"
+        );
     }
 
     #[test]

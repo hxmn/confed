@@ -33,9 +33,7 @@ fn sidecar_path(ctx: &Context, page_id: &str) -> Result<std::path::PathBuf> {
         .state()
         .get_page(page_id)?
         .ok_or_else(|| ConfedError::NotFound(format!("no page {page_id}")))?;
-    Ok(ws
-        .absolute(&paths::sidecar_for(&record.local_path))
-        .join(comments::COMMENTS_FILENAME))
+    Ok(ws.absolute(&paths::sidecar_for(&record.local_path)).join(comments::COMMENTS_FILENAME))
 }
 
 fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Result<Output> {
@@ -111,10 +109,7 @@ async fn add(
         Some(text) => text.to_string(),
         None if ctx.is_interactive() => crate::prompt::read_line("Comment: ")?,
         None => {
-            return Err(ConfedError::usage_with_hint(
-                "no comment body",
-                "pass -m \"your comment\"",
-            ))
+            return Err(ConfedError::usage_with_hint("no comment body", "pass -m \"your comment\""))
         }
     };
     if body.trim().is_empty() {
@@ -148,10 +143,8 @@ async fn add(
         author: None,
         date: None,
         resolved: false,
-        anchor: anchor.map(|text| confed_api::InlineAnchor {
-            text: text.to_string(),
-            ..Default::default()
-        }),
+        anchor: anchor
+            .map(|text| confed_api::InlineAnchor { text: text.to_string(), ..Default::default() }),
         body: body.clone(),
     });
 
@@ -165,9 +158,8 @@ async fn add(
         let engine = ctx.engine(client)?;
         let ws = ctx.workspace_mut()?;
         let _lock = ws.lock()?;
-        let outcome = engine
-            .push(ws, &PushOptions { with_comments: true, ..Default::default() })
-            .await?;
+        let outcome =
+            engine.push(ws, &PushOptions { with_comments: true, ..Default::default() }).await?;
         human = format!("Posted {} comment(s).\n", outcome.comments_added.len());
         result["posted"] = json!(outcome.comments_added);
         result["draft"] = json!(false);
@@ -254,12 +246,7 @@ fn verify_anchor_is_unique(ctx: &Context, page_id: &str, anchor: &str) -> Result
 fn page_of_comment(ctx: &Context, comment_id: &str) -> Result<String> {
     let ws = ctx.workspace()?;
     for record in ws.state().all_pages()? {
-        if ws
-            .state()
-            .page_comments(&record.page_id)?
-            .iter()
-            .any(|c| c.comment_id == comment_id)
-        {
+        if ws.state().page_comments(&record.page_id)?.iter().any(|c| c.comment_id == comment_id) {
             return Ok(record.page_id);
         }
     }

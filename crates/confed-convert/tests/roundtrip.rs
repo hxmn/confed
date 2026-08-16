@@ -3,9 +3,7 @@
 mod corpus;
 
 use confed_convert::blockmap::{slice_lines, BlockKind};
-use confed_convert::{
-    markdown_to_storage, storage_to_markdown, ConvertError, ConvertOptions,
-};
+use confed_convert::{markdown_to_storage, storage_to_markdown, ConvertError, ConvertOptions};
 
 /// `confluence` fences go back up exactly as they came down. This is the
 /// property that lets confed be trusted with macros it does not understand.
@@ -85,17 +83,9 @@ fn an_edited_but_still_valid_fence_is_accepted() {
 /// something confed cannot otherwise edit.
 #[test]
 fn deleting_a_fence_deletes_the_macro() {
-    let f = corpus::load()
-        .into_iter()
-        .find(|f| f.name == "23-unknown-macros")
-        .expect("fixture");
+    let f = corpus::load().into_iter().find(|f| f.name == "23-unknown-macros").expect("fixture");
     let c = storage_to_markdown(&f.storage, &corpus::options()).unwrap();
-    let victim = c
-        .block_map
-        .blocks
-        .iter()
-        .position(|b| b.kind == BlockKind::Preserved)
-        .unwrap();
+    let victim = c.block_map.blocks.iter().position(|b| b.kind == BlockKind::Preserved).unwrap();
     let mut new_md = String::new();
     for (i, b) in c.block_map.blocks.iter().enumerate() {
         if i == victim {
@@ -111,8 +101,8 @@ fn deleting_a_fence_deletes_the_macro() {
         &corpus::options(),
     )
     .unwrap();
-    let raw = &f.storage[c.block_map.blocks[victim].storage_span.0
-        ..c.block_map.blocks[victim].storage_span.1];
+    let raw = &f.storage
+        [c.block_map.blocks[victim].storage_span.0..c.block_map.blocks[victim].storage_span.1];
     assert!(!out.contains(raw), "the deleted macro is still there");
 }
 

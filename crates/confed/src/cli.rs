@@ -550,7 +550,7 @@ pub struct ConfigArgs {
 
 #[derive(Args, Debug)]
 pub struct DoctorArgs {
-    /// Apply the safe fixes (permissions, .gitignore, agent docs).
+    /// Apply the safe fixes (.gitignore, agent docs).
     #[arg(long)]
     pub fix: bool,
 }

@@ -15,10 +15,11 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 /// The site root a Cloud tenant exposes: origin + `/wiki`.
 fn client(server: &MockServer) -> CloudClient {
     let base = format!("{}/wiki", server.uri());
-    let http = Http::new(&base, Auth::Basic {
-        user: "tester@example.com".into(),
-        secret: confed_api::Secret::new("token"),
-    }, 4)
+    let http = Http::new(
+        &base,
+        Auth::Basic { user: "tester@example.com".into(), secret: confed_api::Secret::new("token") },
+        4,
+    )
     .unwrap()
     .with_policy(RetryPolicy::immediate());
     CloudClient::new(&base, Auth::None, 4).unwrap().with_http(http)
@@ -33,9 +34,10 @@ fn space_body() -> serde_json::Value {
 async fn mount_space_lookup(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/wiki/api/v2/spaces/500"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            json!({ "id": "500", "key": "DOCS", "name": "Documentation" }),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "id": "500", "key": "DOCS", "name": "Documentation" })),
+        )
         .mount(server)
         .await;
 }

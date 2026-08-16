@@ -16,17 +16,11 @@ pub mod fetch {
         let client = ctx.build_client()?;
         let engine = ctx.engine(client)?;
 
-        let pages = args
-            .pages
-            .iter()
-            .map(|p| ctx.resolve_page(p))
-            .collect::<Result<Vec<_>>>()?;
+        let pages = args.pages.iter().map(|p| ctx.resolve_page(p)).collect::<Result<Vec<_>>>()?;
 
         let ws = ctx.workspace_mut()?;
         let _lock = ws.lock()?;
-        let outcome = engine
-            .fetch(ws, &FetchOptions { pages, since: args.since.clone() })
-            .await?;
+        let outcome = engine.fetch(ws, &FetchOptions { pages, since: args.since.clone() }).await?;
 
         let style = &ctx.style;
         let mut human = String::new();
@@ -50,7 +44,8 @@ pub mod fetch {
             );
         }
         if outcome.fetched > 0 {
-            let _ = writeln!(human, "{}", style.dim("Run `confed pull` to write the changes to disk."));
+            let _ =
+                writeln!(human, "{}", style.dim("Run `confed pull` to write the changes to disk."));
         }
 
         let failures = outcome.failed.len();
@@ -152,11 +147,8 @@ pub mod pull {
             );
         }
 
-        let skipped: Vec<String> = outcome
-            .skipped_dirty
-            .iter()
-            .map(|b| format!("{}: {}", b.path, b.reason))
-            .collect();
+        let skipped: Vec<String> =
+            outcome.skipped_dirty.iter().map(|b| format!("{}: {}", b.path, b.reason)).collect();
         let mut output = Output::from_data(&outcome, human).warn_all(skipped);
         if conflicts > 0 {
             output.exit = ExitCode::Conflict;
@@ -168,12 +160,7 @@ pub mod pull {
         client: &std::sync::Arc<dyn confed_api::ConfluenceClient>,
         cql: &str,
     ) -> Result<Vec<String>> {
-        Ok(client
-            .search_cql(cql, 500)
-            .await?
-            .into_iter()
-            .map(|r| r.page_id.0)
-            .collect())
+        Ok(client.search_cql(cql, 500).await?.into_iter().map(|r| r.page_id.0).collect())
     }
 }
 
@@ -203,10 +190,15 @@ pub mod push {
             }
             let plan = engine.plan_push(ctx.workspace()?, &opts)?;
             if plan.is_empty() {
-                return Ok(Output::new(json!({"pushed": [], "created": [], "deleted": []}),
-                    "Nothing to push.\n"));
+                return Ok(Output::new(
+                    json!({"pushed": [], "created": [], "deleted": []}),
+                    "Nothing to push.\n",
+                ));
             }
             for op in &plan.ops {
+                if ctx.global.yes {
+                    continue;
+                }
                 let question = format!("{:?} {} ({})?", op.kind, op.path, op.ops.join(", "));
                 if !crate::prompt::confirm(&question, true)? {
                     return Ok(Output::new(json!({"cancelled": true}), "Cancelled.\n"));
@@ -237,10 +229,22 @@ pub mod push {
             let _ = writeln!(human, "  {:<8} {}", "deleted", page.path);
         }
         for skipped in &outcome.skipped {
-            let _ = writeln!(human, "  {:<8} {} — {}", style.yellow("skipped"), skipped.path, skipped.reason);
+            let _ = writeln!(
+                human,
+                "  {:<8} {} — {}",
+                style.yellow("skipped"),
+                skipped.path,
+                skipped.reason
+            );
         }
         for failure in &outcome.failed {
-            let _ = writeln!(human, "  {:<8} {} — {}", style.red("failed"), failure.page_id, failure.error);
+            let _ = writeln!(
+                human,
+                "  {:<8} {} — {}",
+                style.red("failed"),
+                failure.page_id,
+                failure.error
+            );
         }
 
         let total = outcome.created.len() + outcome.pushed.len() + outcome.deleted.len();

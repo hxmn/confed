@@ -49,10 +49,7 @@ pub async fn run_and_push(ctx: &mut Context, args: &NewArgs) -> Result<Output> {
     let ws = ctx.workspace_mut()?;
     let _lock = ws.lock()?;
     let outcome = engine
-        .push(
-            ws,
-            &confed_core::sync::PushOptions { scope: vec![path], ..Default::default() },
-        )
+        .push(ws, &confed_core::sync::PushOptions { scope: vec![path], ..Default::default() })
         .await?;
 
     let human = format!(
@@ -137,13 +134,7 @@ mod tests {
     }
 
     fn args(path: &str) -> NewArgs {
-        NewArgs {
-            path: path.into(),
-            title: None,
-            labels: vec![],
-            template: None,
-            push: false,
-        }
+        NewArgs { path: path.into(), title: None, labels: vec![], template: None, push: false }
     }
 
     #[test]

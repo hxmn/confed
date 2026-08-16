@@ -26,6 +26,9 @@ struct PageDiff {
     hunks: Vec<Hunk>,
     #[serde(skip_serializing_if = "Option::is_none")]
     frontmatter_changes: Option<serde_json::Value>,
+    /// What the server changed since the same base. Only filled by `--base`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    remote_hunks: Vec<Hunk>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +88,22 @@ fn collect(ctx: &Context, args: &DiffArgs, against_remote: bool) -> Result<Vec<P
             ("base", render_side(&base_record.storage_body, &convert_opts, args)?)
         };
 
+        // --base adds what the *server* changed since the same base, so both
+        // sides of a divergence are visible next to each other.
+        let remote_hunks = if args.base {
+            match remote.iter().find(|r| r.page_id == page_id) {
+                Some(remote_page) => {
+                    let storage = remote_page.storage_body.clone().unwrap_or_default();
+                    let remote_text = render_side(&storage, &convert_opts, args)?;
+                    let base_text = render_side(&base_record.storage_body, &convert_opts, args)?;
+                    build_hunks(&TextDiff::from_lines(&base_text, &remote_text))
+                }
+                None => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
         let right_text = if args.storage {
             // What push would actually upload.
             build_push_storage(base_record, &local.file.body, &convert_opts)?
@@ -107,12 +126,9 @@ fn collect(ctx: &Context, args: &DiffArgs, against_remote: bool) -> Result<Vec<P
             change: if against_remote { "differs_from_remote" } else { "modified" },
             additions,
             deletions,
-            hunks: if args.name_only || args.stat {
-                Vec::new()
-            } else {
-                build_hunks(&diff)
-            },
+            hunks: if args.name_only || args.stat { Vec::new() } else { build_hunks(&diff) },
             frontmatter_changes,
+            remote_hunks,
         });
         let _ = left_label;
     }
@@ -126,11 +142,7 @@ fn render_side(storage: &str, opts: &ConvertOptions, args: &DiffArgs) -> Result<
     Ok(confed_convert::storage_to_markdown(storage, opts)?.markdown)
 }
 
-fn build_push_storage(
-    base: &PageRecord,
-    new_body: &str,
-    opts: &ConvertOptions,
-) -> Result<String> {
+fn build_push_storage(base: &PageRecord, new_body: &str, opts: &ConvertOptions) -> Result<String> {
     let base_md = confed_convert::storage_to_markdown(&base.storage_body, opts)?;
     let block_map = base
         .block_map
@@ -145,9 +157,7 @@ fn build_push_storage(
         new_body,
         opts,
     )
-    .unwrap_or_else(|_| {
-        confed_convert::markdown_to_storage(new_body, opts).unwrap_or_default()
-    }))
+    .unwrap_or_else(|_| confed_convert::markdown_to_storage(new_body, opts).unwrap_or_default()))
 }
 
 fn in_scope(patterns: &[String], path: &str, page_id: &str) -> bool {
@@ -202,10 +212,25 @@ fn build_hunks<'a>(diff: &TextDiff<'a, 'a, '_, str>) -> Vec<Hunk> {
     hunks
 }
 
-fn frontmatter_diff(
-    base: &PageRecord,
-    local: &worktree::LocalFile,
-) -> Option<serde_json::Value> {
+fn write_hunks(human: &mut String, style: &crate::output::Style, hunks: &[Hunk]) {
+    for hunk in hunks {
+        let _ = writeln!(human, "{}", style.blue(&hunk.header));
+        for line in &hunk.lines {
+            let text = format!("{}{}", line.tag, line.text);
+            let _ = writeln!(
+                human,
+                "{}",
+                match line.tag {
+                    "+" => style.green(&text),
+                    "-" => style.red(&text),
+                    _ => text,
+                }
+            );
+        }
+    }
+}
+
+fn frontmatter_diff(base: &PageRecord, local: &worktree::LocalFile) -> Option<serde_json::Value> {
     let fm = &local.file.frontmatter;
     let mut changes = serde_json::Map::new();
 
@@ -256,24 +281,27 @@ fn render(ctx: &Context, args: &DiffArgs, diffs: Vec<PageDiff>) -> Result<Output
         );
     } else {
         for diff in &diffs {
-            let _ = writeln!(human, "\n{}", style.bold(&format!("--- {} ({})", diff.path, diff.title)));
+            let _ =
+                writeln!(human, "\n{}", style.bold(&format!("--- {} ({})", diff.path, diff.title)));
             if let Some(changes) = &diff.frontmatter_changes {
                 let _ = writeln!(human, "{}", style.yellow(&format!("frontmatter: {changes}")));
             }
-            for hunk in &diff.hunks {
-                let _ = writeln!(human, "{}", style.blue(&hunk.header));
-                for line in &hunk.lines {
-                    let text = format!("{}{}", line.tag, line.text);
-                    let _ = writeln!(
-                        human,
-                        "{}",
-                        match line.tag {
-                            "+" => style.green(&text),
-                            "-" => style.red(&text),
-                            _ => text,
-                        }
-                    );
+            if args.base {
+                let _ = writeln!(human, "{}", style.dim("what you changed since the base:"));
+            }
+            write_hunks(&mut human, style, &diff.hunks);
+
+            if args.base {
+                let _ = writeln!(
+                    human,
+                    "{}",
+                    style.dim("what the server changed since the same base:")
+                );
+                if diff.remote_hunks.is_empty() {
+                    let _ =
+                        writeln!(human, "  {}", style.dim("(nothing — the server has not moved)"));
                 }
+                write_hunks(&mut human, style, &diff.remote_hunks);
             }
         }
     }

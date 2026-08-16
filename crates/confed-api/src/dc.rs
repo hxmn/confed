@@ -67,7 +67,8 @@ impl DcClient {
 fn as_conflict(err: ApiError) -> ApiError {
     match err {
         ApiError::Server { status, body }
-            if status == 409 || (status == 400 && body.to_ascii_lowercase().contains("version")) =>
+            if status == 409
+                || (status == 400 && body.to_ascii_lowercase().contains("version")) =>
         {
             ApiError::Conflict(body)
         }
@@ -230,11 +231,9 @@ impl ConfluenceClient for DcClient {
             // Re-parenting is a normal content update with new ancestors, which means
             // it needs a version bump like any other edit.
             Position::Append => {
-                let current = self
-                    .fetch_content(id.as_str(), &[("expand", "version".to_string())])
-                    .await?;
-                let next_version =
-                    current.version.as_ref().and_then(|v| v.number).unwrap_or(1) + 1;
+                let current =
+                    self.fetch_content(id.as_str(), &[("expand", "version".to_string())]).await?;
+                let next_version = current.version.as_ref().and_then(|v| v.number).unwrap_or(1) + 1;
                 let payload = json!({
                     "id": id.as_str(),
                     "type": "page",
@@ -288,9 +287,7 @@ impl ConfluenceClient for DcClient {
     }
 
     async fn remove_label(&self, id: &PageId, label: &str) -> ApiResult<()> {
-        self.http
-            .delete(&format!("rest/api/content/{id}/label?name={}", encode(label)))
-            .await
+        self.http.delete(&format!("rest/api/content/{id}/label?name={}", encode(label))).await
     }
 
     async fn list_attachments(&self, id: &PageId) -> ApiResult<Vec<Attachment>> {
@@ -433,10 +430,7 @@ impl ConfluenceClient for DcClient {
         let content = self
             .fetch_content(
                 id.as_str(),
-                &[
-                    ("version", version.to_string()),
-                    ("expand", FULL_PAGE_EXPAND.to_string()),
-                ],
+                &[("version", version.to_string()), ("expand", FULL_PAGE_EXPAND.to_string())],
             )
             .await?;
         let mut page = content.into_page("");

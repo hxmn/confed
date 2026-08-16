@@ -66,9 +66,8 @@ pub fn validate(root: &Value, schema: &Value, instance: &Value, path: &str) -> V
     // `log --local`) lists them under `anyOf`; one match is enough.
     for keyword in ["anyOf", "oneOf"] {
         if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
-            let matched = branches
-                .iter()
-                .any(|branch| validate(root, branch, instance, path).is_empty());
+            let matched =
+                branches.iter().any(|branch| validate(root, branch, instance, path).is_empty());
             if !matched {
                 errors.push(format!("{path}: matched none of the {keyword} branches"));
             }
@@ -84,7 +83,10 @@ pub fn validate(root: &Value, schema: &Value, instance: &Value, path: &str) -> V
 
     if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
         if !allowed.contains(instance) {
-            errors.push(format!("{path}: {instance} is not one of {}", Value::Array(allowed.clone())));
+            errors.push(format!(
+                "{path}: {instance} is not one of {}",
+                Value::Array(allowed.clone())
+            ));
         }
     }
     if let Some(expected) = schema.get("const") {
@@ -152,10 +154,9 @@ fn resolve<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
 fn type_matches(expected: &Value, instance: &Value) -> bool {
     match expected {
         Value::String(name) => is_type(name, instance),
-        Value::Array(names) => names
-            .iter()
-            .filter_map(Value::as_str)
-            .any(|name| is_type(name, instance)),
+        Value::Array(names) => {
+            names.iter().filter_map(Value::as_str).any(|name| is_type(name, instance))
+        }
         _ => true,
     }
 }
@@ -248,13 +249,12 @@ mod tests {
             let schema: Value = serde_json::from_str(&text)
                 .unwrap_or_else(|e| panic!("{}: {e}", entry.path().display()));
             assert_eq!(
-                schema["$schema"], json!("https://json-schema.org/draft/2020-12/schema"),
-                "{} must declare its dialect", entry.path().display()
+                schema["$schema"],
+                json!("https://json-schema.org/draft/2020-12/schema"),
+                "{} must declare its dialect",
+                entry.path().display()
             );
-            assert!(
-                schema["title"].is_string(),
-                "{} needs a title", entry.path().display()
-            );
+            assert!(schema["title"].is_string(), "{} needs a title", entry.path().display());
         }
     }
 }

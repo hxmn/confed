@@ -34,8 +34,7 @@ pub async fn run(
         ));
     }
 
-    let init_output =
-        crate::commands::init::initialize(ctx, &args.init, input, &dir).await?;
+    let init_output = crate::commands::init::initialize(ctx, &args.init, input, &dir).await?;
 
     let client = ctx.build_client()?;
     let engine = ctx.engine(client)?;
@@ -99,8 +98,7 @@ mod tests {
         assert_eq!(base, "https://wiki.corp.example.com");
         assert_eq!(key, "DOCS");
 
-        let (base, key) =
-            parse_space_url("https://wiki.corp/confluence/display/OPS").unwrap();
+        let (base, key) = parse_space_url("https://wiki.corp/confluence/display/OPS").unwrap();
         assert_eq!(base, "https://wiki.corp/confluence");
         assert_eq!(key, "OPS");
     }

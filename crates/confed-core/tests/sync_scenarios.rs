@@ -179,10 +179,7 @@ both_flavors!(edits_on_both_sides_merge_when_they_do_not_overlap, |mut h: Harnes
     // We change the last paragraph; the server changes the first.
     let file = h.read("Doc.md").replace("Third.", "Third, edited locally.");
     h.write("Doc.md", &file);
-    h.mock.remote_edit(
-        "1001",
-        "<p>First, edited on the server.</p><p>Second.</p><p>Third.</p>",
-    );
+    h.mock.remote_edit("1001", "<p>First, edited on the server.</p><p>Second.</p><p>Third.</p>");
 
     h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
     assert_eq!(h.status("1001"), PageState::Diverged);
@@ -387,7 +384,11 @@ both_flavors!(labels_sync_in_both_directions, |mut h: Harness| async move {
 
 both_flavors!(comments_are_written_to_the_sidecar, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
-    h.mock.seed_comment("1001", "<p>Should this mention the VPN?</p>", confed_api::CommentKind::Footer);
+    h.mock.seed_comment(
+        "1001",
+        "<p>Should this mention the VPN?</p>",
+        confed_api::CommentKind::Footer,
+    );
     h.pull().await;
 
     let sidecar = h.read(".Discussed/comments.md");
@@ -463,23 +464,22 @@ async fn inline_anchors_are_refreshed_when_the_body_changes() {
     h.pull().await;
 
     let stored_anchor = |h: &Harness| -> confed_api::InlineAnchor {
-        let record = h
-            .ws
-            .state()
-            .page_comments("1001")
-            .unwrap()
-            .into_iter()
-            .find(|c| c.kind == "inline")
-            .expect("inline comment");
+        let record =
+            h.ws.state()
+                .page_comments("1001")
+                .unwrap()
+                .into_iter()
+                .find(|c| c.kind == "inline")
+                .expect("inline comment");
         serde_json::from_str(record.anchor.as_deref().expect("anchor")).expect("anchor json")
     };
     assert!(!stored_anchor(&h).orphaned, "the anchor starts out attached");
 
     // Move the anchored text into a different paragraph: still findable.
-    let moved = h
-        .read("Onboarding.md")
-        .replace("Read this during your first week checklist and then ask questions.",
-                 "A new opening line.\n\nLater: first week checklist.");
+    let moved = h.read("Onboarding.md").replace(
+        "Read this during your first week checklist and then ask questions.",
+        "A new opening line.\n\nLater: first week checklist.",
+    );
     h.write("Onboarding.md", &moved);
     h.engine
         .pull(&mut h.ws, &PullOptions { no_fetch: true, ..PullOptions::everything() })
@@ -517,12 +517,8 @@ async fn attachments_are_uploaded_from_the_sidecar() {
     let outcome = h.engine.push(&mut h.ws, &opts).await.expect("push");
     assert_eq!(outcome.attachments_uploaded.len(), 1, "the new file is uploaded");
 
-    let remote = h
-        .engine
-        .client()
-        .list_attachments(&confed_api::PageId::new("1001"))
-        .await
-        .unwrap();
+    let remote =
+        h.engine.client().list_attachments(&confed_api::PageId::new("1001")).await.unwrap();
     assert_eq!(remote.len(), 1);
     assert_eq!(remote[0].filename, "diagram.png");
     let first_version = remote[0].version;
@@ -536,12 +532,8 @@ async fn attachments_are_uploaded_from_the_sidecar() {
     let changed = h.engine.push(&mut h.ws, &opts).await.expect("push");
     assert_eq!(changed.attachments_uploaded.len(), 1);
 
-    let remote = h
-        .engine
-        .client()
-        .list_attachments(&confed_api::PageId::new("1001"))
-        .await
-        .unwrap();
+    let remote =
+        h.engine.client().list_attachments(&confed_api::PageId::new("1001")).await.unwrap();
     assert_eq!(remote.len(), 1, "still one attachment, not a duplicate");
     assert!(remote[0].version > first_version, "it gained a version");
 }
@@ -567,12 +559,8 @@ async fn deleting_an_attachment_requires_allow_delete() {
         .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
         .await
         .expect("push");
-    let still_there = h
-        .engine
-        .client()
-        .list_attachments(&confed_api::PageId::new("1001"))
-        .await
-        .unwrap();
+    let still_there =
+        h.engine.client().list_attachments(&confed_api::PageId::new("1001")).await.unwrap();
     assert_eq!(still_there.len(), 1, "a plain push must not delete server content");
 
     h.engine
@@ -582,12 +570,7 @@ async fn deleting_an_attachment_requires_allow_delete() {
         )
         .await
         .expect("push");
-    let gone = h
-        .engine
-        .client()
-        .list_attachments(&confed_api::PageId::new("1001"))
-        .await
-        .unwrap();
+    let gone = h.engine.client().list_attachments(&confed_api::PageId::new("1001")).await.unwrap();
     assert!(gone.is_empty(), "with --allow-delete it is removed");
 }
 

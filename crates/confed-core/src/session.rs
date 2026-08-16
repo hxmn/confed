@@ -137,8 +137,7 @@ impl SessionStore {
     }
 
     pub fn load(&self) -> Result<Option<Session>> {
-        self
-            .conn
+        self.conn
             .query_row(
                 "SELECT base_url, flavor, auth_method, username, secret_backend,
                         created_at, last_verified_at
@@ -362,9 +361,8 @@ mod tests {
         let store = SessionStore::open(dir.path()).unwrap();
         let mut session = sample(SecretBackend::Sqlite);
 
-        let backend = store
-            .save(&session, &Secret::new("pat-123"), Some(SecretBackend::Sqlite))
-            .unwrap();
+        let backend =
+            store.save(&session, &Secret::new("pat-123"), Some(SecretBackend::Sqlite)).unwrap();
         assert_eq!(backend, SecretBackend::Sqlite);
         session.secret_backend = backend;
 

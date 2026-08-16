@@ -125,9 +125,7 @@ impl MarkdownFile {
         hasher.update(fm.parent_id.clone().unwrap_or_default().as_bytes());
         hasher.update(b"\0extra\0");
         hasher.update(
-            serde_yaml::to_string(&Value::Mapping(fm.extra.clone()))
-                .unwrap_or_default()
-                .as_bytes(),
+            serde_yaml::to_string(&Value::Mapping(fm.extra.clone())).unwrap_or_default().as_bytes(),
         );
         hasher.update(b"\0body\0");
         // Normalize line endings and the trailing newline: neither is content.
@@ -208,11 +206,7 @@ pub fn parse(content: &str, path: &str) -> Result<MarkdownFile> {
     };
     let mut map = match value {
         Value::Mapping(m) => m,
-        _ => {
-            return Err(ConfedError::state(format!(
-                "{path}: frontmatter must be a YAML mapping"
-            )))
-        }
+        _ => return Err(ConfedError::state(format!("{path}: frontmatter must be a YAML mapping"))),
     };
 
     let title = match map.remove(Value::from("title")) {

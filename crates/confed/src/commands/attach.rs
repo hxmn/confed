@@ -87,7 +87,10 @@ pub async fn run(ctx: &mut Context, args: &AttachArgs) -> Result<Output> {
         let _ = writeln!(
             human,
             "  {}",
-            ctx.style.dim(&format!("reference it as ![{name}]({}/{name})", paths::sidecar_ref(&record.local_path)))
+            ctx.style.dim(&format!(
+                "reference it as ![{name}]({}/{name})",
+                paths::sidecar_ref(&record.local_path)
+            ))
         );
         attached.push(json!({ "file": name, "size": size, "sha256": sha }));
     }

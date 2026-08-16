@@ -122,12 +122,8 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
 
     // --- working tree -----------------------------------------------------
     let scan = worktree::scan(ctx.workspace()?)?;
-    let tampered: Vec<&str> = scan
-        .pages
-        .iter()
-        .filter(|p| !p.tampering.is_empty())
-        .map(|p| p.path.as_str())
-        .collect();
+    let tampered: Vec<&str> =
+        scan.pages.iter().filter(|p| !p.tampering.is_empty()).map(|p| p.path.as_str()).collect();
     if tampered.is_empty() {
         checks.push(Check::pass("frontmatter", "no tool-managed blocks were edited"));
     } else {
@@ -156,7 +152,11 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
     match ctx.workspace()?.state().get_meta("last_fetch_at")? {
         Some(ts) => {
             let age = chrono::DateTime::parse_from_rfc3339(&ts)
-                .map(|t| chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc)).num_days())
+                .map(|t| {
+                    chrono::Utc::now()
+                        .signed_duration_since(t.with_timezone(&chrono::Utc))
+                        .num_days()
+                })
                 .unwrap_or(0);
             checks.push(if age >= 7 {
                 Check::warn("last fetch", format!("{age} days ago; run `confed fetch`"))
@@ -180,7 +180,9 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
         let flavor = ctx.workspace()?.flavor()?.unwrap_or(confed_api::Flavor::Cloud);
         let space = ctx.workspace()?.space_key().unwrap_or_default();
         crate::commands::agent_docs::write(&root, &base_url, flavor, &space)?;
-        checks.push(Check::warn("agent docs", format!("missing: {}", missing_docs.join(", "))).fixed());
+        checks.push(
+            Check::warn("agent docs", format!("missing: {}", missing_docs.join(", "))).fixed(),
+        );
     } else {
         checks.push(Check::warn(
             "agent docs",
@@ -264,13 +266,8 @@ fn report(ctx: &Context, checks: Vec<Check>) -> Output {
 
     let failures = checks.iter().filter(|c| c.status == CheckStatus::Fail).count();
     let warnings = checks.iter().filter(|c| c.status == CheckStatus::Warn).count();
-    let _ = writeln!(
-        human,
-        "\n{} checks, {} failed, {} warnings",
-        checks.len(),
-        failures,
-        warnings
-    );
+    let _ =
+        writeln!(human, "\n{} checks, {} failed, {} warnings", checks.len(), failures, warnings);
 
     let mut output = Output::new(
         json!({

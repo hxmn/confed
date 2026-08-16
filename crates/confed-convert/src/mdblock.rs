@@ -34,19 +34,15 @@ pub fn split_blocks(markdown: &str) -> Vec<(usize, usize)> {
     }
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &options());
-    let mut starts: Vec<usize> = root
-        .children()
-        .map(|c| c.data.borrow().sourcepos.start.line.saturating_sub(1))
-        .collect();
+    let mut starts: Vec<usize> =
+        root.children().map(|c| c.data.borrow().sourcepos.start.line.saturating_sub(1)).collect();
     if starts.is_empty() {
         return Vec::new();
     }
     // Leading blank lines belong to the first block rather than to nothing.
     starts[0] = 0;
     starts.dedup();
-    (0..starts.len())
-        .map(|i| (starts[i], starts.get(i + 1).copied().unwrap_or(total)))
-        .collect()
+    (0..starts.len()).map(|i| (starts[i], starts.get(i + 1).copied().unwrap_or(total))).collect()
 }
 
 /// Parse once and hand back both the AST root and the block line ranges, so

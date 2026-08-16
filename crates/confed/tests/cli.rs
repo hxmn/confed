@@ -30,13 +30,17 @@ const CHILD_FILE: &str = "Team Handbook/Onboarding.md";
 /// child `Onboarding`.
 async fn dc_server() -> MockServer {
     let server = MockServer::start().await;
-    mount_whoami(&server, 200, json!({
-        "type": "known",
-        "username": "tester",
-        "userKey": "ff8081",
-        "displayName": "Test User",
-        "email": "tester@corp.example",
-    }))
+    mount_whoami(
+        &server,
+        200,
+        json!({
+            "type": "known",
+            "username": "tester",
+            "userKey": "ff8081",
+            "displayName": "Test User",
+            "email": "tester@corp.example",
+        }),
+    )
     .await;
 
     Mock::given(method("GET"))
@@ -216,8 +220,9 @@ fn stderr(output: &Output) -> String {
 /// the command's `result` against its own schema when one is published.
 fn envelope(output: &Output, command: &str) -> Value {
     let text = stdout(output);
-    let value: Value = serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{text}\n--- stderr ---\n{}", stderr(output)));
+    let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+        panic!("stdout is not JSON ({e}):\n{text}\n--- stderr ---\n{}", stderr(output))
+    });
 
     schema::check("envelope", &value);
     assert_eq!(value["confed"]["command"], json!(command), "wrong command in the envelope");
@@ -414,7 +419,11 @@ async fn a_dry_run_push_reports_the_page_without_sending_anything() {
     assert_eq!(pushed[0]["to_version"], json!(4), "a dry run predicts the next version");
     assert_eq!(pushed[0]["ops"], json!(["body"]));
 
-    assert_eq!(mutations(&server).await, Vec::<String>::new(), "--dry-run must not mutate anything");
+    assert_eq!(
+        mutations(&server).await,
+        Vec::<String>::new(),
+        "--dry-run must not mutate anything"
+    );
 
     // The real push does send it.
     let output = run(confed_authed(dir.path(), &["push", "--json", "-m", "from the test"]));
@@ -464,6 +473,46 @@ async fn last_body(server: &MockServer, http_method: &str) -> Value {
         .find(|r| r.method.as_str() == http_method)
         .unwrap_or_else(|| panic!("no {http_method} request was made"));
     serde_json::from_slice(&request.body).expect("the request body is JSON")
+}
+
+/// A file whose `page_id` has no base record is `untracked`: confed has nothing
+/// to compare it against, so it cannot tell whether the file holds unpushed
+/// work. Rebuilding `.state.db` — what a fresh clone of a repository that
+/// (correctly) does not track it looks like — must not cost you those edits.
+#[tokio::test]
+async fn pull_refuses_to_overwrite_an_untracked_file() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+
+    let mut content = read(dir.path(), ROOT_FILE);
+    content.push_str("\nWork I have not pushed yet.\n");
+    std::fs::write(dir.path().join(ROOT_FILE), content).unwrap();
+
+    std::fs::remove_file(dir.path().join(".state.db")).unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    let value = envelope(&run(confed(dir.path(), &["status", "--json"])), "status");
+    let page = value["result"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == json!(ROOT_FILE))
+        .expect("the file is still listed");
+    assert_eq!(page["state"], json!("untracked"));
+
+    let output = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&output), 7, "pull stops rather than overwriting: {}", stderr(&output));
+    assert!(
+        read(dir.path(), ROOT_FILE).contains("Work I have not pushed yet"),
+        "the local edit survives"
+    );
+
+    // --force is the explicit way through, and it takes the server's copy.
+    let forced = run(confed_authed(dir.path(), &["pull", "--force", "--json"]));
+    assert_eq!(exit_code(&forced), 0, "stderr: {}", stderr(&forced));
+    assert!(!read(dir.path(), ROOT_FILE).contains("Work I have not pushed yet"));
 }
 
 #[tokio::test]
@@ -519,6 +568,23 @@ async fn a_missing_value_fails_fast_with_exit_2_instead_of_prompting() {
         "{}",
         value["errors"][0]
     );
+}
+
+/// The TUI is the one command with no non-interactive fallback: without a
+/// terminal it must fail like any other usage error, not draw into a pipe.
+#[tokio::test]
+async fn the_tui_refuses_to_run_without_a_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run(confed(dir.path(), &["tui"]));
+
+    assert_eq!(exit_code(&output), 2, "stderr: {}", stderr(&output));
+    assert!(stdout(&output).is_empty(), "nothing may be drawn to a pipe");
+    let stderr = stderr(&output);
+    assert!(stderr.contains("interactive terminal"), "{stderr}");
+    assert!(stderr.contains("hint:"), "{stderr}");
+
+    let value = envelope(&run(confed(dir.path(), &["tui", "--json"])), "tui");
+    assert_eq!(value["errors"][0]["code"], json!("USAGE"));
 }
 
 #[tokio::test]

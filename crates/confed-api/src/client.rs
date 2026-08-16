@@ -39,7 +39,12 @@ pub trait ConfluenceClient: Send + Sync {
     /// [`crate::error::ApiError::Conflict`].
     async fn update_page(&self, id: &PageId, update: &PageUpdate) -> ApiResult<Page>;
     async fn delete_page(&self, id: &PageId) -> ApiResult<()>;
-    async fn move_page(&self, id: &PageId, new_parent: &PageId, position: Position) -> ApiResult<()>;
+    async fn move_page(
+        &self,
+        id: &PageId,
+        new_parent: &PageId,
+        position: Position,
+    ) -> ApiResult<()>;
 
     async fn get_labels(&self, id: &PageId) -> ApiResult<Vec<String>>;
     async fn add_label(&self, id: &PageId, label: &str) -> ApiResult<()>;

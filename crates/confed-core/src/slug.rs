@@ -75,7 +75,8 @@ fn truncate_bytes(s: &str, max: usize) -> &str {
 /// Disambiguate two sibling pages whose titles slug to the same string.
 /// Deterministic in the page id, so it survives re-pulls.
 pub fn disambiguate(slug: &str, page_id: &str) -> String {
-    let tail: String = page_id.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+    let tail: String =
+        page_id.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
     let room = MAX_SLUG_BYTES.saturating_sub(tail.len() + 1);
     format!("{}~{}", truncate_bytes(slug, room).trim_end(), tail)
 }

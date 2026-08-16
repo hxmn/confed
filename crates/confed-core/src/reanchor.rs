@@ -277,7 +277,8 @@ mod tests {
 
     #[test]
     fn a_moved_paragraph_still_matches_on_unique_text() {
-        let body = "A new opening paragraph.\n\nCompletely different lead-in: first week checklist.";
+        let body =
+            "A new opening paragraph.\n\nCompletely different lead-in: first week checklist.";
         let result = reanchor(&anchor("first week checklist", "During your ", " you will"), body);
 
         assert_eq!(result.kind, MatchKind::Unique);

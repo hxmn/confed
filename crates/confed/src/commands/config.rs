@@ -41,14 +41,13 @@ pub fn run(ctx: &mut Context, args: &ConfigArgs) -> Result<Output> {
     }
 
     if let Some(key) = &args.get {
-        let spec = SETTABLE
-            .iter()
-            .find(|s| s.key == key.as_str())
-            .ok_or_else(|| unknown_key(key))?;
+        let spec =
+            SETTABLE.iter().find(|s| s.key == key.as_str()).ok_or_else(|| unknown_key(key))?;
         let resolved = ctx.resolver.lookup(spec, None);
-        let value = resolved
-            .as_ref()
-            .map(|r| if spec.secret { "***".to_string() } else { r.value.clone() });
+        let value =
+            resolved
+                .as_ref()
+                .map(|r| if spec.secret { "***".to_string() } else { r.value.clone() });
         let human = value.clone().map(|v| format!("{v}\n")).unwrap_or_default();
         return Ok(Output::new(
             json!({

@@ -67,9 +67,7 @@ impl Sidecar {
     }
 
     pub fn orphaned(&self) -> impl Iterator<Item = &SidecarComment> {
-        self.comments
-            .iter()
-            .filter(|c| c.anchor.as_ref().is_some_and(|a| a.orphaned))
+        self.comments.iter().filter(|c| c.anchor.as_ref().is_some_and(|a| a.orphaned))
     }
 }
 
@@ -193,7 +191,8 @@ pub fn parse(text: &str) -> Result<Sidecar> {
     let mut sidecar = Sidecar::default();
 
     if let Some(header) = text.lines().find(|l| l.starts_with("# Comments")) {
-        if let Some((title, rest)) = header.trim_start_matches("# Comments — ").rsplit_once(" (page ")
+        if let Some((title, rest)) =
+            header.trim_start_matches("# Comments — ").rsplit_once(" (page ")
         {
             sidecar.title = title.to_string();
             sidecar.page_id = rest.trim_end_matches(')').to_string();
@@ -257,7 +256,11 @@ fn parse_marker(line: &str) -> Option<Marker> {
             });
             Some(Marker::Comment(Box::new(SidecarComment {
                 id: attrs.get("id").cloned(),
-                kind: if anchor.is_some() && tag == "confed:new" { SidecarKind::Inline } else { kind },
+                kind: if anchor.is_some() && tag == "confed:new" {
+                    SidecarKind::Inline
+                } else {
+                    kind
+                },
                 reply_to: attrs.get("reply-to").cloned(),
                 author: attrs.get("author").cloned(),
                 date: attrs.get("date").cloned(),

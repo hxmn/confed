@@ -219,12 +219,7 @@ impl MockClient {
     }
 
     pub fn page_exists(&self, id: &str) -> bool {
-        self.state
-            .lock()
-            .expect("mock poisoned")
-            .pages
-            .get(id)
-            .is_some_and(|p| !p.deleted)
+        self.state.lock().expect("mock poisoned").pages.get(id).is_some_and(|p| !p.deleted)
     }
 }
 
@@ -241,7 +236,9 @@ impl ConfluenceClient for MockClient {
     fn page_url(&self, page: &PageId, space_key: &str) -> String {
         match self.capabilities.flavor {
             Flavor::Cloud => format!("{}/spaces/{}/pages/{}", self.base_url, space_key, page),
-            Flavor::DataCenter => format!("{}/pages/viewpage.action?pageId={}", self.base_url, page),
+            Flavor::DataCenter => {
+                format!("{}/pages/viewpage.action?pageId={}", self.base_url, page)
+            }
         }
     }
 
@@ -441,11 +438,7 @@ impl ConfluenceClient for MockClient {
         self.record(format!("upload_attachment:{page}:{filename}"));
         let id = existing.cloned().unwrap_or_else(|| AttachmentId::new(self.fresh_id()));
         let mut state = self.state.lock().expect("mock poisoned");
-        let version = state
-            .attachments
-            .get(id.as_str())
-            .map(|(a, _)| a.version + 1)
-            .unwrap_or(1);
+        let version = state.attachments.get(id.as_str()).map(|(a, _)| a.version + 1).unwrap_or(1);
         let attachment = Attachment {
             id: id.clone(),
             page_id: page.clone(),
@@ -550,19 +543,15 @@ impl ConfluenceClient for MockClient {
 
     async fn get_page_versions(&self, id: &PageId, limit: usize) -> ApiResult<Vec<VersionInfo>> {
         let state = self.state.lock().expect("mock poisoned");
-        let page = state
-            .pages
-            .get(id.as_str())
-            .ok_or_else(|| ApiError::NotFound(format!("page {id}")))?;
+        let page =
+            state.pages.get(id.as_str()).ok_or_else(|| ApiError::NotFound(format!("page {id}")))?;
         Ok(page.history.iter().rev().take(limit).cloned().collect())
     }
 
     async fn get_page_at_version(&self, id: &PageId, version: u32) -> ApiResult<Page> {
         let state = self.state.lock().expect("mock poisoned");
-        let page = state
-            .pages
-            .get(id.as_str())
-            .ok_or_else(|| ApiError::NotFound(format!("page {id}")))?;
+        let page =
+            state.pages.get(id.as_str()).ok_or_else(|| ApiError::NotFound(format!("page {id}")))?;
         let body = page
             .bodies
             .get(&version)

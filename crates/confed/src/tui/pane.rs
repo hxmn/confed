@@ -128,9 +128,8 @@ fn build_diff(ws: &Workspace, page_id: &str, path: &str, side: DiffSide) -> Resu
 
     let left = confed_convert::storage_to_markdown(&storage, &options)?.markdown;
     let content = std::fs::read_to_string(ws.absolute(path)).unwrap_or_default();
-    let right = confed_core::frontmatter::parse(&content, path)
-        .map(|file| file.body)
-        .unwrap_or(content);
+    let right =
+        confed_core::frontmatter::parse(&content, path).map(|file| file.body).unwrap_or(content);
 
     Ok(unified(&left, &right))
 }

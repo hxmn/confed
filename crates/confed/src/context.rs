@@ -8,13 +8,13 @@
 use crate::cli::GlobalArgs;
 use crate::output::Style;
 use crate::prompt::TtyPrompter;
+use confed_api::SpaceId;
 use confed_api::{Auth, CloudClient, ConfluenceClient, DcClient, Flavor, Secret};
 use confed_core::config::{self, ConfigResolver, NoPrompt, Resolved};
 use confed_core::error::{ConfedError, Result};
 use confed_core::session::{AuthMethod, Session, SessionStore};
 use confed_core::sync::SyncEngine;
 use confed_core::workspace::Workspace;
-use confed_api::SpaceId;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -97,9 +97,7 @@ impl Context {
         self.global
             .concurrency
             .or_else(|| {
-                self.resolver
-                    .lookup(&config::CONCURRENCY, None)
-                    .and_then(|r| r.value.parse().ok())
+                self.resolver.lookup(&config::CONCURRENCY, None).and_then(|r| r.value.parse().ok())
             })
             .unwrap_or(0)
     }
@@ -134,19 +132,14 @@ impl Context {
     pub fn build_client(&self) -> Result<Arc<dyn ConfluenceClient>> {
         let session = self.session()?;
 
-        let base_url = match self.resolver.lookup(&config::BASE_URL, self.global.base_url.as_deref())
+        let base_url = match self
+            .resolver
+            .lookup(&config::BASE_URL, self.global.base_url.as_deref())
         {
             Some(resolved) => resolved.value,
-            None => session
-                .as_ref()
-                .map(|s| s.base_url.clone())
-                .ok_or_else(|| {
-                    ConfedError::missing_value(
-                        "Confluence base URL",
-                        "--base-url",
-                        "CONFED_BASE_URL",
-                    )
-                })?,
+            None => session.as_ref().map(|s| s.base_url.clone()).ok_or_else(|| {
+                ConfedError::missing_value("Confluence base URL", "--base-url", "CONFED_BASE_URL")
+            })?,
         };
 
         let flavor = self.resolve_flavor(&base_url, session.as_ref())?;
@@ -239,10 +232,7 @@ impl Context {
     /// A sync engine bound to this workspace's space.
     pub fn engine(&self, client: Arc<dyn ConfluenceClient>) -> Result<SyncEngine> {
         let ws = self.workspace()?;
-        let space = SpaceId {
-            key: ws.space_key()?,
-            numeric: ws.space_numeric_id()?,
-        };
+        let space = SpaceId { key: ws.space_key()?, numeric: ws.space_numeric_id()? };
         Ok(SyncEngine::new(client, space, self.concurrency()))
     }
 

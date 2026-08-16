@@ -24,12 +24,22 @@ pub fn file_size(path: &Path) -> Option<u64> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AttachmentAction {
     /// New file in the sidecar directory.
-    Upload { filename: String },
+    Upload {
+        filename: String,
+    },
     /// Existing attachment whose bytes changed.
-    Reupload { attachment_id: String, filename: String },
+    Reupload {
+        attachment_id: String,
+        filename: String,
+    },
     /// Recorded on the server but gone locally.
-    Delete { attachment_id: String, filename: String },
-    Unchanged { filename: String },
+    Delete {
+        attachment_id: String,
+        filename: String,
+    },
+    Unchanged {
+        filename: String,
+    },
 }
 
 impl AttachmentAction {
@@ -143,7 +153,8 @@ mod tests {
         std::fs::write(&file, b"abc").unwrap();
         let hash = file_sha256(&file).unwrap();
 
-        let actions = diff_attachments(dir.path(), &[record("att1", "diagram.png", &hash)]).unwrap();
+        let actions =
+            diff_attachments(dir.path(), &[record("att1", "diagram.png", &hash)]).unwrap();
         assert_eq!(actions, vec![AttachmentAction::Unchanged { filename: "diagram.png".into() }]);
         assert!(!actions[0].is_change());
     }
@@ -180,7 +191,8 @@ mod tests {
     #[test]
     fn the_comments_sidecar_is_never_treated_as_an_attachment() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(crate::comments::COMMENTS_FILENAME), "# Comments\n").unwrap();
+        std::fs::write(dir.path().join(crate::comments::COMMENTS_FILENAME), "# Comments\n")
+            .unwrap();
         std::fs::write(dir.path().join(".hidden"), "x").unwrap();
 
         assert!(diff_attachments(dir.path(), &[]).unwrap().is_empty());

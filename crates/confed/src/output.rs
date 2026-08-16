@@ -201,9 +201,8 @@ mod tests {
 
     #[test]
     fn output_carries_warnings_and_exit_codes() {
-        let out = Output::new(json!({"a": 1}), "human")
-            .with_exit(ExitCode::Differences)
-            .warn("careful");
+        let out =
+            Output::new(json!({"a": 1}), "human").with_exit(ExitCode::Differences).warn("careful");
         assert_eq!(out.exit, ExitCode::Differences);
         assert_eq!(out.warnings, ["careful"]);
         assert_eq!(out.result["a"], 1);

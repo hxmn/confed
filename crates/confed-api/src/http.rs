@@ -88,9 +88,9 @@ fn next_random() -> u64 {
     static STATE: AtomicU64 = AtomicU64::new(0);
     let mut x = STATE.load(Ordering::Relaxed);
     if x == 0 {
-        x = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0x2545_F491_4F6C_DD1D, |d| {
-            d.as_nanos() as u64 | 1
-        });
+        x = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0x2545_F491_4F6C_DD1D, |d| d.as_nanos() as u64 | 1);
     }
     x ^= x << 13;
     x ^= x >> 7;
@@ -133,7 +133,8 @@ impl Pacer {
         if self.min_interval > self.floor {
             // Recover slowly: 10% back toward the floor per successful call.
             let delta = self.min_interval.saturating_sub(self.floor) / 10;
-            self.min_interval = self.min_interval.saturating_sub(delta.max(Duration::from_millis(1)));
+            self.min_interval =
+                self.min_interval.saturating_sub(delta.max(Duration::from_millis(1)));
         }
     }
 }
@@ -150,11 +151,8 @@ pub struct Http {
 
 impl Http {
     pub fn new(base_url: &str, auth: Auth, concurrency: usize) -> ApiResult<Self> {
-        let normalized = if base_url.ends_with('/') {
-            base_url.to_string()
-        } else {
-            format!("{base_url}/")
-        };
+        let normalized =
+            if base_url.ends_with('/') { base_url.to_string() } else { format!("{base_url}/") };
         let base = Url::parse(&normalized)?;
         let client = reqwest::Client::builder()
             .user_agent(concat!("confed/", env!("CARGO_PKG_VERSION")))
@@ -202,7 +200,12 @@ impl Http {
 
     /// Run a request with retry/backoff. `build` is called once per attempt so the
     /// body can be recreated; `idempotent` gates retry-after-send for POST/PUT.
-    pub async fn send_with_retry<F>(&self, context: &str, idempotent: bool, build: F) -> ApiResult<reqwest::Response>
+    pub async fn send_with_retry<F>(
+        &self,
+        context: &str,
+        idempotent: bool,
+        build: F,
+    ) -> ApiResult<reqwest::Response>
     where
         F: Fn() -> reqwest::RequestBuilder,
     {
@@ -260,7 +263,8 @@ impl Http {
                 Err(e) => {
                     // Retrying a non-idempotent request is only safe when the request
                     // never reached the server.
-                    retriable_transport = e.is_connect() || (idempotent && (e.is_timeout() || e.is_request()));
+                    retriable_transport =
+                        e.is_connect() || (idempotent && (e.is_timeout() || e.is_request()));
                     if !retriable_transport || attempt + 1 >= self.policy.max_attempts {
                         return Err(ApiError::from(e));
                     }
@@ -277,11 +281,17 @@ impl Http {
         }
     }
 
-    pub async fn get_json<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> ApiResult<T> {
+    pub async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> ApiResult<T> {
         let url = self.url(path)?;
         let ctx = format!("GET {path}");
         let resp = self
-            .send_with_retry(&ctx, true, || self.request(reqwest::Method::GET, url.clone()).query(query))
+            .send_with_retry(&ctx, true, || {
+                self.request(reqwest::Method::GET, url.clone()).query(query)
+            })
             .await?;
         decode(resp, &ctx).await
     }
@@ -290,16 +300,26 @@ impl Http {
         let url = self.url(path)?;
         let ctx = format!("GET {path}");
         let resp = self
-            .send_with_retry(&ctx, true, || self.request(reqwest::Method::GET, url.clone()).query(query))
+            .send_with_retry(&ctx, true, || {
+                self.request(reqwest::Method::GET, url.clone()).query(query)
+            })
             .await?;
         Ok(resp.text().await?)
     }
 
-    pub async fn post_json<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> ApiResult<T> {
+    pub async fn post_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> ApiResult<T> {
         self.body_json(reqwest::Method::POST, path, body).await
     }
 
-    pub async fn put_json<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> ApiResult<T> {
+    pub async fn put_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> ApiResult<T> {
         self.body_json(reqwest::Method::PUT, path, body).await
     }
 
@@ -379,15 +399,13 @@ impl Http {
         let url = self.url(path)?;
         let ctx = format!("POST {path}");
         let bytes = tokio::fs::read(file).await?;
-        let filename = file
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("attachment")
-            .to_string();
+        let filename =
+            file.file_name().and_then(|n| n.to_str()).unwrap_or("attachment").to_string();
 
         let resp = self
             .send_with_retry(&ctx, false, || {
-                let part = reqwest::multipart::Part::bytes(bytes.clone()).file_name(filename.clone());
+                let part =
+                    reqwest::multipart::Part::bytes(bytes.clone()).file_name(filename.clone());
                 let mut form = reqwest::multipart::Form::new().part(field.to_string(), part);
                 for (k, v) in extra {
                     form = form.text(k.to_string(), v.clone());
@@ -409,7 +427,8 @@ async fn decode<T: DeserializeOwned>(resp: reqwest::Response, context: &str) -> 
         return serde_json::from_str("null")
             .map_err(|e| ApiError::Decode { context: context.to_string(), source: e });
     }
-    serde_json::from_str(&text).map_err(|e| ApiError::Decode { context: context.to_string(), source: e })
+    serde_json::from_str(&text)
+        .map_err(|e| ApiError::Decode { context: context.to_string(), source: e })
 }
 
 fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {

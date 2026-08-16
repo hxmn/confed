@@ -30,11 +30,7 @@ pub async fn run(ctx: &mut Context, args: &ExportArgs) -> Result<Output> {
             _ => ("html", standalone_html(&page.title, &page.storage_body)),
         };
 
-        let relative = page
-            .local_path
-            .strip_suffix(".md")
-            .unwrap_or(&page.local_path)
-            .to_string();
+        let relative = page.local_path.strip_suffix(".md").unwrap_or(&page.local_path).to_string();
         let dest = out_dir.join(format!("{relative}.{extension}"));
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)

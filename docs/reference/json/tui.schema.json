@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/tui.schema.json",
+  "title": "confed tui result",
+  "description": "The `result` of `confed tui` after the interactive session ends. The TUI needs a terminal, so with --json it normally fails with exit 2 and a null result; this shape is what a session that actually ran reports.",
+  "type": "object",
+  "required": ["space"],
+  "properties": {
+    "space": { "type": "string", "description": "The space key the session was bound to." }
+  }
+}

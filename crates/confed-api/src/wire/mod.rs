@@ -132,8 +132,9 @@ mod tests {
 
     #[test]
     fn relative_links_resolve_under_the_base() {
-        let u = resolve_under_base(&base("https://wiki.corp/confluence/"), "rest/api/space?start=25")
-            .unwrap();
+        let u =
+            resolve_under_base(&base("https://wiki.corp/confluence/"), "rest/api/space?start=25")
+                .unwrap();
         assert_eq!(u.as_str(), "https://wiki.corp/confluence/rest/api/space?start=25");
     }
 

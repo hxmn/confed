@@ -2,8 +2,8 @@
 
 use crate::error::{ConfedError, Result};
 use crate::lock::WorkspaceLock;
-use crate::session::{Session, SessionStore};
 use crate::session::SESSION_DB_FILENAME;
+use crate::session::{Session, SessionStore};
 use crate::state::{StateDb, STATE_DB_FILENAME};
 use confed_api::Flavor;
 use std::path::{Path, PathBuf};
@@ -103,10 +103,7 @@ impl Workspace {
     pub fn relative(&self, path: &Path) -> Option<String> {
         let canonical_root = self.root.canonicalize().ok()?;
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        canonical
-            .strip_prefix(&canonical_root)
-            .ok()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
+        canonical.strip_prefix(&canonical_root).ok().map(|p| p.to_string_lossy().replace('\\', "/"))
     }
 
     /// Stored settings that feed the config resolver's third precedence step.

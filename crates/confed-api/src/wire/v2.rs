@@ -151,8 +151,10 @@ pub struct Attachment {
 
 impl Attachment {
     pub fn into_domain(self, fallback_page: &PageId) -> crate::types::Attachment {
-        let page_id =
-            self.page_id.map(|p| PageId::new(p.as_string())).unwrap_or_else(|| fallback_page.clone());
+        let page_id = self
+            .page_id
+            .map(|p| PageId::new(p.as_string()))
+            .unwrap_or_else(|| fallback_page.clone());
         crate::types::Attachment {
             id: AttachmentId::new(self.id.as_string()),
             page_id,

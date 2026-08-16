@@ -148,9 +148,8 @@ pub struct ConfigResolver {
 impl ConfigResolver {
     /// Read the environment from the process.
     pub fn from_env(interactive: bool, prompter: Box<dyn Prompter>) -> Self {
-        let env = std::env::vars()
-            .filter(|(k, _)| k.starts_with("CONFED_"))
-            .collect::<BTreeMap<_, _>>();
+        let env =
+            std::env::vars().filter(|(k, _)| k.starts_with("CONFED_")).collect::<BTreeMap<_, _>>();
         Self { env, stored: BTreeMap::new(), prompter, interactive }
     }
 
@@ -213,8 +212,7 @@ impl ConfigResolver {
         flag: Option<&str>,
         default: impl Into<String>,
     ) -> Resolved<String> {
-        self.lookup(spec, flag)
-            .unwrap_or_else(|| Resolved::new(default.into(), Source::Default))
+        self.lookup(spec, flag).unwrap_or_else(|| Resolved::new(default.into(), Source::Default))
     }
 
     /// Every value confed knows about, with its source — powers `config --list`.
@@ -303,8 +301,9 @@ mod tests {
 
     #[test]
     fn empty_values_are_treated_as_absent() {
-        let resolver = ConfigResolver::with_env(env(&[("CONFED_SPACE", "")]), false, Box::new(NoPrompt))
-            .with_stored(stored(&[("space", "DOCS")]));
+        let resolver =
+            ConfigResolver::with_env(env(&[("CONFED_SPACE", "")]), false, Box::new(NoPrompt))
+                .with_stored(stored(&[("space", "DOCS")]));
         let r = resolver.require(&SPACE, Some("")).unwrap();
         assert_eq!((r.value.as_str(), r.source), ("DOCS", Source::Stored));
     }

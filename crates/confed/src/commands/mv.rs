@@ -73,10 +73,7 @@ pub async fn run(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
         }
         if parent_changed {
             file.frontmatter.parent_id = match &dir {
-                Some(dir) => ws
-                    .state()
-                    .get_page_by_path(&format!("{dir}.md"))?
-                    .map(|p| p.page_id),
+                Some(dir) => ws.state().get_page_by_path(&format!("{dir}.md"))?.map(|p| p.page_id),
                 None => None,
             };
         }
