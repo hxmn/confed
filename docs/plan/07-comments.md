@@ -7,20 +7,20 @@ everywhere; inline create/resolve on Cloud with capability gating on DC.
 
 ## Sidecar format
 
-- [ ] Sidecar writer: `comments` table → `.<slug>/comments.md` per design 02 §5 (threaded indentation, `confed:comment` metadata comments, resolved markers, inline entries with anchor+context); generated during pull when a page has comments.
+- [x] Sidecar writer: `comments` table → `.<slug>/comments.md` per design 02 §5 (threaded indentation, `confed:comment` metadata comments, resolved markers, inline entries with anchor+context); generated during pull when a page has comments.
   - **Accept:** golden sidecar fixtures (threads, resolved, inline, orphaned); regeneration idempotent.
-- [ ] Sidecar parser: read sidecar → structured model; recognize `confed:new` drafts (with optional `reply-to`), `resolved=true` additions; ignore (with warning) edits to existing bodies; tolerate hand-formatting noise.
+- [x] Sidecar parser: read sidecar → structured model; recognize `confed:new` drafts (with optional `reply-to`), `resolved=true` additions; ignore (with warning) edits to existing bodies; tolerate hand-formatting noise.
   - **Accept:** parser round-trips writer output; draft/resolve extraction tests; malformed-marker → warning not error.
 
 ## Commands (sidecar-primary; CLI edits the sidecar, `--push` syncs)
 
-- [ ] `confed comment list` (`--unresolved`, `--inline`; anchors shown with context; JSON per design 04).
+- [x] `confed comment list` (`--unresolved`, `--inline`; anchors shown with context; JSON per design 04).
   - **Accept:** JSON snapshot; human golden.
-- [ ] `confed comment add` / `reply` (`-m`/`--editor`; writes `confed:new` entry; `--push` posts then rewrites entry with real id).
+- [x] `confed comment add` / `reply` (`-m`/`--editor`; writes `confed:new` entry; `--push` posts then rewrites entry with real id).
   - **Accept:** e2e wiremock both flavors; sidecar rewritten-in-place test; draft-without-push then later `confed push` picks it up.
-- [ ] `confed comment resolve` (Cloud: API call + sidecar marker; DC: exit 9 with explanation).
+- [x] `confed comment resolve` (Cloud: API call + sidecar marker; DC: exit 9 with explanation).
   - **Accept:** capability-gate test both flavors.
-- [ ] Comment sync in `push`/`pull`: pull refreshes sidecars (preserving local drafts by re-appending them); push posts drafts + resolutions; `--no-comments` opt-outs.
+- [x] Comment sync in `push`/`pull`: pull refreshes sidecars (preserving local drafts by re-appending them); push posts drafts + resolutions; `--no-comments` opt-outs.
   - **Accept:** e2e: remote gains comment + local has draft → pull keeps draft below refreshed threads → push posts it.
 
 ## Inline comments
@@ -37,3 +37,19 @@ everywhere; inline create/resolve on Cloud with capability gating on DC.
 ## Milestone check
 
 - [ ] Scenario e2e (both flavors): pull page with threads+inline → local body edit moves anchor → pull re-anchors → add draft + resolve → push → sidecar shows server ids; DC path degrades exactly as documented.
+
+### Notes on what shipped
+
+The sidecar data path is done: `comments::render`/`parse`, comment snapshots
+fetched into `.state.db`, drafts under `confed:new` posted on push, resolution
+requests via `confed:resolve`, and the `confed comment list/add/reply/resolve`
+subcommands with capability gating (Data Center returns exit 9 for inline
+creation and resolution). Two scenario tests cover sidecar writing and draft
+posting on both flavors.
+
+Still open — the harder half of inline comments:
+
+- Anchor capture from the server is stored, but re-anchoring after a local edit
+  (exact context match, then unique text, then fuzzy within the mapped block,
+  else `orphaned`) is not implemented, so anchors are not yet refreshed on pull.
+- Orphan counts are not surfaced in `status` or `doctor`.
