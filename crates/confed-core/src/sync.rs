@@ -1124,11 +1124,90 @@ impl SyncEngine {
             }
         }
 
+        // Attachments after page bodies: a body that references a new file is
+        // uploaded first, so the reference is never dangling for long.
+        if opts.with_attachments {
+            outcome.attachments_uploaded = self.push_attachments(ws, opts).await?;
+        }
         if opts.with_comments {
             outcome.comments_added = self.push_comments(ws).await?;
         }
 
         Ok(outcome)
+    }
+
+    /// Upload new and changed attachments, and delete the ones removed locally.
+    async fn push_attachments(
+        &self,
+        ws: &mut Workspace,
+        opts: &PushOptions,
+    ) -> Result<Vec<String>> {
+        let mut uploaded = Vec::new();
+
+        for record in ws.state().all_pages()? {
+            if !opts.scope.is_empty()
+                && !opts.scope.iter().any(|s| {
+                    s == &record.page_id
+                        || s == &record.local_path
+                        || path_matches(s, &record.local_path)
+                })
+            {
+                continue;
+            }
+
+            let sidecar_rel = paths::sidecar_for(&record.local_path);
+            let sidecar = ws.absolute(&sidecar_rel);
+            let recorded = ws.state().page_attachments(&record.page_id)?;
+            let actions = attachments::diff_attachments(&sidecar, &recorded)?;
+            let page_id = PageId::new(&record.page_id);
+
+            for action in actions {
+                match action {
+                    attachments::AttachmentAction::Unchanged { .. } => {}
+                    attachments::AttachmentAction::Upload { filename }
+                    | attachments::AttachmentAction::Reupload { filename, .. } => {
+                        let existing = recorded
+                            .iter()
+                            .find(|r| r.filename == filename)
+                            .map(|r| confed_api::AttachmentId::new(&r.attachment_id));
+                        let file = sidecar.join(&filename);
+                        let attachment = self
+                            .client
+                            .upload_attachment(&page_id, &file, existing.as_ref())
+                            .await?;
+
+                        ws.state().upsert_attachment(&AttachmentRecord {
+                            attachment_id: attachment.id.0.clone(),
+                            page_id: record.page_id.clone(),
+                            filename: attachment.filename.clone(),
+                            media_type: attachment.media_type.clone(),
+                            file_size: attachments::file_size(&file),
+                            version: attachment.version,
+                            sha256: attachments::file_sha256(&file).ok(),
+                            downloaded: true,
+                        })?;
+                        uploaded.push(format!("{}/{}", sidecar_rel, filename));
+                    }
+                    // Deleting an attachment removes content from the server, so
+                    // it follows the same explicit opt-in as deleting a page.
+                    attachments::AttachmentAction::Delete { attachment_id, filename } => {
+                        if !opts.allow_delete {
+                            tracing::debug!(
+                                target: "confed::sync",
+                                page = %record.page_id, %filename,
+                                "attachment is gone locally; pass --allow-delete to remove it"
+                            );
+                            continue;
+                        }
+                        self.client
+                            .delete_attachment(&confed_api::AttachmentId::new(&attachment_id))
+                            .await?;
+                        ws.state().delete_attachment(&attachment_id)?;
+                    }
+                }
+            }
+        }
+        Ok(uploaded)
     }
 
     async fn apply_push_op(

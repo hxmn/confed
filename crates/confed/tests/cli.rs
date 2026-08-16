@@ -1,0 +1,606 @@
+//! End-to-end tests for the `confed` binary.
+//!
+//! Every test runs the real executable (`env!("CARGO_BIN_EXE_confed")`) against a
+//! [`wiremock`] server impersonating Confluence Data Center (REST v1 — the same
+//! request/response shapes `crates/confed-api/tests/dc.rs` pins down). Nothing
+//! here sleeps, nothing reaches the network, and each test gets its own
+//! `tempfile::tempdir()` plus its own mock server, so the whole file is safe to
+//! run in parallel with the rest of the workspace.
+//!
+//! The JSON envelope produced by each `--json` run is validated against the
+//! schemas in `docs/reference/json/`, so those files cannot drift from the code.
+
+mod schema;
+
+use serde_json::{json, Value};
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+use wiremock::matchers::{method, path, query_param};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+const SPACE: &str = "DOCS";
+const ROOT_PAGE: &str = "1001";
+const CHILD_PAGE: &str = "1002";
+const ROOT_FILE: &str = "Team Handbook.md";
+const CHILD_FILE: &str = "Team Handbook/Onboarding.md";
+
+// ------------------------------------------------------------ the fixture ---
+
+/// A Data Center instance holding a two-page space: `Team Handbook` and its
+/// child `Onboarding`.
+async fn dc_server() -> MockServer {
+    let server = MockServer::start().await;
+    mount_whoami(&server, 200, json!({
+        "type": "known",
+        "username": "tester",
+        "userKey": "ff8081",
+        "displayName": "Test User",
+        "email": "tester@corp.example",
+    }))
+    .await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/space"))
+        .and(query_param("spaceKey", SPACE))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "id": 500, "key": SPACE, "name": "Documentation", "type": "global",
+                "homepage": { "id": ROOT_PAGE, "type": "page", "title": "Team Handbook" }
+            }],
+            "size": 1, "start": 0, "limit": 1, "_links": {}
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/content"))
+        .and(query_param("spaceKey", SPACE))
+        .and(query_param("type", "page"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                summary(ROOT_PAGE, "Team Handbook", None, 3),
+                summary(CHILD_PAGE, "Onboarding", Some(ROOT_PAGE), 1),
+            ],
+            "start": 0, "limit": 100, "size": 2, "_links": {}
+        })))
+        .mount(&server)
+        .await;
+
+    mount_page(&server, ROOT_PAGE, "Team Handbook", None, 3, "<p>Welcome to the team.</p>").await;
+    mount_page(
+        &server,
+        CHILD_PAGE,
+        "Onboarding",
+        Some(ROOT_PAGE),
+        1,
+        "<p>First week checklist.</p>",
+    )
+    .await;
+
+    for id in [ROOT_PAGE, CHILD_PAGE] {
+        mount_empty_collection(&server, &format!("/rest/api/content/{id}/child/attachment")).await;
+        mount_empty_collection(&server, &format!("/rest/api/content/{id}/child/comment")).await;
+    }
+
+    // `push` updates the root page; the response echoes what was sent so the
+    // test can assert the edit really left the machine.
+    Mock::given(method("PUT"))
+        .and(path(format!("/rest/api/content/{ROOT_PAGE}")))
+        .respond_with(|req: &Request| {
+            let sent: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": ROOT_PAGE,
+                "type": "page",
+                "status": "current",
+                "title": sent["title"],
+                "space": { "key": SPACE },
+                "version": { "number": sent["version"]["number"] },
+                "body": { "storage": { "value": sent["body"]["storage"]["value"] } }
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    server
+}
+
+fn summary(id: &str, title: &str, parent: Option<&str>, version: u32) -> Value {
+    json!({
+        "id": id,
+        "type": "page",
+        "status": "current",
+        "title": title,
+        "space": { "id": 500, "key": SPACE, "name": "Documentation" },
+        "version": {
+            "number": version,
+            "when": "2026-08-01T00:00:00Z",
+            "by": { "displayName": "Alice Ng" }
+        },
+        "ancestors": parent.map(|p| json!([{ "id": p, "type": "page" }])).unwrap_or(json!([])),
+        "metadata": { "labels": { "results": [] } },
+        "history": { "createdDate": "2026-01-01T00:00:00Z" }
+    })
+}
+
+async fn mount_page(
+    server: &MockServer,
+    id: &str,
+    title: &str,
+    parent: Option<&str>,
+    version: u32,
+    body: &str,
+) {
+    let mut page = summary(id, title, parent, version);
+    page["body"] = json!({ "storage": { "value": body, "representation": "storage" } });
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page))
+        .mount(server)
+        .await;
+}
+
+async fn mount_empty_collection(server: &MockServer, route: &str) {
+    Mock::given(method("GET"))
+        .and(path(route.to_string()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [], "start": 0, "limit": 100, "size": 0, "_links": {}
+        })))
+        .mount(server)
+        .await;
+}
+
+async fn mount_whoami(server: &MockServer, status: u16, body: Value) {
+    Mock::given(method("GET"))
+        .and(path("/rest/api/user/current"))
+        .respond_with(ResponseTemplate::new(status).set_body_json(body))
+        .mount(server)
+        .await;
+}
+
+// ------------------------------------------------------- running the tool ---
+
+/// Every `CONFED_*` variable, cleared before each run so a developer's shell
+/// cannot change what the tests exercise.
+const ENV_VARS: &[&str] = &[
+    "CONFED_JSON",
+    "CONFED_NON_INTERACTIVE",
+    "CONFED_BASE_URL",
+    "CONFED_TOKEN",
+    "CONFED_USERNAME",
+    "CONFED_SPACE",
+    "CONFED_FLAVOR",
+    "CONFED_CONCURRENCY",
+    "CONFED_LOG",
+    "CONFED_EDITOR",
+];
+
+/// A `confed` invocation rooted at `dir`, with a clean environment and a closed
+/// stdin (so a stray prompt would fail rather than hang).
+fn confed(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_confed"));
+    for var in ENV_VARS {
+        cmd.env_remove(var);
+    }
+    cmd.env("NO_COLOR", "1");
+    cmd.arg("-C").arg(dir);
+    cmd.args(args);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd
+}
+
+/// The same, with working Data Center credentials in the environment.
+fn confed_authed(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = confed(dir, args);
+    cmd.env("CONFED_TOKEN", "pat-token");
+    cmd.env("CONFED_USERNAME", "tester");
+    cmd
+}
+
+fn run(mut cmd: Command) -> Output {
+    cmd.output().expect("running the confed binary")
+}
+
+fn exit_code(output: &Output) -> i32 {
+    output.status.code().expect("confed exited via a signal")
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Parse the JSON envelope, check it against `envelope.schema.json`, and check
+/// the command's `result` against its own schema when one is published.
+fn envelope(output: &Output, command: &str) -> Value {
+    let text = stdout(output);
+    let value: Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("stdout is not JSON ({e}):\n{text}\n--- stderr ---\n{}", stderr(output)));
+
+    schema::check("envelope", &value);
+    assert_eq!(value["confed"]["command"], json!(command), "wrong command in the envelope");
+    assert_eq!(
+        value["confed"]["exit_code"],
+        json!(exit_code(output)),
+        "the envelope's exit_code must equal the process exit status"
+    );
+    if value["result"].is_object() {
+        schema::check_result(command, &value["result"]);
+    }
+    value
+}
+
+/// `confed init` against `server`, storing the token in `.session.db` so the
+/// test never touches the developer's OS keyring.
+fn init(dir: &Path, server: &MockServer) -> Output {
+    run(confed_authed(
+        dir,
+        &[
+            "init",
+            "--json",
+            "--base-url",
+            &server.uri(),
+            "--flavor",
+            "dc",
+            "--space",
+            SPACE,
+            "--credential-store",
+            "sqlite",
+        ],
+    ))
+}
+
+fn read(dir: &Path, relative: &str) -> String {
+    std::fs::read_to_string(dir.join(relative))
+        .unwrap_or_else(|e| panic!("reading {relative}: {e}"))
+}
+
+// ------------------------------------------------------------------ tests ---
+
+#[tokio::test]
+async fn init_creates_the_workspace_and_reports_it_in_the_envelope() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = init(dir.path(), &server);
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+
+    let value = envelope(&output, "init");
+    assert_eq!(value["confed"]["schema"], json!(1));
+    assert_eq!(value["confed"]["ok"], json!(true));
+    assert_eq!(value["errors"], json!([]));
+    assert!(value["warnings"].is_array());
+
+    let result = &value["result"];
+    assert_eq!(result["flavor"], json!("datacenter"));
+    assert_eq!(result["space"]["key"], json!(SPACE));
+    assert_eq!(result["space"]["name"], json!("Documentation"));
+    assert_eq!(result["user"]["display_name"], json!("Test User"));
+    assert_eq!(result["credential_store"], json!("sqlite"));
+
+    for name in [".state.db", ".session.db", ".gitignore", "CLAUDE.md", "AGENTS.md"] {
+        assert!(dir.path().join(name).exists(), "`confed init` did not create {name}");
+    }
+
+    // The agent contract names the space it was generated for.
+    let claude = read(dir.path(), "CLAUDE.md");
+    assert!(claude.contains(SPACE), "the agent contract does not name the space");
+    assert_eq!(claude, read(dir.path(), "AGENTS.md"), "both agent files must be identical");
+
+    // Credentials and local state must never be committed.
+    let gitignore = read(dir.path(), ".gitignore");
+    for entry in [".state.db", ".session.db", ".confed.lock"] {
+        assert!(gitignore.contains(entry), ".gitignore is missing {entry}");
+    }
+
+    // The token must not appear in anything confed printed.
+    assert!(!stdout(&output).contains("pat-token"), "the token leaked into stdout");
+    assert!(!stderr(&output).contains("pat-token"), "the token leaked into stderr");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_session_database_is_private_to_its_owner() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    let mode = std::fs::metadata(dir.path().join(".session.db")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600, "found mode {:o}", mode & 0o777);
+}
+
+#[tokio::test]
+async fn pull_materializes_the_hierarchy_and_status_is_then_clean() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    let output = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "pull");
+
+    let created = value["result"]["created"].as_array().expect("created is a list");
+    let mut paths: Vec<&str> = created.iter().map(|c| c["path"].as_str().unwrap()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, [ROOT_FILE, CHILD_FILE]);
+    assert_eq!(value["result"]["dry_run"], json!(false));
+
+    // Children live in a directory named after their parent.
+    assert!(dir.path().join(ROOT_FILE).exists());
+    assert!(dir.path().join(CHILD_FILE).exists());
+
+    let child = read(dir.path(), CHILD_FILE);
+    assert!(child.contains("title: Onboarding"), "{child}");
+    assert!(child.contains("First week checklist"), "{child}");
+    assert!(child.contains("page_id: '1002'"), "the managed block records the page id: {child}");
+
+    let output = run(confed_authed(dir.path(), &["status", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "status");
+    assert_eq!(value["result"]["clean"], json!(true), "a fresh pull must leave a clean tree");
+    assert_eq!(value["result"]["space"], json!(SPACE));
+    assert_eq!(value["result"]["pages"].as_array().unwrap().len(), 2);
+    for page in value["result"]["pages"].as_array().unwrap() {
+        assert_eq!(page["state"], json!("unchanged"), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn an_edited_page_shows_as_modified_and_diff_signals_it_with_exit_code_10() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+
+    let mut content = read(dir.path(), ROOT_FILE);
+    content.push_str("\nAn extra paragraph.\n");
+    std::fs::write(dir.path().join(ROOT_FILE), content).unwrap();
+
+    let output = run(confed_authed(dir.path(), &["status", "--json"]));
+    let value = envelope(&output, "status");
+    assert_eq!(value["result"]["clean"], json!(false));
+    let edited = value["result"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == json!(ROOT_FILE))
+        .expect("the edited page is listed");
+    assert_eq!(edited["state"], json!("modified"));
+    assert_eq!(edited["base_version"], json!(3));
+    assert_eq!(edited["remote_version"], json!(3));
+
+    // `diff` is local-only, so it needs no credentials at all.
+    let output = run(confed(dir.path(), &["diff", "--exit-code"]));
+    assert_eq!(exit_code(&output), 10, "differences must exit 10: {}", stderr(&output));
+    assert!(stdout(&output).contains("An extra paragraph"), "{}", stdout(&output));
+
+    // Without --exit-code, a diff is still a success.
+    let output = run(confed(dir.path(), &["diff", "--json"]));
+    assert_eq!(exit_code(&output), 0);
+    let value = envelope(&output, "diff");
+    let pages = value["result"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0]["path"], json!(ROOT_FILE));
+    assert!(pages[0]["additions"].as_u64().unwrap() > 0);
+
+    // And a clean tree exits 0 even with --exit-code.
+    let output = run(confed(dir.path(), &["diff", "--exit-code", CHILD_FILE]));
+    assert_eq!(exit_code(&output), 0, "an unmodified page has no differences");
+}
+
+#[tokio::test]
+async fn a_dry_run_push_reports_the_page_without_sending_anything() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+
+    let mut content = read(dir.path(), ROOT_FILE);
+    content.push_str("\nAn extra paragraph.\n");
+    std::fs::write(dir.path().join(ROOT_FILE), content).unwrap();
+
+    let output = run(confed_authed(dir.path(), &["push", "--dry-run", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "push");
+    assert_eq!(value["result"]["dry_run"], json!(true));
+    let pushed = value["result"]["pushed"].as_array().unwrap();
+    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed[0]["path"], json!(ROOT_FILE));
+    assert_eq!(pushed[0]["from_version"], json!(3));
+    assert_eq!(pushed[0]["to_version"], json!(4), "a dry run predicts the next version");
+    assert_eq!(pushed[0]["ops"], json!(["body"]));
+
+    assert_eq!(mutations(&server).await, Vec::<String>::new(), "--dry-run must not mutate anything");
+
+    // The real push does send it.
+    let output = run(confed_authed(dir.path(), &["push", "--json", "-m", "from the test"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "push");
+    assert_eq!(value["result"]["dry_run"], json!(false));
+    let pushed = value["result"]["pushed"].as_array().unwrap();
+    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed[0]["to_version"], json!(4));
+
+    assert_eq!(
+        mutations(&server).await,
+        vec![format!("PUT /rest/api/content/{ROOT_PAGE}")],
+        "push sends exactly one update"
+    );
+
+    let sent = last_body(&server, "PUT").await;
+    assert_eq!(sent["version"]["number"], json!(4), "push sends base + 1");
+    assert_eq!(sent["version"]["message"], json!("from the test"));
+    let storage = sent["body"]["storage"]["value"].as_str().unwrap();
+    assert!(storage.contains("An extra paragraph"), "the edit reached the server: {storage}");
+    assert!(storage.contains("Welcome to the team"), "untouched content survives: {storage}");
+
+    // After a successful push the tree is clean again and the base has advanced.
+    let value = envelope(&run(confed_authed(dir.path(), &["status", "--json"])), "status");
+    assert_eq!(value["result"]["clean"], json!(true));
+    assert!(read(dir.path(), ROOT_FILE).contains("version: 4"));
+}
+
+/// Every mutating request the mock server has seen, as `METHOD /path`.
+async fn mutations(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| matches!(r.method.as_str(), "POST" | "PUT" | "DELETE" | "PATCH"))
+        .map(|r| format!("{} {}", r.method.as_str(), r.url.path()))
+        .collect()
+}
+
+async fn last_body(server: &MockServer, http_method: &str) -> Value {
+    let requests = server.received_requests().await.unwrap_or_default();
+    let request = requests
+        .iter()
+        .rev()
+        .find(|r| r.method.as_str() == http_method)
+        .unwrap_or_else(|| panic!("no {http_method} request was made"));
+    serde_json::from_slice(&request.body).expect("the request body is JSON")
+}
+
+#[tokio::test]
+async fn commands_outside_a_workspace_exit_7_and_say_how_to_fix_it() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run(confed(dir.path(), &["status", "--json"]));
+    assert_eq!(exit_code(&output), 7, "stderr: {}", stderr(&output));
+
+    let value = envelope(&output, "status");
+    assert_eq!(value["confed"]["ok"], json!(false));
+    assert_eq!(value["result"], Value::Null);
+    let error = &value["errors"][0];
+    assert_eq!(error["code"], json!("STATE"));
+    assert!(error["message"].as_str().unwrap().contains(".state.db"), "{error}");
+    assert!(error["hint"].as_str().unwrap().contains("confed init"), "{error}");
+
+    // The human rendering says the same thing on stderr, and prints nothing on stdout.
+    let output = run(confed(dir.path(), &["status"]));
+    assert_eq!(exit_code(&output), 7);
+    assert!(stdout(&output).is_empty(), "errors belong on stderr");
+    assert!(stderr(&output).contains("error:"), "{}", stderr(&output));
+    assert!(stderr(&output).contains("hint:"), "{}", stderr(&output));
+}
+
+#[tokio::test]
+async fn a_missing_value_fails_fast_with_exit_2_instead_of_prompting() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // No CONFED_TOKEN, no --token, no TTY: this must fail, not wait for input.
+    let output = run(confed(dir.path(), &["--json", "whoami"]));
+    assert_eq!(exit_code(&output), 2, "stderr: {}", stderr(&output));
+
+    let value = envelope(&output, "whoami");
+    let error = &value["errors"][0];
+    assert_eq!(error["code"], json!("USAGE"));
+    assert!(error["message"].as_str().unwrap().contains("API token"), "{error}");
+    let hint = error["hint"].as_str().unwrap();
+    assert!(hint.contains("--token"), "the hint names the flag: {hint}");
+    assert!(hint.contains("CONFED_TOKEN"), "the hint names the env var: {hint}");
+
+    // `--non-interactive` without `--json` behaves the same, on stderr.
+    let output = run(confed(dir.path(), &["--non-interactive", "whoami"]));
+    assert_eq!(exit_code(&output), 2);
+    assert!(stderr(&output).contains("CONFED_TOKEN"), "{}", stderr(&output));
+
+    // `init` reports the missing base URL the same way.
+    let output = run(confed(dir.path(), &["init", "--json"]));
+    assert_eq!(exit_code(&output), 2, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "init");
+    assert!(
+        value["errors"][0]["hint"].as_str().unwrap().contains("CONFED_BASE_URL"),
+        "{}",
+        value["errors"][0]
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_token_exits_3_and_leaves_no_workspace_behind() {
+    let server = MockServer::start().await;
+    mount_whoami(&server, 401, json!({ "message": "PAT rejected" })).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let output = init(dir.path(), &server);
+    assert_eq!(exit_code(&output), 3, "stderr: {}", stderr(&output));
+
+    let value = envelope(&output, "init");
+    assert_eq!(value["confed"]["ok"], json!(false));
+    let error = &value["errors"][0];
+    assert_eq!(error["code"], json!("AUTH"));
+    assert!(error["hint"].as_str().unwrap().contains("CONFED_TOKEN"), "{error}");
+
+    assert!(
+        !dir.path().join(".state.db").exists(),
+        "a failed init must not leave a half-built workspace"
+    );
+}
+
+#[tokio::test]
+async fn help_and_a_bare_invocation_behave_like_a_normal_cli() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run(confed(dir.path(), &["--help"]));
+    assert_eq!(exit_code(&output), 0);
+    let help = stdout(&output);
+    for command in ["init", "clone", "pull", "push", "status", "diff", "resolve", "doctor"] {
+        assert!(help.contains(command), "`--help` does not mention `{command}`");
+    }
+
+    // No subcommand at all is a usage error, and clap says so on stderr.
+    let output = run(Command::new(env!("CARGO_BIN_EXE_confed")));
+    assert_eq!(exit_code(&output), 2, "a bare invocation is a usage error");
+    assert!(stderr(&output).contains("Usage"), "{}", stderr(&output));
+
+    let output = run(confed(dir.path(), &["--version"]));
+    assert_eq!(exit_code(&output), 0);
+    assert!(stdout(&output).starts_with("confed "), "{}", stdout(&output));
+}
+
+#[tokio::test]
+async fn whoami_reports_the_server_capabilities() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    let output = run(confed_authed(dir.path(), &["whoami", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+
+    let value = envelope(&output, "whoami");
+    assert_eq!(value["result"]["flavor"], json!("datacenter"));
+    assert_eq!(value["result"]["user"]["display_name"], json!("Test User"));
+    assert_eq!(
+        value["result"]["capabilities"]["inline_comment_create"],
+        json!(false),
+        "Data Center cannot create inline comments"
+    );
+}
+
+#[tokio::test]
+async fn fetch_refreshes_remote_state_without_touching_working_files() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    let output = run(confed_authed(dir.path(), &["fetch", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+
+    let value = envelope(&output, "fetch");
+    assert_eq!(value["result"]["fetched"], json!(2));
+    assert_eq!(value["result"]["failed"], json!([]));
+
+    assert!(!dir.path().join(ROOT_FILE).exists(), "`fetch` must not write page files");
+
+    // The pages are now known but not materialized.
+    let value = envelope(&run(confed(dir.path(), &["status", "--json"])), "status");
+    assert_eq!(value["result"]["clean"], json!(false));
+    for page in value["result"]["pages"].as_array().unwrap() {
+        assert_eq!(page["state"], json!("remote_new"), "{page}");
+    }
+}

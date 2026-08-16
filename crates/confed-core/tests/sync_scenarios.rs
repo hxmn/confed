@@ -501,3 +501,92 @@ async fn inline_anchors_are_refreshed_when_the_body_changes() {
     assert!(anchor.orphaned, "a vanished anchor is flagged");
     assert_eq!(anchor.text, "first week checklist", "the original text is kept for a human");
 }
+
+/// Attachments placed in a page's sidecar are uploaded, and re-uploaded when
+/// their bytes change.
+#[tokio::test]
+async fn attachments_are_uploaded_from_the_sidecar() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the diagram.</p>");
+    h.pull().await;
+
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/diagram.png"), b"first version").unwrap();
+
+    let opts = PushOptions { with_attachments: true, ..Default::default() };
+    let outcome = h.engine.push(&mut h.ws, &opts).await.expect("push");
+    assert_eq!(outcome.attachments_uploaded.len(), 1, "the new file is uploaded");
+
+    let remote = h
+        .engine
+        .client()
+        .list_attachments(&confed_api::PageId::new("1001"))
+        .await
+        .unwrap();
+    assert_eq!(remote.len(), 1);
+    assert_eq!(remote[0].filename, "diagram.png");
+    let first_version = remote[0].version;
+
+    // Pushing again with no change must not re-upload.
+    let again = h.engine.push(&mut h.ws, &opts).await.expect("push");
+    assert!(again.attachments_uploaded.is_empty(), "unchanged bytes are left alone");
+
+    // Changed bytes become a new version of the same attachment.
+    std::fs::write(h.path(".Diagrams/diagram.png"), b"second version, longer").unwrap();
+    let changed = h.engine.push(&mut h.ws, &opts).await.expect("push");
+    assert_eq!(changed.attachments_uploaded.len(), 1);
+
+    let remote = h
+        .engine
+        .client()
+        .list_attachments(&confed_api::PageId::new("1001"))
+        .await
+        .unwrap();
+    assert_eq!(remote.len(), 1, "still one attachment, not a duplicate");
+    assert!(remote[0].version > first_version, "it gained a version");
+}
+
+/// Removing an attachment locally needs the same explicit opt-in as deleting a
+/// page: it destroys content on the server.
+#[tokio::test]
+async fn deleting_an_attachment_requires_allow_delete() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the diagram.</p>");
+    h.pull().await;
+
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/diagram.png"), b"content").unwrap();
+    h.engine
+        .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
+        .await
+        .expect("push");
+
+    std::fs::remove_file(h.path(".Diagrams/diagram.png")).unwrap();
+
+    h.engine
+        .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
+        .await
+        .expect("push");
+    let still_there = h
+        .engine
+        .client()
+        .list_attachments(&confed_api::PageId::new("1001"))
+        .await
+        .unwrap();
+    assert_eq!(still_there.len(), 1, "a plain push must not delete server content");
+
+    h.engine
+        .push(
+            &mut h.ws,
+            &PushOptions { with_attachments: true, allow_delete: true, ..Default::default() },
+        )
+        .await
+        .expect("push");
+    let gone = h
+        .engine
+        .client()
+        .list_attachments(&confed_api::PageId::new("1001"))
+        .await
+        .unwrap();
+    assert!(gone.is_empty(), "with --allow-delete it is removed");
+}
