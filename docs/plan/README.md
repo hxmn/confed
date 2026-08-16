@@ -20,9 +20,9 @@ off as you go — this file + phase files are the cross-session progress tracker
 | 03 Conversion | [03-conversion.md](03-conversion.md) | ✅ done | `confed-convert` round-trips corpus; block-map patching proven by tests |
 | 04 Sync engine | [04-sync-engine.md](04-sync-engine.md) | ✅ done | `fetch`/`pull`/`status`/`diff`/`resolve` end-to-end against mock server |
 | 05 Commands | [05-commands.md](05-commands.md) | ✅ done | `push` + full CRUD command set; the tool is daily-usable headless |
-| 06 TUI | [06-tui.md](06-tui.md) | in progress | `confed tui` browser + conflict resolver |
-| 07 Comments | [07-comments.md](07-comments.md) | partial | sidecar + `comment` commands, inline read/re-anchor, Cloud inline create |
-| 08 Agent docs | [08-agent-docs.md](08-agent-docs.md) | in progress | generated CLAUDE.md/AGENTS.md, JSON schemas, `docs/` user docs |
+| 06 TUI | [06-tui.md](06-tui.md) | ✅ done | `confed tui` browser + conflict resolver |
+| 07 Comments | [07-comments.md](07-comments.md) | ✅ done | sidecar + `comment` commands, inline read/re-anchor, Cloud inline create |
+| 08 Agent docs | [08-agent-docs.md](08-agent-docs.md) | ✅ done | generated CLAUDE.md/AGENTS.md, JSON schemas, `docs/` user docs |
 | 09 Testing & release | [09-testing-release.md](09-testing-release.md) | partial | CI matrix, e2e suite, packaged v0.1.0 |
 
 Ordering notes: 02 and 03 are parallelizable after 01. 07 and 08 are parallelizable
