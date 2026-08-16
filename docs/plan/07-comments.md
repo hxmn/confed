@@ -27,9 +27,9 @@ everywhere; inline create/resolve on Cloud with capability gating on DC.
 
 - [ ] Anchor capture on fetch: extract inline-comment markers/refs from Cloud v2 API and DC body `inlineProperties`; store `{text, context_before/after, marker_ref, block_hash}`.
   - **Accept:** fixture tests both flavors produce identical anchor records.
-- [ ] Re-anchoring engine per design 03 §4: exact context match → unique text → fuzzy (`similar` ≥0.75) within mapped block → else `orphaned=true`; runs on pull and before push.
+- [x] Re-anchoring engine per design 03 §4: exact context match → unique text → fuzzy (`similar` ≥0.75) within mapped block → else `orphaned=true`; runs on pull and before push.
   - **Accept:** table-driven tests: moved paragraph, edited-inside-anchor, deleted anchor, duplicated text; orphan never mis-anchors (property test on perturbed corpus).
-- [ ] `confed comment add --inline --anchor "<text>"` (Cloud): unique-match validation (exit 7 with candidate list otherwise), v2 inline-create payload.
+- [x] `confed comment add --inline --anchor "<text>"` (Cloud): unique-match validation (exit 7 with candidate list otherwise), v2 inline-create payload.
   - **Accept:** e2e wiremock; ambiguous-anchor error golden; DC → exit 9.
 - [ ] Orphan surfacing: `status` counts orphaned inline comments per page; `comment list` flags them; doctor check.
   - **Accept:** JSON snapshot includes orphan flags.
@@ -47,9 +47,16 @@ subcommands with capability gating (Data Center returns exit 9 for inline
 creation and resolution). Two scenario tests cover sidecar writing and draft
 posting on both flavors.
 
-Still open — the harder half of inline comments:
+Re-anchoring now ships too (`confed-core/src/reanchor.rs`): exact text plus
+context, then unique text, then context-disambiguated among repeats, then a
+fuzzy window match above a high threshold, and otherwise `orphaned`. It runs on
+every pull — including for pages pull did not rewrite, since a purely local
+edit is exactly when an anchor moves. `confed comment add --inline` validates
+that the anchor text occurs exactly once before writing anything.
 
-- Anchor capture from the server is stored, but re-anchoring after a local edit
-  (exact context match, then unique text, then fuzzy within the mapped block,
-  else `orphaned`) is not implemented, so anchors are not yet refreshed on pull.
-- Orphan counts are not surfaced in `status` or `doctor`.
+Still open:
+
+- Orphan counts are visible through `confed comment list` (each entry carries an
+  `orphaned` flag) but are not aggregated into `status` or `doctor`.
+- The re-anchoring scenario covers moved and deleted anchors; the design's
+  "property test on a perturbed corpus" is not written.

@@ -5,8 +5,9 @@ use crate::context::Context;
 use crate::output::Output;
 use confed_core::error::{ConfedError, Result};
 use confed_core::merge;
-use confed_core::state::SyncState;
+use confed_core::state::{PageRecord, SyncState};
 use confed_core::sync::write_atomic;
+use confed_core::workspace::Workspace;
 use confed_core::worktree::{self, PageState};
 use serde_json::json;
 use std::fmt::Write;
@@ -68,7 +69,8 @@ pub fn run(ctx: &mut Context, args: &ResolveArgs) -> Result<Output> {
             content.clone()
         };
 
-        let markers = merge::conflict_marker_lines(&cleaned);
+        let ws = ctx.workspace_mut()?;
+        let markers = finish_resolution(ws, &record, &content, &cleaned)?;
         if !markers.is_empty() {
             remaining.push(json!({
                 "page_id": page_id, "path": record.local_path,
@@ -83,20 +85,6 @@ pub fn run(ctx: &mut Context, args: &ResolveArgs) -> Result<Output> {
             );
             continue;
         }
-
-        if cleaned != content {
-            write_atomic(&path, &cleaned)?;
-        }
-
-        // Recompute the hash so the file's new content becomes the base.
-        let file = confed_core::frontmatter::parse(&cleaned, &record.local_path)?;
-        let mut updated = record.clone();
-        updated.sync_state = SyncState::Clean;
-        updated.markdown_hash = file.content_hash();
-
-        let ws = ctx.workspace_mut()?;
-        ws.state().upsert_page(&updated)?;
-        ws.state().log("resolve", Some(&page_id), None, Some(updated.version), "ok", None)?;
 
         resolved.push(json!({ "page_id": page_id, "path": record.local_path }));
         let _ = writeln!(human, "  {} {}", ctx.style.green("resolved"), record.local_path);
@@ -120,8 +108,43 @@ pub fn run(ctx: &mut Context, args: &ResolveArgs) -> Result<Output> {
     Ok(output)
 }
 
-/// Keep one side of every conflict block and drop the markers.
-fn take_side(content: &str, ours: bool) -> String {
+/// One conflict block, as confed writes it:
+///
+/// ```text
+/// <<<<<<< local
+/// ours
+/// ||||||| base
+/// base
+/// =======
+/// theirs
+/// >>>>>>> remote (v9)
+/// ```
+///
+/// Each side keeps its line terminators, so the pieces concatenate back into
+/// the file byte for byte.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConflictHunk {
+    pub ours: String,
+    /// Empty unless the merge used the diff3 style (confed always does).
+    pub base: String,
+    pub theirs: String,
+    /// Text after `>>>>>>> `, e.g. `remote (v9, edited by Ada)`.
+    pub label: String,
+}
+
+/// A file split into plain text and conflict blocks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Segment {
+    Text(String),
+    Conflict(ConflictHunk),
+}
+
+/// Split a merged file into text and conflict blocks.
+///
+/// Unterminated blocks (a `<<<<<<<` with no `>>>>>>>`) are still returned as a
+/// conflict, so the resolver shows something rather than silently dropping the
+/// tail of the file.
+pub fn split_conflicts(content: &str) -> Vec<Segment> {
     #[derive(PartialEq)]
     enum Section {
         Outside,
@@ -129,16 +152,23 @@ fn take_side(content: &str, ours: bool) -> String {
         Base,
         Theirs,
     }
+
     let mut section = Section::Outside;
-    let mut out = String::with_capacity(content.len());
+    let mut segments = Vec::new();
+    let mut text = String::new();
+    let mut hunk = ConflictHunk::default();
 
     for line in content.split_inclusive('\n') {
         let trimmed = line.trim_end_matches(['\n', '\r']);
         if trimmed.starts_with("<<<<<<<") {
+            if !text.is_empty() {
+                segments.push(Segment::Text(std::mem::take(&mut text)));
+            }
+            hunk = ConflictHunk::default();
             section = Section::Ours;
             continue;
         }
-        if trimmed.starts_with("|||||||") {
+        if trimmed.starts_with("|||||||") && section != Section::Outside {
             section = Section::Base;
             continue;
         }
@@ -146,21 +176,72 @@ fn take_side(content: &str, ours: bool) -> String {
             section = Section::Theirs;
             continue;
         }
-        if trimmed.starts_with(">>>>>>>") {
+        if trimmed.starts_with(">>>>>>>") && section != Section::Outside {
+            hunk.label = trimmed.trim_start_matches('>').trim().to_string();
+            segments.push(Segment::Conflict(std::mem::take(&mut hunk)));
             section = Section::Outside;
             continue;
         }
-        let keep = match section {
-            Section::Outside => true,
-            Section::Ours => ours,
-            Section::Base => false,
-            Section::Theirs => !ours,
-        };
-        if keep {
-            out.push_str(line);
+        match section {
+            Section::Outside => text.push_str(line),
+            Section::Ours => hunk.ours.push_str(line),
+            Section::Base => hunk.base.push_str(line),
+            Section::Theirs => hunk.theirs.push_str(line),
+        }
+    }
+
+    if section != Section::Outside {
+        segments.push(Segment::Conflict(hunk));
+    }
+    if !text.is_empty() {
+        segments.push(Segment::Text(text));
+    }
+    segments
+}
+
+/// Keep one side of every conflict block and drop the markers.
+fn take_side(content: &str, ours: bool) -> String {
+    let mut out = String::with_capacity(content.len());
+    for segment in split_conflicts(content) {
+        match segment {
+            Segment::Text(text) => out.push_str(&text),
+            Segment::Conflict(hunk) => {
+                out.push_str(if ours { &hunk.ours } else { &hunk.theirs })
+            }
         }
     }
     out
+}
+
+/// Write a resolved page and clear its conflicted state.
+///
+/// Returns the lines that still carry conflict markers; when that list is not
+/// empty nothing is written and the page stays conflicted. The TUI resolver and
+/// `confed resolve` both go through here so they agree on what "resolved" means.
+pub fn finish_resolution(
+    ws: &mut Workspace,
+    record: &PageRecord,
+    original: &str,
+    resolved: &str,
+) -> Result<Vec<usize>> {
+    let markers = merge::conflict_marker_lines(resolved);
+    if !markers.is_empty() {
+        return Ok(markers);
+    }
+
+    if resolved != original {
+        write_atomic(&ws.absolute(&record.local_path), resolved)?;
+    }
+
+    // Recompute the hash so the file's new content becomes the base.
+    let file = confed_core::frontmatter::parse(resolved, &record.local_path)?;
+    let mut updated = record.clone();
+    updated.sync_state = SyncState::Clean;
+    updated.markdown_hash = file.content_hash();
+
+    ws.state().upsert_page(&updated)?;
+    ws.state().log("resolve", Some(&record.page_id), None, Some(updated.version), "ok", None)?;
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -195,5 +276,53 @@ mod tests {
     fn text_without_conflicts_is_unchanged() {
         let plain = "just\nsome\nlines\n";
         assert_eq!(take_side(plain, true), plain);
+        assert_eq!(split_conflicts(plain), [Segment::Text(plain.into())]);
+    }
+
+    #[test]
+    fn the_splitter_understands_the_markers_confed_emits() {
+        let segments = split_conflicts(CONFLICTED);
+        assert_eq!(
+            segments,
+            [
+                Segment::Text("intro\n".into()),
+                Segment::Conflict(ConflictHunk {
+                    ours: "our line\n".into(),
+                    base: "original\n".into(),
+                    theirs: "their line\n".into(),
+                    label: "remote (v9)".into(),
+                }),
+                Segment::Text("outro\n".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn several_conflicts_are_split_independently() {
+        let text = "a\n<<<<<<< local\nx\n||||||| base\nb\n=======\ny\n>>>>>>> remote\n\
+                    mid\n<<<<<<< local\np\n||||||| base\nq\n=======\nr\n>>>>>>> remote (v2)\nend\n";
+        let hunks: Vec<_> = split_conflicts(text)
+            .into_iter()
+            .filter_map(|s| match s {
+                Segment::Conflict(h) => Some(h),
+                Segment::Text(_) => None,
+            })
+            .collect();
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].ours, "x\n");
+        assert_eq!(hunks[1].theirs, "r\n");
+        assert_eq!(hunks[1].label, "remote (v2)");
+    }
+
+    /// An empty side is common: one party deleted the lines the other edited.
+    #[test]
+    fn empty_sides_survive_the_round_trip() {
+        let text = "<<<<<<< local\n||||||| base\nold\n=======\nnew\n>>>>>>> remote (v3)\n";
+        let segments = split_conflicts(text);
+        let Segment::Conflict(hunk) = &segments[0] else { panic!("expected a conflict") };
+        assert!(hunk.ours.is_empty());
+        assert_eq!(hunk.theirs, "new\n");
+        assert_eq!(take_side(text, true), "");
+        assert_eq!(take_side(text, false), "new\n");
     }
 }

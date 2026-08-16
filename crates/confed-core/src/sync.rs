@@ -461,7 +461,9 @@ impl SyncEngine {
         }
 
         // Pass two: apply.
+        let mut handled: Vec<String> = Vec::new();
         for (remote_page, action) in plan {
+            handled.push(remote_page.page_id.clone());
             let local = files_by_id.get(remote_page.page_id.as_str()).copied();
             let base_record = base_by_id.get(remote_page.page_id.as_str()).copied();
 
@@ -526,7 +528,27 @@ impl SyncEngine {
                     self.download_attachments(ws, &remote_page.page_id, placement).await?;
             }
             if opts.with_comments && !opts.dry_run {
-                self.write_comments_sidecar(ws, &remote_page.page_id, &remote_page.title, placement)?;
+                self.write_comments_sidecar(
+                    ws,
+                    &remote_page.page_id,
+                    &remote_page.title,
+                    &placement.path,
+                )?;
+            }
+        }
+
+        // Pages pull did not rewrite may still have been edited locally, which
+        // is exactly when an inline anchor moves. Refresh those too.
+        if opts.with_comments && !opts.dry_run {
+            for record in ws.state().all_pages()? {
+                if handled.contains(&record.page_id) {
+                    continue;
+                }
+                if !self.in_scope(&opts.scope, &placements, &record.page_id) {
+                    continue;
+                }
+                let path = record.local_path.clone();
+                self.write_comments_sidecar(ws, &record.page_id, &record.title, &path)?;
             }
         }
 
@@ -825,10 +847,11 @@ impl SyncEngine {
         ws: &mut Workspace,
         page_id: &str,
         title: &str,
-        placement: &Placement,
+        page_path: &str,
     ) -> Result<()> {
+        self.reanchor_inline_comments(ws, page_id, page_path)?;
         let records = ws.state().page_comments(page_id)?;
-        let dir = ws.absolute(&placement.sidecar);
+        let dir = ws.absolute(&paths::sidecar_for(page_path));
         let path = dir.join(comments::COMMENTS_FILENAME);
 
         // Unpushed drafts survive a refresh.
@@ -844,6 +867,50 @@ impl SyncEngine {
         std::fs::create_dir_all(&dir)
             .map_err(|e| ConfedError::io(format!("creating {}", dir.display()), e))?;
         write_atomic(&path, &comments::render(page_id, title, &records, &drafts))
+    }
+
+    /// Re-locate every inline comment's anchor in the page's current text.
+    ///
+    /// Anchors are stored rather than embedded in the body, so an edit can move
+    /// or destroy the text a comment points at. Anything that cannot be located
+    /// confidently is flagged `orphaned` instead of being attached to the wrong
+    /// sentence — and never deleted, on either side.
+    fn reanchor_inline_comments(
+        &self,
+        ws: &mut Workspace,
+        page_id: &str,
+        path: &str,
+    ) -> Result<usize> {
+        let records = ws.state().page_comments(page_id)?;
+        if !records.iter().any(|c| c.kind == "inline") {
+            return Ok(0);
+        }
+        let Ok(content) = std::fs::read_to_string(ws.absolute(path)) else { return Ok(0) };
+        let body = crate::frontmatter::split(&content).map(|(_, b)| b).unwrap_or(&content);
+
+        let mut orphaned = 0;
+        for record in records.into_iter().filter(|c| c.kind == "inline") {
+            let Some(stored) = record.anchor.as_deref() else { continue };
+            let Ok(anchor) = serde_json::from_str::<confed_api::InlineAnchor>(stored) else {
+                continue;
+            };
+
+            let result = crate::reanchor::reanchor(&anchor, body);
+            if result.is_orphaned() {
+                orphaned += 1;
+                tracing::debug!(
+                    target: "confed::sync",
+                    page = page_id, comment = %record.comment_id, text = %anchor.text,
+                    "inline comment anchor could not be located"
+                );
+            }
+            if result.anchor != anchor {
+                let mut updated = record;
+                updated.anchor = serde_json::to_string(&result.anchor).ok();
+                ws.state().upsert_comment(&updated)?;
+            }
+        }
+        Ok(orphaned)
     }
 
     // ------------------------------------------------------------- push ----

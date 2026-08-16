@@ -63,6 +63,14 @@ impl Context {
         self.workspace.as_mut().ok_or_else(ConfedError::not_initialized)
     }
 
+    /// Move the workspace out of the context.
+    ///
+    /// The TUI needs to own it: long operations run on the tokio runtime, and
+    /// the workspace (a SQLite connection) travels with them.
+    pub fn take_workspace(&mut self) -> Result<Workspace> {
+        self.workspace.take().ok_or_else(ConfedError::not_initialized)
+    }
+
     pub fn has_workspace(&self) -> bool {
         self.workspace.is_some()
     }

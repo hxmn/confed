@@ -446,3 +446,58 @@ async fn a_conflicted_page_stays_conflicted_across_reopen() {
     let record = reopened.state().get_page("1001").unwrap().unwrap();
     assert_eq!(record.sync_state, SyncState::Conflicted);
 }
+
+/// An inline comment's anchor is re-located after the page text moves, and
+/// flagged rather than mis-attached when the text is gone.
+#[tokio::test]
+async fn inline_anchors_are_refreshed_when_the_body_changes() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page(
+        "1001",
+        "Onboarding",
+        None,
+        "<p>Read this during your first week checklist and then ask questions.</p>",
+    );
+    // The mock seeds an inline anchor on "first week checklist".
+    h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+
+    let stored_anchor = |h: &Harness| -> confed_api::InlineAnchor {
+        let record = h
+            .ws
+            .state()
+            .page_comments("1001")
+            .unwrap()
+            .into_iter()
+            .find(|c| c.kind == "inline")
+            .expect("inline comment");
+        serde_json::from_str(record.anchor.as_deref().expect("anchor")).expect("anchor json")
+    };
+    assert!(!stored_anchor(&h).orphaned, "the anchor starts out attached");
+
+    // Move the anchored text into a different paragraph: still findable.
+    let moved = h
+        .read("Onboarding.md")
+        .replace("Read this during your first week checklist and then ask questions.",
+                 "A new opening line.\n\nLater: first week checklist.");
+    h.write("Onboarding.md", &moved);
+    h.engine
+        .pull(&mut h.ws, &PullOptions { no_fetch: true, ..PullOptions::everything() })
+        .await
+        .expect("pull");
+    assert!(!stored_anchor(&h).orphaned, "moved text is re-anchored, not orphaned");
+
+    // Delete the anchored text entirely: flagged, never mis-attached.
+    h.write(
+        "Onboarding.md",
+        &h.read("Onboarding.md").replace("Later: first week checklist.", "Nothing relevant here."),
+    );
+    h.engine
+        .pull(&mut h.ws, &PullOptions { no_fetch: true, ..PullOptions::everything() })
+        .await
+        .expect("pull");
+
+    let anchor = stored_anchor(&h);
+    assert!(anchor.orphaned, "a vanished anchor is flagged");
+    assert_eq!(anchor.text, "first week checklist", "the original text is kept for a human");
+}

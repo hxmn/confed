@@ -154,6 +154,9 @@ pub enum Command {
 
     /// Generate a shell completion script.
     Completion(CompletionArgs),
+
+    /// Browse the space, diff, resolve conflicts and sync, interactively.
+    Tui,
 }
 
 impl Command {
@@ -182,6 +185,7 @@ impl Command {
             Command::Doctor(_) => "doctor",
             Command::Export(_) => "export",
             Command::Completion(_) => "completion",
+            Command::Tui => "tui",
         }
     }
 }
@@ -618,6 +622,12 @@ mod tests {
     #[test]
     fn conflicting_resolve_sides_are_rejected() {
         assert!(Cli::try_parse_from(["confed", "resolve", "--ours", "--theirs", "p.md"]).is_err());
+    }
+
+    #[test]
+    fn the_tui_is_a_subcommand_like_any_other() {
+        let cli = Cli::try_parse_from(["confed", "tui"]).unwrap();
+        assert_eq!(cli.command.name(), "tui");
     }
 
     #[test]

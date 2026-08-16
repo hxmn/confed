@@ -5,6 +5,7 @@ mod commands;
 mod context;
 mod output;
 mod prompt;
+mod tui;
 
 use clap::Parser;
 use cli::{Cli, Command, GlobalArgs};
@@ -54,6 +55,12 @@ fn run(cli: Cli) -> Result<Output> {
         _ => {}
     }
 
+    // The TUI owns its own runtime: its event loop is synchronous and hands work
+    // to tokio, rather than being driven by it.
+    if matches!(command, Command::Tui) {
+        return tui::run(ctx);
+    }
+
     // Credentials are read here, outside the runtime: the OS keyring blocks.
     let prepared_init = match &command {
         Command::Init(args) => Some(commands::init::prepare(&mut ctx, args)?),
@@ -101,7 +108,7 @@ async fn dispatch(
         Command::Whoami => commands::whoami::run(&mut ctx).await,
         Command::Doctor(args) => commands::doctor::run(&mut ctx, &args).await,
         Command::Export(args) => commands::export::run(&mut ctx, &args).await,
-        Command::Config(_) | Command::Resolve(_) | Command::Completion(_) => {
+        Command::Config(_) | Command::Resolve(_) | Command::Completion(_) | Command::Tui => {
             unreachable!("handled before the runtime starts")
         }
     }
