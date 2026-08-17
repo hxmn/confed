@@ -191,6 +191,26 @@ impl ConfluenceClient for CloudClient {
         Ok(user.into_domain())
     }
 
+    async fn lookup_user(&self, reference: &UserReference) -> ApiResult<User> {
+        // Cloud identifies everybody by account id; the other forms only appear
+        // in content migrated from Server, which Cloud resolves the same way.
+        let query = match reference {
+            UserReference::AccountId(id) => ("accountId", id.clone()),
+            UserReference::UserKey(key) => ("key", key.clone()),
+            UserReference::Username(name) => ("username", name.clone()),
+        };
+        let user: v2::CurrentUser =
+            self.http.get_json("rest/api/user", &[(query.0, query.1)]).await?;
+        Ok(user.into_domain())
+    }
+
+    fn user_profile_url(&self, user: &User) -> String {
+        match &user.account_id {
+            Some(id) => format!("{}/people/{}", self.base_url, encode(id)),
+            None => format!("{}/people", self.base_url),
+        }
+    }
+
     async fn get_space(&self, key: &str) -> ApiResult<Space> {
         self.fetch_space(key).await
     }

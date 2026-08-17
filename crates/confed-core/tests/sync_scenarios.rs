@@ -863,3 +863,141 @@ async fn backfilling_respects_the_pull_scope() {
     assert!(h.path(".Wanted/storage.xml").exists(), "the page in scope is backfilled");
     assert!(!h.path(".Untouched/storage.xml").exists(), "the page out of scope is left alone");
 }
+
+/// A mention renders as the person's name linked to their profile, and the
+/// opaque key Confluence uses never reaches the reader.
+#[tokio::test]
+async fn mentions_render_as_named_profile_links() {
+    for flavor in [Flavor::Cloud, Flavor::DataCenter] {
+        let mut h = Harness::new(flavor);
+        h.mock.seed_user("6cb6d404f61e0043d34f805b8eca16d6", "alice.ng", "Alice Ng");
+        h.mock.seed_page(
+            "1001",
+            "Onboarding",
+            None,
+            "<p>Ask <ac:link><ri:user ri:userkey=\"6cb6d404f61e0043d34f805b8eca16d6\"/>\
+             </ac:link> about it.</p>",
+        );
+        h.pull().await;
+
+        let body = h.read("Onboarding.md");
+        assert!(body.contains("[@Alice Ng]"), "{flavor}: got {body}");
+        assert!(
+            !body.contains("[6cb6d404"),
+            "{flavor}: the reader sees a name, not the opaque key: {body}"
+        );
+
+        match flavor {
+            // Data Center profiles are keyed by username, not by the mention id.
+            Flavor::DataCenter => assert!(
+                body.contains("/display/~alice.ng"),
+                "{flavor}: expected a tilde-username profile URL, got {body}"
+            ),
+            Flavor::Cloud => assert!(
+                body.contains("/people/6cb6d404f61e0043d34f805b8eca16d6"),
+                "{flavor}: expected an account-id profile URL, got {body}"
+            ),
+        }
+    }
+}
+
+/// Somebody confed cannot resolve is not linked to the wrong place: the block
+/// keeps its original markup, and heals once the lookup succeeds.
+#[tokio::test]
+async fn an_unresolvable_mention_keeps_its_markup_and_heals_later() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page(
+        "1001",
+        "Onboarding",
+        None,
+        "<p>Ask <ac:link><ri:user ri:userkey=\"unknown-key\"/></ac:link> about it.</p>",
+    );
+    h.pull().await;
+
+    let body = h.read("Onboarding.md");
+    assert!(body.contains("```confluence"), "the block is preserved: {body}");
+    assert!(body.contains("ri:userkey=\"unknown-key\""));
+    assert!(!body.contains("display/~unknown-key"), "no link to a profile that does not exist");
+
+    // The person becomes resolvable, and the next pull renders them properly.
+    h.mock.seed_user("unknown-key", "bob.kaur", "Bob Kaur");
+    h.pull().await;
+
+    let body = h.read("Onboarding.md");
+    assert!(body.contains("[@Bob Kaur](https://wiki.mock.test/display/~bob.kaur)"), "got {body}");
+    assert!(!body.contains("```confluence"));
+}
+
+/// Editing a paragraph that mentions somebody sends the mention back as a
+/// mention, not as an ordinary link.
+#[tokio::test]
+async fn an_edited_mention_survives_the_round_trip() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_user("key-1", "alice.ng", "Alice Ng");
+    h.mock.seed_page(
+        "1001",
+        "Notes",
+        None,
+        "<p>Ask <ac:link><ri:user ri:userkey=\"key-1\"/></ac:link> about it.</p>",
+    );
+    h.pull().await;
+
+    let edited = h.read("Notes.md").replace("about it.", "about the rollout.");
+    h.write("Notes.md", &edited);
+    h.push().await;
+
+    let body = h.mock.page_body("1001").unwrap();
+    assert!(body.contains(r#"<ri:user ri:userkey="key-1""#), "the mention is intact: {body}");
+    assert!(body.contains("about the rollout"));
+}
+
+/// An improved converter reaches pages that were already synced: pull
+/// re-renders them instead of waiting for each page to change on the server.
+#[tokio::test]
+async fn pull_re_renders_pages_left_by_an_older_converter() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_user("key-1", "alice.ng", "Alice Ng");
+    h.mock.seed_page("1001", "Notes", None, "<p>Body.</p>");
+    h.pull().await;
+
+    // Stand in for a file written before the rendering rules changed.
+    h.write("Notes.md", &h.read("Notes.md").replace("Body.", "STALE RENDERING"));
+    let mut record = h.ws.state().get_page("1001").unwrap().unwrap();
+    record.render_key = "rendered-by-an-older-confed".into();
+    record.markdown_hash =
+        confed_core::frontmatter::parse(&h.read("Notes.md"), "Notes.md").unwrap().content_hash();
+    h.ws.state().upsert_page(&record).unwrap();
+    assert_eq!(h.status("1001"), PageState::Unchanged, "neither side has changed");
+
+    let outcome = h.pull().await;
+    assert_eq!(outcome.updated.len(), 1, "the page is re-rendered: {outcome:?}");
+    assert!(h.read("Notes.md").contains("Body."), "it now matches the current rules");
+    assert_ne!(
+        h.ws.state().get_page("1001").unwrap().unwrap().render_key,
+        "rendered-by-an-older-confed",
+        "the fingerprint is refreshed, so it does not re-render forever"
+    );
+
+    // And it does not keep re-rendering every pull.
+    assert!(h.pull().await.is_empty(), "a page at the current version is left alone");
+}
+
+/// Re-rendering must never be an excuse to discard someone's edits.
+#[tokio::test]
+async fn a_stale_rendering_is_not_re_rendered_over_local_edits() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Notes", None, "<p>Body.</p>");
+    h.pull().await;
+
+    h.edit_body("Notes.md", "\nWork I have not pushed.\n");
+    let mut record = h.ws.state().get_page("1001").unwrap().unwrap();
+    record.render_key = "rendered-by-an-older-confed".into();
+    h.ws.state().upsert_page(&record).unwrap();
+    assert_eq!(h.status("1001"), PageState::Modified);
+
+    h.pull().await;
+    assert!(
+        h.read("Notes.md").contains("Work I have not pushed."),
+        "a modified page keeps its edits, stale rendering or not"
+    );
+}

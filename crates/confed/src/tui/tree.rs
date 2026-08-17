@@ -243,6 +243,7 @@ pub(crate) mod fixtures {
             block_map: None,
             sync_state: SyncState::Clean,
             synced_at: now(),
+            render_key: String::new(),
         }
     }
 

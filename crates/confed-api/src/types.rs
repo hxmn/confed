@@ -135,6 +135,39 @@ pub struct Space {
     pub homepage_id: Option<PageId>,
 }
 
+/// How a page's markup identifies a person. Which one appears depends on the
+/// flavor and on how old the content is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UserReference {
+    /// Cloud, and the only identifier Cloud exposes.
+    AccountId(String),
+    /// Data Center's opaque key, what `ri:userkey` carries.
+    UserKey(String),
+    /// Older Data Center content.
+    Username(String),
+}
+
+impl UserReference {
+    /// The value as it appears in the markup, which is also how confed keys its
+    /// cache of resolved people.
+    pub fn value(&self) -> &str {
+        match self {
+            UserReference::AccountId(v)
+            | UserReference::UserKey(v)
+            | UserReference::Username(v) => v,
+        }
+    }
+
+    /// The `ri:user` attribute this reference came from, without the prefix.
+    pub fn attribute(&self) -> &'static str {
+        match self {
+            UserReference::AccountId(_) => "account-id",
+            UserReference::UserKey(_) => "userkey",
+            UserReference::Username(_) => "username",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct User {
     pub account_id: Option<String>,

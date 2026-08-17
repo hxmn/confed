@@ -320,6 +320,7 @@ impl SyncEngine {
             }
         }
 
+        self.resolve_mentioned_users(ws).await?;
         ws.state().set_meta("last_fetch_at", &now())?;
         self.progress.finish();
         Ok(outcome)
@@ -407,6 +408,54 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// Look up everyone mentioned in the fetched bodies who is not cached yet.
+    ///
+    /// Mentions are opaque ids in the markup, so this is what lets them render
+    /// as `[@Name](profile)`. A lookup that fails — a deleted account, or a
+    /// permission confed does not have — is left unresolved rather than fatal:
+    /// those blocks stay as Confluence markup, which is honest and lossless.
+    async fn resolve_mentioned_users(&self, ws: &mut Workspace) -> Result<()> {
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for remote in ws.state().all_remote()? {
+            let Some(body) = &remote.storage_body else { continue };
+            for (attr, id) in confed_convert::user_references(body) {
+                if !wanted.iter().any(|(_, existing)| existing == &id) {
+                    wanted.push((attr, id));
+                }
+            }
+        }
+
+        for (attr, id) in wanted {
+            if ws.state().get_user(&id)?.is_some() {
+                continue;
+            }
+            let reference = match attr.as_str() {
+                "account-id" => confed_api::UserReference::AccountId(id.clone()),
+                "username" => confed_api::UserReference::Username(id.clone()),
+                _ => confed_api::UserReference::UserKey(id.clone()),
+            };
+            match self.client.lookup_user(&reference).await {
+                Ok(user) => {
+                    let profile_url = self.client.user_profile_url(&user);
+                    ws.state().upsert_user(&crate::state::UserRecord {
+                        id,
+                        id_attr: attr,
+                        username: user.username.clone(),
+                        display_name: user.display_name.clone(),
+                        profile_url,
+                        fetched_at: now(),
+                    })?;
+                }
+                Err(e) => tracing::debug!(
+                    target: "confed::sync",
+                    user = %id, error = %e,
+                    "could not resolve a mention; its block stays as Confluence markup"
+                ),
+            }
+        }
+        Ok(())
+    }
+
     /// Materialize the fetched state into working files.
     pub async fn pull(&self, ws: &mut Workspace, opts: &PullOptions) -> Result<PullOutcome> {
         if !opts.no_fetch {
@@ -436,6 +485,7 @@ impl SyncEngine {
 
         // Pass one: decide, and refuse the whole operation if anything would be
         // clobbered. Nothing is written until the plan is known to be safe.
+        let known_users = convert_options(ws, "", &HashMap::new()).users;
         let mut plan: Vec<(RemotePage, PullAction)> = Vec::new();
         for remote_page in &remote {
             if !self.in_scope(&opts.scope, &placements, &remote_page.page_id) {
@@ -443,12 +493,13 @@ impl SyncEngine {
             }
             let status =
                 statuses.iter().find(|s| s.page_id.as_deref() == Some(&remote_page.page_id));
-            let action = decide_pull(
-                remote_page,
-                status,
-                base_by_id.get(remote_page.page_id.as_str()).copied(),
-                opts,
-            );
+            let base_record = base_by_id.get(remote_page.page_id.as_str()).copied();
+            // Was this file rendered from the same inputs confed would use now?
+            let stale_rendering = match (base_record, &remote_page.storage_body) {
+                (Some(base), Some(body)) => base.render_key != render_key(body, &known_users),
+                _ => false,
+            };
+            let action = decide_pull(remote_page, status, base_record, opts, stale_rendering);
             if let PullAction::Blocked(reason) = &action {
                 outcome.skipped_dirty.push(BlockedPage {
                     page_id: remote_page.page_id.clone(),
@@ -817,6 +868,10 @@ impl SyncEngine {
             block_map: serde_json::to_string(block_map).ok(),
             sync_state,
             synced_at: now(),
+            render_key: render_key(
+                storage,
+                &convert_options(ws, &placement.path, &HashMap::new()).users,
+            ),
         })
     }
 
@@ -1606,6 +1661,7 @@ impl SyncEngine {
             block_map: serde_json::to_string(&converted.block_map).ok(),
             sync_state: SyncState::Clean,
             synced_at: now(),
+            render_key: render_key(&page.body_storage, &convert_opts.users),
         })?;
 
         ws.state().upsert_remote(&RemotePage {
@@ -1695,6 +1751,7 @@ fn decide_pull(
     status: Option<&PageStatus>,
     base: Option<&PageRecord>,
     opts: &PullOptions,
+    stale_rendering: bool,
 ) -> PullAction {
     if remote.deleted {
         return match status.map(|s| s.local_dirty) {
@@ -1707,6 +1764,16 @@ fn decide_pull(
     let Some(status) = status else {
         return if base.is_none() { PullAction::Create } else { PullAction::Overwrite };
     };
+
+    // What the file was rendered from has changed — better conversion rules, or
+    // a mention that can now be resolved — so the Markdown is out of date even
+    // though neither side moved. Re-render it, but only when there is nothing
+    // local to lose: otherwise it would show up as a change the user did not
+    // make. The body is required, since re-rendering from a metadata-only
+    // record would write an empty page over a perfectly good file.
+    if stale_rendering && status.state == PageState::Unchanged && remote.storage_body.is_some() {
+        return PullAction::Overwrite;
+    }
 
     match status.state {
         // No local file exists, so there is nothing to lose.
@@ -1756,17 +1823,58 @@ fn convert_options(ws: &Workspace, path: &str, links: &HashMap<String, String>) 
         links.iter().map(|(id, target)| (id.clone(), paths::relative_link(path, target))).collect();
     let link_targets = page_links.iter().map(|(id, link)| (link.clone(), id.clone())).collect();
 
+    // People this workspace has already resolved. A mention of anyone else keeps
+    // its block verbatim rather than linking to the wrong profile.
+    let users = ws
+        .state()
+        .all_users()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| {
+            (
+                u.id.clone(),
+                confed_convert::UserLink {
+                    display_name: u.display_name,
+                    profile_url: u.profile_url,
+                    id_attr: u.id_attr,
+                    id_value: u.id,
+                },
+            )
+        })
+        .collect();
+
     ConvertOptions {
         attachment_dir: paths::sidecar_ref(path),
         page_links,
         link_targets,
         base_url: ws.base_url().ok().flatten().unwrap_or_default(),
         space_key: ws.space_key().unwrap_or_default(),
+        users,
     }
 }
 
 fn link_map(placements: &HashMap<String, Placement>) -> HashMap<String, String> {
     placements.iter().map(|(id, p)| (id.clone(), p.path.clone())).collect()
+}
+
+/// Fingerprint of everything a page's Markdown was rendered from.
+///
+/// Two things make an already-synced file out of date without either side
+/// changing: the converter's rules improve, or somebody the page mentions
+/// becomes resolvable. Both belong in one value, so pull has a single question
+/// to ask rather than a growing list of special cases.
+pub fn render_key(storage: &str, users: &HashMap<String, confed_convert::UserLink>) -> String {
+    let mut parts = vec![format!("converter={}", confed_convert::CONVERTER_VERSION)];
+    let mut mentioned: Vec<String> = confed_convert::user_references(storage)
+        .into_iter()
+        .map(|(_, id)| match users.get(&id) {
+            Some(user) => format!("{id}={}|{}", user.display_name, user.profile_url),
+            None => format!("{id}=unresolved"),
+        })
+        .collect();
+    mentioned.sort();
+    parts.extend(mentioned);
+    hash_str(&parts.join("\n"))
 }
 
 /// Glob-ish matching for scope arguments: `*` within a segment, `**` across them.
@@ -1896,7 +2004,7 @@ mod tests {
             tampering: vec![],
         };
 
-        let blocked = decide_pull(&remote, Some(&status), None, &PullOptions::default());
+        let blocked = decide_pull(&remote, Some(&status), None, &PullOptions::default(), false);
         assert!(matches!(blocked, PullAction::Blocked(_)));
 
         let forced = decide_pull(
@@ -1904,6 +2012,7 @@ mod tests {
             Some(&status),
             None,
             &PullOptions { force: true, ..Default::default() },
+            false,
         );
         assert_eq!(forced, PullAction::Delete);
     }
@@ -1941,7 +2050,7 @@ mod tests {
         };
 
         assert_eq!(
-            decide_pull(&remote, Some(&status), None, &PullOptions::default()),
+            decide_pull(&remote, Some(&status), None, &PullOptions::default(), false),
             PullAction::Merge
         );
         assert!(matches!(
@@ -1949,7 +2058,8 @@ mod tests {
                 &remote,
                 Some(&status),
                 None,
-                &PullOptions { no_merge: true, ..Default::default() }
+                &PullOptions { no_merge: true, ..Default::default() },
+                false
             ),
             PullAction::Blocked(_)
         ));
@@ -1958,7 +2068,8 @@ mod tests {
                 &remote,
                 Some(&status),
                 None,
-                &PullOptions { force: true, ..Default::default() }
+                &PullOptions { force: true, ..Default::default() },
+                false
             ),
             PullAction::Overwrite
         );
@@ -1996,7 +2107,7 @@ mod tests {
             tampering: vec![],
         };
         assert_eq!(
-            decide_pull(&remote, Some(&status), None, &PullOptions::default()),
+            decide_pull(&remote, Some(&status), None, &PullOptions::default(), false),
             PullAction::Nothing
         );
     }

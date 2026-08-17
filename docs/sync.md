@@ -85,6 +85,7 @@ written at all and the command exits 7. Per page:
 | `behind` | overwrite from the server |
 | `diverged` or `conflicted` | three-way merge (or, with `--no-merge`, block; with `--force`, overwrite) |
 | `modified` | leave it alone — pull has nothing to add |
+| `unchanged`, but rendered from different inputs | re-render from the same server content |
 | `remote_deleted` | delete the file, unless it is locally dirty, in which case block |
 | `local_deleted` | leave it deleted, unless `--force` recreates it |
 
@@ -258,3 +259,15 @@ cannot reason about what it is overwriting:
   cannot take a Confluence subtree with it.
 - **Fetch failures are partial, not fatal.** A page that cannot be fetched is listed in
   `result.failed`, the rest of the space is still updated, and the command exits 8.
+
+## Re-rendering
+
+Two things can make an already-synced file out of date without either side changing: the
+conversion rules improve, or somebody the page mentions becomes resolvable. confed records
+a fingerprint of both against each page, and `pull` re-renders any page whose fingerprint
+no longer matches — so an improvement reaches a whole workspace on the next pull instead
+of arriving page by page as each one happens to change on the server.
+
+Re-rendering only ever applies to pages with no local changes. A page you have edited is
+left exactly as you left it, because rewriting it would show up as a change you did not
+make.

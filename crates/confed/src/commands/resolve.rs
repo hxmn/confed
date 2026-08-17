@@ -316,6 +316,7 @@ mod tests {
             block_map: None,
             sync_state: SyncState::Conflicted,
             synced_at: confed_core::state::now(),
+            render_key: String::new(),
         };
         ws.state().upsert_page(&record).expect("upsert");
         (dir, ws, record, page)

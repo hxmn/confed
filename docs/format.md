@@ -251,6 +251,31 @@ for a macro confed does not model.
 confed never uploads it as an attachment, and deleting a page removes it along with the
 rest of the sidecar.
 
+## Mentions
+
+Confluence writes a mention as an opaque id:
+
+```xml
+<ac:link><ri:user ri:userkey="6cb6d404f61e0043d34f805b8eca16d6"/></ac:link>
+```
+
+confed resolves that id against the server, caches the answer, and renders the person's
+name linked to their profile:
+
+```markdown
+Ask [@Alice Ng](https://wiki.corp/display/~alice.ng) about it.
+```
+
+The profile URL is the one the site actually uses: `…/display/~username` on Data Center —
+the tilde-prefixed *username*, not the opaque key — and `…/people/<account id>` on Cloud.
+Editing a paragraph containing a mention sends it back as a mention, not as an ordinary
+link.
+
+Somebody confed cannot resolve — a deleted account, or one it lacks permission to see —
+is never linked to a guessed URL. That block keeps its original markup in a
+```` ```confluence ```` fence instead, and the next pull that can resolve the person
+renders it properly.
+
 ## Comments
 
 Comments live in `.<page>/comments.md`. Each entry is introduced by an HTML comment

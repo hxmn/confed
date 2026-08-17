@@ -11,7 +11,22 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const STATE_DB_FILENAME: &str = ".state.db";
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// Adds the resolved-people cache and a fingerprint of everything a page's
+/// rendering depended on, so pull can re-render when any of it changes.
+const SCHEMA_V2: &str = r#"
+CREATE TABLE users (
+  id            TEXT PRIMARY KEY,
+  id_attr       TEXT NOT NULL,
+  username      TEXT,
+  display_name  TEXT NOT NULL,
+  profile_url   TEXT NOT NULL,
+  fetched_at    TEXT NOT NULL
+);
+
+ALTER TABLE pages ADD COLUMN render_key TEXT NOT NULL DEFAULT '';
+"#;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE meta (
@@ -128,6 +143,11 @@ pub struct PageRecord {
     pub block_map: Option<String>,
     pub sync_state: SyncState,
     pub synced_at: String,
+    /// Fingerprint of everything the Markdown on disk was rendered from: the
+    /// converter version and the people the page mentions. When it no longer
+    /// matches, the file is out of date even though neither side changed, and
+    /// pull re-renders it.
+    pub render_key: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +218,19 @@ pub struct CommentRecord {
     /// JSON-encoded `InlineAnchor` for inline comments.
     pub anchor: Option<String>,
     pub synced_at: Option<String>,
+}
+
+/// Somebody confed resolved once and does not need to look up again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UserRecord {
+    /// The id as it appears in page markup.
+    pub id: String,
+    /// Which `ri:user` attribute carried it.
+    pub id_attr: String,
+    pub username: Option<String>,
+    pub display_name: String,
+    pub profile_url: String,
+    pub fetched_at: String,
 }
 
 #[derive(Clone, Debug)]
@@ -287,6 +320,11 @@ impl StateDb {
         }
         if current == 0 {
             self.conn.execute_batch(SCHEMA_V1)?;
+        }
+        if current < 2 {
+            self.conn.execute_batch(SCHEMA_V2)?;
+        }
+        if current != SCHEMA_VERSION {
             self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         }
         Ok(())
@@ -338,7 +376,7 @@ impl StateDb {
             .query_row(
                 "SELECT page_id, title, slug, local_path, parent_id, position, version, status,
                         labels, author, created_at, updated_at, storage_body, storage_hash,
-                        markdown_hash, block_map, sync_state, synced_at
+                        markdown_hash, block_map, sync_state, synced_at, render_key
                  FROM pages WHERE page_id = ?1",
                 params![page_id],
                 page_from_row,
@@ -352,7 +390,7 @@ impl StateDb {
             .query_row(
                 "SELECT page_id, title, slug, local_path, parent_id, position, version, status,
                         labels, author, created_at, updated_at, storage_body, storage_hash,
-                        markdown_hash, block_map, sync_state, synced_at
+                        markdown_hash, block_map, sync_state, synced_at, render_key
                  FROM pages WHERE local_path = ?1",
                 params![local_path],
                 page_from_row,
@@ -364,7 +402,7 @@ impl StateDb {
         let mut stmt = self.conn.prepare(
             "SELECT page_id, title, slug, local_path, parent_id, position, version, status,
                     labels, author, created_at, updated_at, storage_body, storage_hash,
-                    markdown_hash, block_map, sync_state, synced_at
+                    markdown_hash, block_map, sync_state, synced_at, render_key
              FROM pages ORDER BY local_path",
         )?;
         let rows = stmt.query_map([], page_from_row)?;
@@ -544,6 +582,50 @@ impl StateDb {
         Ok(())
     }
 
+    // ---- resolved people --------------------------------------------------
+
+    /// Remember a person so their mentions render without another lookup.
+    pub fn upsert_user(&self, user: &UserRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO users (id, id_attr, username, display_name, profile_url, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                id_attr = excluded.id_attr, username = excluded.username,
+                display_name = excluded.display_name, profile_url = excluded.profile_url,
+                fetched_at = excluded.fetched_at",
+            params![
+                user.id,
+                user.id_attr,
+                user.username,
+                user.display_name,
+                user.profile_url,
+                user.fetched_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn all_users(&self) -> Result<Vec<UserRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, id_attr, username, display_name, profile_url, fetched_at FROM users",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(UserRecord {
+                id: r.get(0)?,
+                id_attr: r.get(1)?,
+                username: r.get(2)?,
+                display_name: r.get(3)?,
+                profile_url: r.get(4)?,
+                fetched_at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn get_user(&self, id: &str) -> Result<Option<UserRecord>> {
+        Ok(self.all_users()?.into_iter().find(|u| u.id == id))
+    }
+
     // ---- fetch queue ------------------------------------------------------
 
     pub fn enqueue_fetch(&self, page_id: &str, needs: &[&str]) -> Result<()> {
@@ -639,8 +721,8 @@ pub fn upsert_page_on(conn: &Connection, page: &PageRecord) -> Result<()> {
         "INSERT INTO pages
             (page_id, title, slug, local_path, parent_id, position, version, status, labels,
              author, created_at, updated_at, storage_body, storage_hash, markdown_hash,
-             block_map, sync_state, synced_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
+             block_map, sync_state, synced_at, render_key)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
          ON CONFLICT(page_id) DO UPDATE SET
             title = excluded.title, slug = excluded.slug, local_path = excluded.local_path,
             parent_id = excluded.parent_id, position = excluded.position,
@@ -649,7 +731,7 @@ pub fn upsert_page_on(conn: &Connection, page: &PageRecord) -> Result<()> {
             updated_at = excluded.updated_at, storage_body = excluded.storage_body,
             storage_hash = excluded.storage_hash, markdown_hash = excluded.markdown_hash,
             block_map = excluded.block_map, sync_state = excluded.sync_state,
-            synced_at = excluded.synced_at",
+            synced_at = excluded.synced_at, render_key = excluded.render_key",
         params![
             page.page_id,
             page.title,
@@ -669,6 +751,7 @@ pub fn upsert_page_on(conn: &Connection, page: &PageRecord) -> Result<()> {
             page.block_map,
             page.sync_state.as_str(),
             page.synced_at,
+            page.render_key,
         ],
     )?;
     Ok(())
@@ -730,6 +813,7 @@ fn page_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PageRecord> {
         block_map: r.get(15)?,
         sync_state: SyncState::parse(&r.get::<_, String>(16)?),
         synced_at: r.get(17)?,
+        render_key: r.get(18)?,
     })
 }
 
@@ -799,13 +883,17 @@ mod tests {
             block_map: Some("{\"blocks\":[]}".into()),
             sync_state: SyncState::Clean,
             synced_at: now(),
+            render_key: String::new(),
         }
     }
 
     #[test]
     fn schema_is_created_and_reported() {
         let db = StateDb::open_in_memory().unwrap();
-        assert_eq!(db.get_meta("schema_version").unwrap().as_deref(), Some("1"));
+        assert_eq!(
+            db.get_meta("schema_version").unwrap().as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
         assert_eq!(db.integrity_check().unwrap(), "ok");
     }
 
@@ -971,5 +1059,62 @@ mod tests {
         }
         let err = StateDb::open(dir.path()).unwrap_err();
         assert!(err.to_string().contains("newer confed"));
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    /// A database written by an older confed is migrated in place, keeping the
+    /// pages it already knows about.
+    #[test]
+    fn a_v1_database_gains_the_v2_tables_without_losing_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            // Build the schema as version 1 left it.
+            let conn = Connection::open(dir.path().join(STATE_DB_FILENAME)).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '1')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO pages (page_id, title, slug, local_path, version, status,
+                                    storage_body, storage_hash, markdown_hash, synced_at)
+                 VALUES ('1', 'Kept', 'Kept', 'Kept.md', 3, 'current', X'00', 'h', 'h', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = StateDb::open(dir.path()).unwrap();
+        assert_eq!(
+            db.get_meta("schema_version").unwrap().as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
+
+        let page = db.get_page("1").unwrap().expect("the page survived the migration");
+        assert_eq!(page.title, "Kept");
+        assert_eq!(page.version, 3);
+        assert_eq!(page.render_key, "", "an unknown fingerprint means 'render it again'");
+
+        // The people cache exists and works.
+        db.upsert_user(&UserRecord {
+            id: "key-1".into(),
+            id_attr: "userkey".into(),
+            username: Some("alice.ng".into()),
+            display_name: "Alice Ng".into(),
+            profile_url: "https://wiki/display/~alice.ng".into(),
+            fetched_at: now(),
+        })
+        .unwrap();
+        assert_eq!(db.get_user("key-1").unwrap().unwrap().display_name, "Alice Ng");
+    }
+
+    #[test]
+    fn migrating_twice_is_harmless() {
+        let dir = tempfile::tempdir().unwrap();
+        StateDb::create(dir.path()).unwrap();
+        let db = StateDb::open(dir.path()).unwrap();
+        assert_eq!(db.integrity_check().unwrap(), "ok");
     }
 }

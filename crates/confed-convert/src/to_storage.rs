@@ -329,6 +329,17 @@ impl<'a> Generator<'a> {
 
     fn link(&self, url: &str, label: &str) -> String {
         let url = unwrap_destination(url);
+
+        // A link to somebody's profile is a mention, and goes back as the
+        // element it came from — identified the way this site identifies people.
+        if let Some(user) = self.opts.users.values().find(|u| u.profile_url == url) {
+            return format!(
+                r#"<ac:link><ri:user ri:{}="{}" /></ac:link>"#,
+                user.id_attr,
+                dom::escape_attr(&user.id_value)
+            );
+        }
+
         if let Some(target) = self.opts.link_targets.get(url.as_str()) {
             let attr = if target.chars().all(|c| c.is_ascii_digit()) {
                 format!(r#"ri:content-id="{}""#, dom::escape_attr(target))

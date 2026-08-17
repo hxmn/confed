@@ -20,7 +20,7 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
     let nodes = dom::parse_fragment(storage)?;
     let by_start: HashMap<usize, &Node> = nodes.iter().map(|n| (n.span().0, n)).collect();
 
-    let mut r = Renderer { opts, last_bullet: None };
+    let mut r = Renderer { opts, last_bullet: None, unresolved_user: false };
 
     // Render first, assemble second: a block that renders to nothing is dropped
     // from the map entirely and its bytes become part of the inter-block gap,
@@ -30,16 +30,26 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
     let mut rendered: Vec<(BlockKind, (usize, usize), String)> = Vec::new();
     for block in &doc.blocks {
         let raw = &storage[block.span.0..block.span.1];
-        let text = match by_start.get(&block.span.0) {
+        r.unresolved_user = false;
+        let mut text = match by_start.get(&block.span.0) {
             Some(node) => r.render_top(node, block.kind, raw),
             None => preserved_fence(raw),
+        };
+        // A mention confed could not resolve would render as a link to the
+        // wrong profile. Keeping the block verbatim is both honest and lossless,
+        // and it heals itself on the next pull that can resolve the person.
+        let kind = if r.unresolved_user && block.kind != BlockKind::Preserved {
+            text = preserved_fence(raw);
+            BlockKind::Preserved
+        } else {
+            block.kind
         };
         let text = text.trim_matches('\n').to_string();
         if text.trim().is_empty() {
             r.last_bullet = None;
             continue;
         }
-        rendered.push((block.kind, block.span, text));
+        rendered.push((kind, block.span, text));
     }
 
     let mut markdown = String::new();
@@ -68,6 +78,8 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
 
 struct Renderer<'a> {
     opts: &'a ConvertOptions,
+    /// Set while rendering a block that mentions somebody confed cannot resolve.
+    unresolved_user: bool,
     /// The bullet character used by the previous top-level list, if any.
     ///
     /// Two lists separated by a blank line merge into a *single* CommonMark list
@@ -519,12 +531,23 @@ impl Renderer<'_> {
                 let id = t
                     .attr_local("account-id")
                     .or_else(|| t.attr_local("userkey"))
+                    .or_else(|| t.attr_local("username"))
                     .unwrap_or("")
                     .to_string();
-                if !label_from_body {
-                    label = escape_md(&id);
+                match self.opts.users.get(&id) {
+                    Some(user) => {
+                        if !label_from_body {
+                            label = format!("@{}", escape_md(&user.display_name));
+                        }
+                        user.profile_url.clone()
+                    }
+                    None => {
+                        // Nothing sensible can be written; the caller keeps the
+                        // block as it was.
+                        self.unresolved_user = true;
+                        String::new()
+                    }
                 }
-                format!("{}/display/~{}", self.opts.base_url.trim_end_matches('/'), id)
             }
             Some(t) if t.local() == "attachment" => {
                 let file = t.attr_local("filename").unwrap_or("").to_string();
@@ -992,5 +1015,88 @@ mod tests {
         let src = r#"<p><ac:link><ri:page ri:space-key="DEV" ri:content-title="Other Page"/></ac:link></p>"#;
         let out = crate::storage_to_markdown(src, &opts).unwrap().markdown;
         assert_eq!(out, "[Other Page](https://wiki.example.com/display/DEV/Other%20Page)\n");
+    }
+}
+
+#[cfg(test)]
+mod user_mention_tests {
+    use crate::{ConvertOptions, UserLink};
+    use std::collections::HashMap;
+
+    fn opts_with_user() -> ConvertOptions {
+        let mut users = HashMap::new();
+        users.insert(
+            "6cb6d404f61e0043d34f805b8eca16d6".to_string(),
+            UserLink {
+                display_name: "Alice Ng".into(),
+                profile_url: "https://wiki.corp/display/~alice.ng".into(),
+                id_attr: "userkey".into(),
+                id_value: "6cb6d404f61e0043d34f805b8eca16d6".into(),
+            },
+        );
+        ConvertOptions { base_url: "https://wiki.corp".into(), users, ..Default::default() }
+    }
+
+    const MENTION: &str = "<p>Ask <ac:link>\
+        <ri:user ri:userkey=\"6cb6d404f61e0043d34f805b8eca16d6\"/>\
+        </ac:link> about it.</p>";
+
+    #[test]
+    fn a_resolved_mention_becomes_a_named_profile_link() {
+        let md = crate::storage_to_markdown(MENTION, &opts_with_user()).unwrap().markdown;
+        assert_eq!(md.trim(), "Ask [@Alice Ng](https://wiki.corp/display/~alice.ng) about it.");
+        assert!(!md.contains("6cb6d404"), "the opaque key is not shown to the reader");
+    }
+
+    #[test]
+    fn an_unresolved_mention_preserves_its_block_instead_of_guessing() {
+        let md = crate::storage_to_markdown(MENTION, &ConvertOptions::default()).unwrap().markdown;
+        assert!(md.contains("```confluence"), "got: {md}");
+        assert!(md.contains("ri:userkey=\"6cb6d404f61e0043d34f805b8eca16d6\""));
+        assert!(!md.contains("display/~6cb6d404"), "no link to a profile that does not exist");
+    }
+
+    #[test]
+    fn an_edited_mention_goes_back_as_the_element_it_came_from() {
+        let opts = opts_with_user();
+        let edited = "Please ask [@Alice Ng](https://wiki.corp/display/~alice.ng) first.";
+        let storage = crate::markdown_to_storage(edited, &opts).unwrap();
+
+        assert!(
+            storage.contains(
+                r#"<ac:link><ri:user ri:userkey="6cb6d404f61e0043d34f805b8eca16d6" /></ac:link>"#
+            ),
+            "a mention must not degrade into a plain link: {storage}"
+        );
+    }
+
+    #[test]
+    fn an_account_id_mention_round_trips_through_its_own_attribute() {
+        let mut users = HashMap::new();
+        users.insert(
+            "557058:abc".to_string(),
+            UserLink {
+                display_name: "Bob Kaur".into(),
+                profile_url: "https://acme.atlassian.net/wiki/people/557058:abc".into(),
+                id_attr: "account-id".into(),
+                id_value: "557058:abc".into(),
+            },
+        );
+        let opts = ConvertOptions { users, ..Default::default() };
+
+        let storage = "<p>cc <ac:link><ri:user ri:account-id=\"557058:abc\"/></ac:link></p>";
+        let md = crate::storage_to_markdown(storage, &opts).unwrap().markdown;
+        assert!(md.contains("[@Bob Kaur](https://acme.atlassian.net/wiki/people/557058:abc)"));
+
+        let back = crate::markdown_to_storage(&md, &opts).unwrap();
+        assert!(back.contains(r#"ri:account-id="557058:abc""#), "got: {back}");
+    }
+
+    #[test]
+    fn an_explicit_link_body_still_wins_over_the_display_name() {
+        let storage = "<p><ac:link><ri:user ri:userkey=\"6cb6d404f61e0043d34f805b8eca16d6\"/>\
+            <ac:plain-text-link-body><![CDATA[our reviewer]]></ac:plain-text-link-body></ac:link></p>";
+        let md = crate::storage_to_markdown(storage, &opts_with_user()).unwrap().markdown;
+        assert!(md.contains("[our reviewer](https://wiki.corp/display/~alice.ng)"), "got: {md}");
     }
 }

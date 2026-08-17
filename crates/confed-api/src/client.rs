@@ -27,6 +27,15 @@ pub trait ConfluenceClient: Send + Sync {
 
     async fn whoami(&self) -> ApiResult<User>;
 
+    /// Resolve somebody mentioned in page content.
+    ///
+    /// Confluence writes mentions as an opaque id, so this is what turns one
+    /// into a name and a profile link.
+    async fn lookup_user(&self, reference: &UserReference) -> ApiResult<User>;
+
+    /// Browser URL for a person's profile page, in whatever form this site uses.
+    fn user_profile_url(&self, user: &User) -> String;
+
     async fn get_space(&self, key: &str) -> ApiResult<Space>;
     async fn list_spaces(&self, limit: Option<usize>) -> ApiResult<Vec<Space>>;
 

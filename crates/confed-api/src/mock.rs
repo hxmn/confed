@@ -25,6 +25,8 @@ struct MockPage {
 
 #[derive(Default)]
 struct MockState {
+    /// People resolvable by the id a mention would carry.
+    users: HashMap<String, User>,
     pages: HashMap<String, MockPage>,
     attachments: HashMap<String, (Attachment, Vec<u8>)>,
     comments: Vec<Comment>,
@@ -159,6 +161,19 @@ impl MockClient {
         page.summary.version
     }
 
+    /// Make somebody resolvable, keyed by the id a mention carries.
+    pub fn seed_user(&self, id: &str, username: &str, display_name: &str) {
+        self.state.lock().expect("mock poisoned").users.insert(
+            id.to_string(),
+            User {
+                account_id: Some(id.to_string()),
+                username: Some(username.to_string()),
+                display_name: display_name.to_string(),
+                email: None,
+            },
+        );
+    }
+
     pub fn seed_comment(&self, page_id: &str, body_storage: &str, kind: CommentKind) -> CommentId {
         let id = CommentId::new(self.fresh_id());
         self.state.lock().expect("mock poisoned").comments.push(Comment {
@@ -244,6 +259,27 @@ impl ConfluenceClient for MockClient {
 
     async fn whoami(&self) -> ApiResult<User> {
         Ok(self.user.clone())
+    }
+
+    async fn lookup_user(&self, reference: &UserReference) -> ApiResult<User> {
+        self.state
+            .lock()
+            .expect("mock poisoned")
+            .users
+            .get(reference.value())
+            .cloned()
+            .ok_or_else(|| ApiError::NotFound(format!("user {}", reference.value())))
+    }
+
+    fn user_profile_url(&self, user: &User) -> String {
+        match self.capabilities.flavor {
+            Flavor::Cloud => {
+                format!("{}/people/{}", self.base_url, user.account_id.clone().unwrap_or_default())
+            }
+            Flavor::DataCenter => {
+                format!("{}/display/~{}", self.base_url, user.username.clone().unwrap_or_default())
+            }
+        }
     }
 
     async fn get_space(&self, key: &str) -> ApiResult<Space> {

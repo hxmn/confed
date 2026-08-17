@@ -37,11 +37,28 @@ pub fn options() -> ConvertOptions {
     page_links.insert("Runbook".to_string(), "runbook.md".to_string());
     let mut link_targets = HashMap::new();
     link_targets.insert("runbook.md".to_string(), "Runbook".to_string());
+
+    // The corpus mentions this person; without them the fixtures would exercise
+    // the unresolved path instead of the rendering under test.
+    let mut users = HashMap::new();
+    for (id, name) in [("557058:abcd", "Dana Whitfield"), ("557058:aaaa-bbbb", "Sam Okonjo")] {
+        users.insert(
+            id.to_string(),
+            confed_convert::UserLink {
+                display_name: name.to_string(),
+                profile_url: format!("https://wiki.example.test/people/{id}"),
+                id_attr: "account-id".to_string(),
+                id_value: id.to_string(),
+            },
+        );
+    }
+
     ConvertOptions {
         attachment_dir: ".page".to_string(),
         page_links,
         link_targets,
         base_url: "https://wiki.example.test".to_string(),
         space_key: "TEAM".to_string(),
+        users,
     }
 }

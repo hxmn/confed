@@ -76,6 +76,16 @@ fn as_conflict(err: ApiError) -> ApiError {
     }
 }
 
+/// A username is a path segment, so `/` and `?` must not survive, but the dots
+/// and hyphens usernames are full of should stay readable.
+fn encode_path(value: &str) -> String {
+    utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+        .to_string()
+        .replace("%2E", ".")
+        .replace("%2D", "-")
+        .replace("%5F", "_")
+}
+
 fn encode(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
@@ -108,6 +118,27 @@ impl ConfluenceClient for DcClient {
     async fn whoami(&self) -> ApiResult<User> {
         let user: v1::User = self.http.get_json("rest/api/user/current", &[]).await?;
         Ok(user.into_domain())
+    }
+
+    async fn lookup_user(&self, reference: &UserReference) -> ApiResult<User> {
+        // Data Center takes exactly one of these, and userkey is what mentions
+        // in page content carry.
+        let query = match reference {
+            UserReference::UserKey(key) => ("key", key.clone()),
+            UserReference::Username(name) => ("username", name.clone()),
+            UserReference::AccountId(id) => ("accountId", id.clone()),
+        };
+        let user: v1::User = self.http.get_json("rest/api/user", &[(query.0, query.1)]).await?;
+        Ok(user.into_domain())
+    }
+
+    fn user_profile_url(&self, user: &User) -> String {
+        // Data Center profiles live at a tilde-prefixed username, not at the
+        // opaque key the markup uses.
+        match &user.username {
+            Some(username) => format!("{}/display/~{}", self.base_url, encode_path(username)),
+            None => format!("{}/display", self.base_url),
+        }
     }
 
     async fn get_space(&self, key: &str) -> ApiResult<Space> {
