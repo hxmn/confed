@@ -714,3 +714,38 @@ async fn silent_is_accepted_with_the_flags_it_overlaps() {
         assert_eq!(exit_code(&output), 0, "{args:?}: {}", stderr(&output));
     }
 }
+
+/// `pull` leaves the page's Confluence markup in the sidecar, and `diff
+/// --conf-format` compares that markup rather than the Markdown.
+#[tokio::test]
+async fn confluence_markup_is_saved_and_can_be_diffed() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+
+    // The sidecar holds the markup Confluence stores, not a rendering of it.
+    let markup = read(dir.path(), ".Team Handbook/storage.xml");
+    assert!(markup.contains('<'), "expected Confluence markup, got: {markup:?}");
+
+    let mut content = read(dir.path(), ROOT_FILE);
+    content.push_str("\nA sentence added locally.\n");
+    std::fs::write(dir.path().join(ROOT_FILE), content).unwrap();
+
+    // The Markdown diff shows Markdown; the markup diff shows tags.
+    let markdown = run(confed(dir.path(), &["diff"]));
+    assert_eq!(exit_code(&markdown), 0, "stderr: {}", stderr(&markdown));
+    let markdown = String::from_utf8_lossy(&markdown.stdout).to_string();
+    assert!(markdown.contains("A sentence added locally"));
+    assert!(!markdown.contains("<p>"), "the default diff is Markdown: {markdown}");
+
+    for flag in ["--conf-format", "--storage"] {
+        let output = run(confed(dir.path(), &["diff", flag]));
+        assert_eq!(exit_code(&output), 0, "{flag}: {}", stderr(&output));
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        assert!(
+            text.contains("<p>A sentence added locally.</p>"),
+            "{flag} should diff Confluence markup, got: {text}"
+        );
+    }
+}

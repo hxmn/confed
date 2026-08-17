@@ -732,3 +732,65 @@ async fn a_dry_run_reports_checking_rather_than_writing() {
     assert!(stages.contains(&"Checking".to_string()), "got {stages:?}");
     assert!(!stages.contains(&"Writing".to_string()), "nothing was written");
 }
+
+/// Every page keeps a copy of its Confluence markup beside its Markdown, so the
+/// source of a conversion is always inspectable without a round trip.
+#[tokio::test]
+async fn pull_saves_the_confluence_markup_beside_each_page() {
+    let mut h = Harness::new(Flavor::Cloud);
+    let body = "<p>Intro.</p><ac:structured-macro ac:name=\"jira\"><ac:parameter \
+                ac:name=\"key\">PROJ-1</ac:parameter></ac:structured-macro>";
+    h.mock.seed_page("1001", "Onboarding", None, body);
+    h.mock.seed_page("1002", "Nested", Some("1001"), "<p>Child.</p>");
+    h.pull().await;
+
+    // Byte-for-byte what the server holds, not a re-serialization of it.
+    assert_eq!(h.read(".Onboarding/storage.xml"), body);
+    assert_eq!(h.read("Onboarding/.Nested/storage.xml"), "<p>Child.</p>");
+}
+
+/// The copy tracks the page: it is refreshed by pull, refreshed again by push,
+/// and never uploaded back as an attachment.
+#[tokio::test]
+async fn the_markup_copy_follows_the_page_and_is_not_an_attachment() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Notes", None, "<p>First.</p>");
+    h.pull().await;
+    assert_eq!(h.read(".Notes/storage.xml"), "<p>First.</p>");
+
+    // A remote edit refreshes it.
+    h.mock.remote_edit("1001", "<p>Second, from the server.</p>");
+    h.pull().await;
+    assert_eq!(h.read(".Notes/storage.xml"), "<p>Second, from the server.</p>");
+
+    // So does a local edit that gets pushed.
+    h.edit_body("Notes.md", "\nA local addition.\n");
+    let outcome = h
+        .engine
+        .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
+        .await
+        .expect("push");
+    assert_eq!(outcome.pushed.len(), 1);
+    assert!(outcome.attachments_uploaded.is_empty(), "the copy is not an attachment");
+
+    let on_disk = h.read(".Notes/storage.xml");
+    assert_eq!(on_disk, h.mock.page_body("1001").unwrap(), "it matches what the server now has");
+    assert!(on_disk.contains("A local addition"));
+
+    let remote_attachments =
+        h.engine.client().list_attachments(&confed_api::PageId::new("1001")).await.unwrap();
+    assert!(remote_attachments.is_empty(), "nothing was uploaded to Confluence");
+}
+
+/// Deleting a page takes its markup copy with it.
+#[tokio::test]
+async fn the_markup_copy_is_removed_with_its_page() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Doomed", None, "<p>Body.</p>");
+    h.pull().await;
+    assert!(h.path(".Doomed/storage.xml").exists());
+
+    h.mock.delete_page_directly("1001");
+    h.pull().await;
+    assert!(!h.path(".Doomed").exists(), "no orphaned sidecar is left behind");
+}

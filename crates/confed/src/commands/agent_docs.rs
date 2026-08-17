@@ -41,7 +41,7 @@ command model. Server: {flavor_note}
 ```
 Team Handbook.md          a page
 Team Handbook/            its child pages
-Team Handbook/.Onboarding/  attachments + comments.md for "Onboarding.md"
+Team Handbook/.Onboarding/  sidecar for "Onboarding.md": storage.xml, comments.md, attachments
 .state.db                 sync state (SQLite) — never edit or delete
 .session.db               credentials (mode 0600) — never read, never commit
 ```
@@ -80,6 +80,9 @@ confed:                    # TOOL-MANAGED — DO NOT EDIT ANY OF THIS
   the storage format; deleting the whole block deletes the macro. Never touch
   `ac:macro-id`.
 - Attachments are referenced relative to the sidecar: `![alt](.Onboarding/diagram.png)`.
+- `.<page>/storage.xml` is the body as Confluence stores it, refreshed on every sync.
+  Read it to see what a conversion produced; editing it does nothing, because pushes are
+  built from the Markdown.
 - Only blocks you actually change are regenerated on push, so untouched content is
   never reformatted.
 

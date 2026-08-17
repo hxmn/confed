@@ -128,6 +128,17 @@ pub fn relative_link(from: &str, to: &str) -> String {
     out.join("/")
 }
 
+/// The page's body exactly as Confluence stores it, kept in the sidecar next to
+/// the Markdown. It is a faithful copy for reading and diffing, not an input:
+/// pushes are built from the Markdown and the block map, so editing this file
+/// changes nothing.
+pub const STORAGE_FILENAME: &str = "storage.xml";
+
+/// Where a page's storage-format copy lives: `a/Page.md` → `a/.Page/storage.xml`.
+pub fn storage_file_for(page_path: &str) -> String {
+    format!("{}/{STORAGE_FILENAME}", sidecar_for(page_path))
+}
+
 /// The sidecar directory for a page file: `a/b/Page.md` → `a/b/.Page`.
 pub fn sidecar_for(path: &str) -> String {
     let stem = path.strip_suffix(".md").unwrap_or(path);
@@ -250,6 +261,8 @@ mod tests {
         assert_eq!(sidecar_for("Handbook/Onboarding.md"), "Handbook/.Onboarding");
         assert_eq!(sidecar_for("Onboarding.md"), ".Onboarding");
         assert_eq!(sidecar_ref("Handbook/Onboarding.md"), ".Onboarding");
+        assert_eq!(storage_file_for("Handbook/Onboarding.md"), "Handbook/.Onboarding/storage.xml");
+        assert_eq!(storage_file_for("Onboarding.md"), ".Onboarding/storage.xml");
         assert_eq!(children_dir("Handbook/Onboarding.md"), "Handbook/Onboarding");
     }
 }

@@ -259,7 +259,7 @@ change — and it needs no network at all.
 |---|---|
 | *(positional)* | Paths or globs to diff. |
 | `--remote` | Fetch, then compare local files against the remote state. |
-| `--storage` | Diff the Confluence storage XML that `push` would upload, not the Markdown. |
+| `--conf-format` | Diff the Confluence markup that `push` would upload, not the Markdown. `--storage` is accepted as an alias. |
 | `--stat` | Summarize with per-page insertion and deletion counts. |
 | `--name-only` | List changed paths only. |
 | `--exit-code` | Exit 10 when there are differences. |

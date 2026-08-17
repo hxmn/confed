@@ -332,8 +332,8 @@ pub struct DiffArgs {
     #[arg(long)]
     pub base: bool,
 
-    /// Show the storage-format diff that push would upload.
-    #[arg(long)]
+    /// Diff the Confluence markup that push would upload, rather than the Markdown.
+    #[arg(long = "conf-format", visible_alias = "storage")]
     pub storage: bool,
 
     /// Summarize instead of showing hunks.

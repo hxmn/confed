@@ -78,8 +78,11 @@ pub fn diff_attachments(
                 continue;
             }
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-            // The comment sidecar is confed's own file, never an attachment.
-            if name == crate::comments::COMMENTS_FILENAME || name.starts_with('.') {
+            // confed's own sidecar files are never attachments.
+            if name == crate::comments::COMMENTS_FILENAME
+                || name == crate::paths::STORAGE_FILENAME
+                || name.starts_with('.')
+            {
                 continue;
             }
             local.push((name.to_string(), path));
@@ -189,13 +192,17 @@ mod tests {
     }
 
     #[test]
-    fn the_comments_sidecar_is_never_treated_as_an_attachment() {
+    fn confeds_own_sidecar_files_are_never_treated_as_attachments() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(crate::comments::COMMENTS_FILENAME), "# Comments\n")
             .unwrap();
+        std::fs::write(dir.path().join(crate::paths::STORAGE_FILENAME), "<p>body</p>").unwrap();
         std::fs::write(dir.path().join(".hidden"), "x").unwrap();
 
-        assert!(diff_attachments(dir.path(), &[]).unwrap().is_empty());
+        assert!(
+            diff_attachments(dir.path(), &[]).unwrap().is_empty(),
+            "uploading these back to Confluence would be nonsense"
+        );
     }
 
     #[test]

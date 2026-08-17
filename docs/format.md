@@ -103,6 +103,7 @@ Team Handbook/Onboarding.md            page 1002
 Team Handbook/Onboarding/              children of 1002
 Team Handbook/Onboarding/Week One.md   page 1003
 Team Handbook/.Onboarding/             sidecar for Onboarding.md
+Team Handbook/.Onboarding/storage.xml  its body as Confluence stores it
 Team Handbook/.Onboarding/comments.md  its comment thread
 Team Handbook/.Onboarding/diagram.png  one of its attachments
 ```
@@ -231,6 +232,23 @@ it; change a file and `push` uploads a new version of the same attachment rather
 duplicate. `confed attach` is the convenient front end for both.
 
 ## Comment sidecars
+
+## The Confluence markup copy
+
+Every page keeps `storage.xml` in its sidecar: the body exactly as Confluence stores it,
+byte for byte, refreshed by `pull` and again by `push`. It is what the Markdown was
+rendered from and what a push patches, so it is the file to read when a conversion looks
+wrong — and `confed diff --conf-format` diffs at that level.
+
+It is a copy, not an input. Pushes are built from the Markdown and the block map, so
+editing `storage.xml` changes nothing and the next sync overwrites it. To change what
+Confluence stores, edit the Markdown, or edit the ```` ```confluence ```` fence inside it
+for a macro confed does not model.
+
+confed never uploads it as an attachment, and deleting a page removes it along with the
+rest of the sidecar.
+
+## Comments
 
 Comments live in `.<page>/comments.md`. Each entry is introduced by an HTML comment
 carrying its metadata, so the file renders cleanly in any Markdown viewer while staying

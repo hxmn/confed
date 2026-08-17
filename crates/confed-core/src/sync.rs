@@ -762,6 +762,13 @@ impl SyncEngine {
         ))
     }
 
+    /// Keep the page's Confluence markup next to its Markdown, exactly as the
+    /// server has it. It is what the Markdown was rendered from and what a push
+    /// patches, so it is the thing to read when a conversion looks wrong.
+    fn write_storage_copy(&self, ws: &Workspace, page_path: &str, storage: &str) -> Result<()> {
+        write_atomic(&ws.absolute(&paths::storage_file_for(page_path)), storage)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn record_base(
         &self,
@@ -773,6 +780,7 @@ impl SyncEngine {
         block_map: &BlockMap,
         sync_state: SyncState,
     ) -> Result<()> {
+        self.write_storage_copy(ws, &placement.path, storage)?;
         ws.state().upsert_page(&PageRecord {
             page_id: remote.page_id.clone(),
             title: remote.title.clone(),
@@ -1556,6 +1564,8 @@ impl SyncEngine {
         file.frontmatter.title = summary.title.clone();
 
         write_atomic(&ws.absolute(path), &file.render()?)?;
+        // The server's response is the new truth, including for the copy on disk.
+        self.write_storage_copy(ws, path, &page.body_storage)?;
 
         let slug =
             path.rsplit('/').next().and_then(|f| f.strip_suffix(".md")).unwrap_or(path).to_string();
