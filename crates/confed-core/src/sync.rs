@@ -589,18 +589,22 @@ impl SyncEngine {
             }
         }
 
-        // Pages pull did not rewrite may still have been edited locally, which
-        // is exactly when an inline anchor moves. Refresh those too.
-        if opts.with_comments && !opts.dry_run {
+        // Pages pull had nothing to write still need their sidecar looked after:
+        // the markup copy may be missing (a workspace pulled by an older confed,
+        // or a deleted file), and a page edited only locally is exactly when an
+        // inline comment anchor moves.
+        if !opts.dry_run {
             for record in ws.state().all_pages()? {
-                if handled.contains(&record.page_id) {
-                    continue;
-                }
-                if !self.in_scope(&opts.scope, &placements, &record.page_id) {
+                if handled.contains(&record.page_id)
+                    || !self.in_scope(&opts.scope, &placements, &record.page_id)
+                {
                     continue;
                 }
                 let path = record.local_path.clone();
-                self.write_comments_sidecar(ws, &record.page_id, &record.title, &path)?;
+                self.ensure_storage_copy(ws, &path, &record.storage_body)?;
+                if opts.with_comments {
+                    self.write_comments_sidecar(ws, &record.page_id, &record.title, &path)?;
+                }
             }
         }
 
@@ -767,6 +771,19 @@ impl SyncEngine {
     /// patches, so it is the thing to read when a conversion looks wrong.
     fn write_storage_copy(&self, ws: &Workspace, page_path: &str, storage: &str) -> Result<()> {
         write_atomic(&ws.absolute(&paths::storage_file_for(page_path)), storage)
+    }
+
+    /// Write the markup copy only when it is missing or out of date.
+    ///
+    /// This is what backfills a workspace that was pulled before confed kept the
+    /// copy, and what restores one somebody deleted — without rewriting every
+    /// page's file, and its mtime, on every pull.
+    fn ensure_storage_copy(&self, ws: &Workspace, page_path: &str, storage: &str) -> Result<()> {
+        let path = ws.absolute(&paths::storage_file_for(page_path));
+        if std::fs::read_to_string(&path).is_ok_and(|existing| existing == storage) {
+            return Ok(());
+        }
+        self.write_storage_copy(ws, page_path, storage)
     }
 
     #[allow(clippy::too_many_arguments)]

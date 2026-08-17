@@ -236,7 +236,10 @@ duplicate. `confed attach` is the convenient front end for both.
 ## The Confluence markup copy
 
 Every page keeps `storage.xml` in its sidecar: the body exactly as Confluence stores it,
-byte for byte, refreshed by `pull` and again by `push`. It is what the Markdown was
+byte for byte, refreshed by `pull` and again by `push`. `pull` writes it for every page in
+scope, including ones it had no other reason to touch, so a workspace synced by an older
+confed is filled in by the next pull and a deleted copy comes back. A copy that is already
+correct is left alone rather than rewritten. It is what the Markdown was
 rendered from and what a push patches, so it is the file to read when a conversion looks
 wrong — and `confed diff --conf-format` diffs at that level.
 

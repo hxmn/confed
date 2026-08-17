@@ -340,3 +340,15 @@ pages without further warning, so make the copy before you run it.
 
 This is covered by `pull_refuses_to_overwrite_an_untracked_file` in
 `crates/confed/tests/cli.rs`.
+
+### A page has no `storage.xml`, or it looks wrong
+
+**Symptom.** A page's sidecar has no `storage.xml`, or its contents do not match what
+Confluence shows.
+
+**Cause.** The workspace was last synced by a version of confed that did not keep the
+copy, the file was deleted, or something edited it. The copy is derived from the base
+recorded in `.state.db`; it is never an input to a push.
+
+**Fix.** Run `confed pull`. It rewrites the copy for every page in scope whose file is
+missing or does not match, even when the page itself needs no other change.

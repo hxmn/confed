@@ -794,3 +794,72 @@ async fn the_markup_copy_is_removed_with_its_page() {
     h.pull().await;
     assert!(!h.path(".Doomed").exists(), "no orphaned sidecar is left behind");
 }
+
+/// The markup copy appears for pages that are already up to date, so a
+/// workspace pulled by an older confed is backfilled by the next pull rather
+/// than only as each page happens to change.
+#[tokio::test]
+async fn pull_backfills_the_markup_copy_for_unchanged_pages() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Alpha", None, "<p>One.</p>");
+    h.mock.seed_page("1002", "Beta", None, "<p>Two.</p>");
+    h.pull().await;
+
+    // Stand in for a workspace synced before confed kept the copy.
+    std::fs::remove_file(h.path(".Alpha/storage.xml")).unwrap();
+    std::fs::remove_file(h.path(".Beta/storage.xml")).unwrap();
+
+    // Nothing has changed on either side, so pull writes no page files at all…
+    let outcome = h.pull().await;
+    assert!(outcome.is_empty(), "no page needed rewriting: {outcome:?}");
+
+    // …and the copies come back anyway.
+    assert_eq!(h.read(".Alpha/storage.xml"), "<p>One.</p>");
+    assert_eq!(h.read(".Beta/storage.xml"), "<p>Two.</p>");
+}
+
+/// A stale or hand-edited copy is corrected, and an already-correct one is left
+/// alone rather than rewritten on every pull.
+#[tokio::test]
+async fn the_markup_copy_is_repaired_but_not_needlessly_rewritten() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Notes", None, "<p>Body.</p>");
+    h.pull().await;
+
+    std::fs::write(h.path(".Notes/storage.xml"), "<p>Someone edited this.</p>").unwrap();
+    h.pull().await;
+    assert_eq!(
+        h.read(".Notes/storage.xml"),
+        "<p>Body.</p>",
+        "the copy mirrors the server, so a hand edit is corrected"
+    );
+
+    let before = std::fs::metadata(h.path(".Notes/storage.xml")).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    h.pull().await;
+    let after = std::fs::metadata(h.path(".Notes/storage.xml")).unwrap().modified().unwrap();
+    assert_eq!(before, after, "an up-to-date copy is not rewritten");
+}
+
+/// Scope still applies: pulling one subtree does not touch another's files.
+#[tokio::test]
+async fn backfilling_respects_the_pull_scope() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Wanted", None, "<p>One.</p>");
+    h.mock.seed_page("1002", "Untouched", None, "<p>Two.</p>");
+    h.pull().await;
+
+    std::fs::remove_file(h.path(".Wanted/storage.xml")).unwrap();
+    std::fs::remove_file(h.path(".Untouched/storage.xml")).unwrap();
+
+    h.engine
+        .pull(
+            &mut h.ws,
+            &PullOptions { scope: vec!["Wanted.md".into()], ..PullOptions::everything() },
+        )
+        .await
+        .expect("pull");
+
+    assert!(h.path(".Wanted/storage.xml").exists(), "the page in scope is backfilled");
+    assert!(!h.path(".Untouched/storage.xml").exists(), "the page out of scope is left alone");
+}
