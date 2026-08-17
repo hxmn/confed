@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod context;
 mod output;
+mod progress;
 mod prompt;
 mod tui;
 

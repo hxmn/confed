@@ -233,7 +233,20 @@ impl Context {
     pub fn engine(&self, client: Arc<dyn ConfluenceClient>) -> Result<SyncEngine> {
         let ws = self.workspace()?;
         let space = SpaceId { key: ws.space_key()?, numeric: ws.space_numeric_id()? };
-        Ok(SyncEngine::new(client, space, self.concurrency()))
+        Ok(SyncEngine::new(client, space, self.concurrency()).with_progress(self.progress()))
+    }
+
+    /// A progress reporter, or a silent one when nobody is watching.
+    pub fn progress(&self) -> confed_core::progress::ProgressRef {
+        if crate::progress::TerminalProgress::should_show(
+            self.global.silent,
+            self.global.quiet,
+            self.global.json,
+        ) {
+            Arc::new(crate::progress::TerminalProgress::new())
+        } else {
+            confed_core::progress::none()
+        }
     }
 
     /// Resolve a user-supplied page reference (path or id) to a page id.

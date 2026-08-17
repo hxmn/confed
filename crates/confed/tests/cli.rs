@@ -670,3 +670,47 @@ async fn fetch_refreshes_remote_state_without_touching_working_files() {
         assert_eq!(page["state"], json!("remote_new"), "{page}");
     }
 }
+
+/// Progress is a courtesy for someone watching a terminal. Redirected output —
+/// a pipe, a log file, CI — must stay free of carriage returns and escape
+/// codes, and `--silent` must hold even if that ever changes.
+#[tokio::test]
+async fn progress_never_pollutes_redirected_output() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    for args in [
+        vec!["pull", "--json"],
+        vec!["pull", "--silent", "--json"],
+        vec!["pull", "--silent"],
+        vec!["fetch"],
+    ] {
+        let output = run(confed_authed(dir.path(), &args));
+        assert_eq!(exit_code(&output), 0, "{args:?}: {}", stderr(&output));
+
+        let noise = stderr(&output);
+        assert!(!noise.contains('\r'), "{args:?} wrote a progress line: {noise:?}");
+        assert!(!noise.contains("\x1b["), "{args:?} wrote escape codes: {noise:?}");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains('\r'), "{args:?} put progress on stdout: {stdout:?}");
+    }
+}
+
+/// `--silent` is accepted everywhere, including alongside the flags it overlaps.
+#[tokio::test]
+async fn silent_is_accepted_with_the_flags_it_overlaps() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    for args in [
+        vec!["pull", "--silent", "--quiet"],
+        vec!["pull", "--silent", "--dry-run", "--json"],
+        vec!["status", "--silent"],
+    ] {
+        let output = run(confed_authed(dir.path(), &args));
+        assert_eq!(exit_code(&output), 0, "{args:?}: {}", stderr(&output));
+    }
+}

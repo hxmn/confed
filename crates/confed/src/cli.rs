@@ -73,6 +73,10 @@ pub struct GlobalArgs {
     #[arg(long, short = 'q', global = true, conflicts_with = "verbose")]
     pub quiet: bool,
 
+    /// Do not show progress while long operations run.
+    #[arg(long, global = true, env = "CONFED_SILENT")]
+    pub silent: bool,
+
     /// Tracing filter, e.g. `confed::http=debug`.
     #[arg(long, global = true, env = "CONFED_LOG")]
     pub log: Option<String>,

@@ -14,6 +14,7 @@ pub mod frontmatter;
 pub mod lock;
 pub mod merge;
 pub mod paths;
+pub mod progress;
 pub mod reanchor;
 pub mod session;
 pub mod slug;

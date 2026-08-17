@@ -682,3 +682,53 @@ async fn pull_refuses_to_overwrite_a_page_it_has_no_record_of() {
     assert!(!h.read("Notes.md").contains("Unpushed local work."));
     assert!(h.read("Notes.md").contains("Server text."));
 }
+
+/// The engine reports what it is doing, so a long pull is not a blank screen.
+#[tokio::test]
+async fn pull_reports_progress() {
+    let recorder = std::sync::Arc::new(confed_core::progress::RecordingProgress::new());
+    let mut h = Harness::new(Flavor::Cloud);
+    h.engine = h
+        .engine
+        .with_progress(std::sync::Arc::clone(&recorder) as confed_core::progress::ProgressRef);
+
+    h.mock.seed_page("1001", "Alpha", None, "<p>One.</p>");
+    h.mock.seed_page("1002", "Beta", None, "<p>Two.</p>");
+    h.mock.seed_page("1003", "Gamma", Some("1001"), "<p>Three.</p>");
+    h.pull().await;
+
+    let stages = recorder.stage_names();
+    assert!(stages.contains(&"Listing pages".to_string()), "got {stages:?}");
+    assert!(stages.contains(&"Fetching".to_string()), "got {stages:?}");
+    assert!(stages.contains(&"Writing".to_string()), "got {stages:?}");
+
+    // The fetch stage knows its total up front; the listing stage cannot.
+    let fetching = recorder.stages().into_iter().find(|(name, _)| name == "Fetching").unwrap();
+    assert_eq!(fetching.1, Some(3), "the page count is known before fetching bodies");
+
+    // Every page is reported once by the fetch and once by the write pass.
+    let items = recorder.items();
+    assert!(items.iter().any(|i| i == "Alpha"), "fetch reports titles: {items:?}");
+    assert!(items.iter().any(|i| i == "Alpha.md"), "writes report paths: {items:?}");
+    assert!(recorder.finish_count() >= 1, "the display is cleared when done");
+}
+
+/// A dry run says so rather than claiming to write.
+#[tokio::test]
+async fn a_dry_run_reports_checking_rather_than_writing() {
+    let recorder = std::sync::Arc::new(confed_core::progress::RecordingProgress::new());
+    let mut h = Harness::new(Flavor::Cloud);
+    h.engine = h
+        .engine
+        .with_progress(std::sync::Arc::clone(&recorder) as confed_core::progress::ProgressRef);
+
+    h.mock.seed_page("1001", "Alpha", None, "<p>One.</p>");
+    h.engine
+        .pull(&mut h.ws, &PullOptions { dry_run: true, ..PullOptions::everything() })
+        .await
+        .expect("pull");
+
+    let stages = recorder.stage_names();
+    assert!(stages.contains(&"Checking".to_string()), "got {stages:?}");
+    assert!(!stages.contains(&"Writing".to_string()), "nothing was written");
+}

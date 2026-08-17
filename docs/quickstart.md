@@ -124,6 +124,18 @@ The `-m` message becomes the version comment in Confluence's page history. After
 confed rewrites the file's tool-managed frontmatter with the new version, so `status` is
 clean again immediately.
 
+## While it runs
+
+`pull`, `fetch` and `push` show a progress line on stderr — the stage, a counter and the
+page currently being handled — which is cleared when the command finishes:
+
+```
+Fetching 27/163  Team Handbook/Onboarding
+```
+
+It appears only in a terminal. Redirect the output, pipe it, or pass `--json`, and there
+is nothing to strip. Pass `--silent` to turn it off in a terminal as well.
+
 ## Keeping up with other people
 
 ```bash

@@ -38,7 +38,8 @@ These work before or after the subcommand: `confed --json status` and
 | `-C <DIR>` | — | Run as if confed had been started in `<DIR>`. |
 | `-y`, `--yes` | — | Answer yes to confirmations. *Accepted, but nothing prompts for confirmation today; see [known gaps](#known-gaps).* |
 | `-v`, `-vv`, `-vvv` | — | More detail on stderr. |
-| `-q`, `--quiet` | — | Errors only. Conflicts with `-v`. |
+| `-q`, `--quiet` | — | Errors only, and no progress. Conflicts with `-v`. |
+| `--silent` | `CONFED_SILENT` | Hide the progress display; everything else is unchanged. |
 | `--log <FILTER>` | `CONFED_LOG` | Tracing filter, e.g. `confed_api=debug`. Overrides `-v`/`-q`. |
 
 Resolution order for every parameter is flag → environment → stored config → prompt; see
@@ -523,6 +524,26 @@ opens: browsing, diffing and resolving are entirely offline.
 confed tui
 confed -C ~/docs/DOCS tui
 ```
+
+## Progress
+
+`fetch`, `pull` and `push` report what they are doing on a single line rewritten in
+place on **stderr**, so stdout stays parseable:
+
+```
+Fetching 27/163  Team Handbook/Onboarding
+```
+
+The stages are `Listing pages` (no total is known until the listing returns), `Fetching`
+(page bodies), `Writing` (files on disk — `Checking` under `--dry-run`) and `Pushing`.
+The line is cleared when the command finishes.
+
+It appears only when someone is watching, which means all of the following hold: stderr
+is a terminal, and none of `--silent`, `--quiet` or `--json` was given. A redirected or
+piped run therefore produces no carriage returns or escape codes at all, so logs and CI
+output stay clean without anyone having to pass a flag.
+
+Use `--silent` (or `CONFED_SILENT=1`) to turn it off while keeping ordinary output.
 
 ## Known gaps
 

@@ -14,6 +14,7 @@ use crate::error::{ConfedError, Result};
 use crate::frontmatter::{Frontmatter, Managed, MarkdownFile};
 use crate::merge::{self, RemoteLabel, ScalarMerge};
 use crate::paths::{self, PagePlacement, Placement};
+use crate::progress::{self, ProgressRef};
 use crate::state::{
     hash_str, now, AttachmentRecord, CommentRecord, PageRecord, RemotePage, SyncState,
 };
@@ -33,6 +34,7 @@ pub struct SyncEngine {
     client: Arc<dyn ConfluenceClient>,
     space: SpaceId,
     concurrency: usize,
+    progress: ProgressRef,
 }
 
 // ---------------------------------------------------------------- fetch ----
@@ -212,7 +214,13 @@ impl SyncEngine {
         } else {
             concurrency
         };
-        Self { client, space, concurrency }
+        Self { client, space, concurrency, progress: progress::none() }
+    }
+
+    /// Report what the engine is doing. Without this, progress is discarded.
+    pub fn with_progress(mut self, progress: ProgressRef) -> Self {
+        self.progress = progress;
+        self
     }
 
     pub fn client(&self) -> &Arc<dyn ConfluenceClient> {
@@ -227,6 +235,7 @@ impl SyncEngine {
         let pending = state.pending_fetches()?;
         outcome.resumed = !pending.is_empty();
 
+        self.progress.stage("Listing pages", None);
         let summaries = self.client.list_pages(&self.space).await?;
         let live: Vec<String> = summaries.iter().map(|s| s.id.0.clone()).collect();
 
@@ -282,6 +291,7 @@ impl SyncEngine {
         let queue: Vec<String> = state.pending_fetches()?.into_iter().map(|(id, _)| id).collect();
         let titles: HashMap<&str, &str> =
             summaries.iter().map(|s| (s.id.0.as_str(), s.title.as_str())).collect();
+        self.progress.stage("Fetching", Some(queue.len()));
 
         // Fetch concurrently, write serially: the SQLite connection is not shared
         // across tasks, and one writer keeps every page's write atomic.
@@ -298,17 +308,20 @@ impl SyncEngine {
             }
             match result {
                 Ok((id, fetched)) => {
+                    self.progress.item(&fetched.page.summary.title);
                     self.store_fetched(ws, &id, &fetched)?;
                     outcome.fetched += 1;
                 }
                 Err((id, e)) => {
                     let title = titles.get(id.as_str()).copied().unwrap_or("").to_string();
+                    self.progress.item(&title);
                     outcome.failed.push(FailedPage { page_id: id, title, error: e.to_string() });
                 }
             }
         }
 
         ws.state().set_meta("last_fetch_at", &now())?;
+        self.progress.finish();
         Ok(outcome)
     }
 
@@ -460,6 +473,7 @@ impl SyncEngine {
         }
 
         // Pass two: apply.
+        self.progress.stage(if opts.dry_run { "Checking" } else { "Writing" }, Some(plan.len()));
         let mut handled: Vec<String> = Vec::new();
         // (path a rename left behind, path the page moved to)
         let mut vacated: Vec<(String, String)> = Vec::new();
@@ -474,9 +488,11 @@ impl SyncEngine {
                 if !opts.dry_run {
                     self.delete_local(ws, base_record)?;
                 }
+                let path = base_record.map(|b| b.local_path.clone()).unwrap_or_default();
+                self.progress.item(&path);
                 outcome.deleted.push(PageChange {
                     page_id: remote_page.page_id.clone(),
-                    path: base_record.map(|b| b.local_path.clone()).unwrap_or_default(),
+                    path,
                     title: remote_page.title.clone(),
                     from_version: base_record.map(|b| b.version),
                     to_version: None,
@@ -530,6 +546,8 @@ impl SyncEngine {
                     vacated.push((base_record.local_path.clone(), placement.path.clone()));
                 }
             }
+
+            self.progress.item(&placement.path);
 
             if opts.with_attachments && !opts.dry_run {
                 outcome.attachments_downloaded +=
@@ -586,6 +604,7 @@ impl SyncEngine {
             }
         }
 
+        self.progress.finish();
         Ok(outcome)
     }
 
@@ -1196,8 +1215,10 @@ impl SyncEngine {
 
         // New pages created during this run, so children can find their parent.
         let mut created_ids: HashMap<String, String> = HashMap::new();
+        self.progress.stage("Pushing", Some(plan.ops.len()));
 
         for op in &plan.ops {
+            self.progress.item(&op.path);
             let result = self.apply_push_op(ws, op, opts, &mut created_ids).await;
             match result {
                 Ok(Some(change)) => match op.kind {
@@ -1223,6 +1244,7 @@ impl SyncEngine {
             outcome.comments_added = self.push_comments(ws).await?;
         }
 
+        self.progress.finish();
         Ok(outcome)
     }
 
