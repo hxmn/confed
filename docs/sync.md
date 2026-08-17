@@ -271,3 +271,22 @@ of arriving page by page as each one happens to change on the server.
 Re-rendering only ever applies to pages with no local changes. A page you have edited is
 left exactly as you left it, because rewriting it would show up as a change you did not
 make.
+
+## Starting over
+
+`confed pull --reset` puts every tracked page back to what the server has, whatever state
+it was in: local edits, half-finished merges, conflict markers, comment drafts and changed
+attachments are all discarded, and locally deleted pages come back.
+
+It follows the line `git reset --hard` draws. Pages confed tracks are restored; files that
+exist only locally — a page you created but never pushed, or anything that is not a page —
+are left exactly where they are. confed has no equivalent of `git clean`, so removing
+those is up to you.
+
+Because it destroys work, it reports every page whose local changes it discarded, and
+`confed pull --reset --dry-run` lists them without touching anything:
+
+```bash
+confed pull --reset --dry-run    # what would be thrown away
+confed pull --reset              # throw it away
+```

@@ -80,6 +80,12 @@ pub struct PullOptions {
     pub no_fetch: bool,
     /// Overwrite local changes instead of stopping.
     pub force: bool,
+    /// Make every tracked page match the server again, discarding local edits,
+    /// merges, conflicts and comment drafts, and re-downloading attachments.
+    ///
+    /// Modelled on `git reset --hard`: it discards local changes to pages confed
+    /// tracks, and leaves files that exist only locally alone. Implies `force`.
+    pub reset: bool,
     /// Refuse to merge; treat every diverged page as a clobber.
     pub no_merge: bool,
     pub dry_run: bool,
@@ -103,6 +109,8 @@ pub struct PullOutcome {
     pub moved: Vec<MovedPage>,
     /// Pages left untouched because writing would have destroyed local work.
     pub skipped_dirty: Vec<BlockedPage>,
+    /// Pages whose local changes `--reset` or `--force` deliberately discarded.
+    pub discarded: Vec<PageChange>,
     pub attachments_downloaded: usize,
     pub dry_run: bool,
 }
@@ -512,7 +520,7 @@ impl SyncEngine {
             }
         }
 
-        if !outcome.skipped_dirty.is_empty() && !opts.force {
+        if !outcome.skipped_dirty.is_empty() && !opts.force && !opts.reset {
             return Err(ConfedError::state_with_hint(
                 format!(
                     "{} page(s) have local changes that `pull` would overwrite",
@@ -555,7 +563,9 @@ impl SyncEngine {
             let Some(placement) = placements.get(&remote_page.page_id) else { continue };
 
             match action {
-                PullAction::Nothing | PullAction::Blocked(_) if !opts.force => continue,
+                PullAction::Nothing | PullAction::Blocked(_) if !opts.force && !opts.reset => {
+                    continue
+                }
                 PullAction::Nothing | PullAction::Delete => continue,
                 PullAction::Create | PullAction::Overwrite | PullAction::Blocked(_) => {
                     let change =
@@ -598,11 +608,27 @@ impl SyncEngine {
                 }
             }
 
+            // Say what was thrown away. A destructive flag is not a licence to
+            // be quiet about it.
+            if (opts.reset || opts.force)
+                && status_of(&statuses, &remote_page.page_id).is_some_and(|s| s.local_dirty)
+            {
+                outcome.discarded.push(PageChange {
+                    page_id: remote_page.page_id.clone(),
+                    path: placement.path.clone(),
+                    title: remote_page.title.clone(),
+                    from_version: base_record.map(|b| b.version),
+                    to_version: Some(remote_page.version),
+                    ops: Vec::new(),
+                });
+            }
+
             self.progress.item(&placement.path);
 
             if opts.with_attachments && !opts.dry_run {
-                outcome.attachments_downloaded +=
-                    self.download_attachments(ws, &remote_page.page_id, placement).await?;
+                outcome.attachments_downloaded += self
+                    .download_attachments(ws, &remote_page.page_id, placement, opts.reset)
+                    .await?;
             }
             if opts.with_comments && !opts.dry_run {
                 self.write_comments_sidecar(
@@ -610,6 +636,7 @@ impl SyncEngine {
                     &remote_page.page_id,
                     &remote_page.title,
                     &placement.path,
+                    !opts.reset,
                 )?;
             }
         }
@@ -654,7 +681,13 @@ impl SyncEngine {
                 let path = record.local_path.clone();
                 self.ensure_storage_copy(ws, &path, &record.storage_body)?;
                 if opts.with_comments {
-                    self.write_comments_sidecar(ws, &record.page_id, &record.title, &path)?;
+                    self.write_comments_sidecar(
+                        ws,
+                        &record.page_id,
+                        &record.title,
+                        &path,
+                        !opts.reset,
+                    )?;
                 }
             }
         }
@@ -992,6 +1025,7 @@ impl SyncEngine {
         ws: &mut Workspace,
         page_id: &str,
         placement: &Placement,
+        reset: bool,
     ) -> Result<usize> {
         let records = ws.state().page_attachments(page_id)?;
         if records.is_empty() {
@@ -1004,7 +1038,7 @@ impl SyncEngine {
         let mut count = 0;
         for record in records {
             let dest = dir.join(&record.filename);
-            if record.downloaded && dest.exists() {
+            if record.downloaded && dest.exists() && !reset {
                 continue;
             }
             let Some(attachment) =
@@ -1031,18 +1065,24 @@ impl SyncEngine {
         page_id: &str,
         title: &str,
         page_path: &str,
+        keep_drafts: bool,
     ) -> Result<()> {
         self.reanchor_inline_comments(ws, page_id, page_path)?;
         let records = ws.state().page_comments(page_id)?;
         let dir = ws.absolute(&paths::sidecar_for(page_path));
         let path = dir.join(comments::COMMENTS_FILENAME);
 
-        // Unpushed drafts survive a refresh.
-        let drafts: Vec<comments::SidecarComment> = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| comments::parse(&text).ok())
-            .map(|s| s.comments.into_iter().filter(|c| c.is_draft()).collect())
-            .unwrap_or_default();
+        // Unpushed drafts survive a refresh — except under `--reset`, where a
+        // draft is a local modification like any other.
+        let drafts: Vec<comments::SidecarComment> = if keep_drafts {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| comments::parse(&text).ok())
+                .map(|s| s.comments.into_iter().filter(|c| c.is_draft()).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         if records.is_empty() && drafts.is_empty() {
             return Ok(());
@@ -1733,6 +1773,10 @@ impl SyncEngine {
     }
 }
 
+fn status_of<'a>(statuses: &'a [PageStatus], page_id: &str) -> Option<&'a PageStatus> {
+    statuses.iter().find(|s| s.page_id.as_deref() == Some(page_id))
+}
+
 /// What `pull` should do with one page.
 #[derive(Clone, Debug, PartialEq)]
 enum PullAction {
@@ -1775,6 +1819,12 @@ fn decide_pull(
         return PullAction::Overwrite;
     }
 
+    // `--reset` answers one question for every tracked page: what does the
+    // server have? Local edits, merges and conflicts are all discarded.
+    if opts.reset && remote.storage_body.is_some() {
+        return PullAction::Overwrite;
+    }
+
     match status.state {
         // No local file exists, so there is nothing to lose.
         PageState::RemoteNew => PullAction::Create,
@@ -1784,7 +1834,7 @@ fn decide_pull(
         // against, so confed cannot tell whether the file holds unpushed work.
         // Refuse rather than overwrite it.
         PageState::Untracked => {
-            if opts.force {
+            if opts.force || opts.reset {
                 PullAction::Overwrite
             } else {
                 PullAction::Blocked(
@@ -1796,7 +1846,7 @@ fn decide_pull(
         }
         PageState::Behind => PullAction::Overwrite,
         PageState::Diverged | PageState::Conflicted => {
-            if opts.force {
+            if opts.force || opts.reset {
                 PullAction::Overwrite
             } else if opts.no_merge {
                 PullAction::Blocked("local edits and remote edits (merging disabled)".into())
@@ -1806,7 +1856,7 @@ fn decide_pull(
         }
         PageState::Modified => PullAction::Nothing,
         PageState::LocalDeleted => {
-            if opts.force {
+            if opts.force || opts.reset {
                 PullAction::Create
             } else {
                 PullAction::Nothing

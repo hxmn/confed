@@ -257,6 +257,11 @@ pub struct PullArgs {
     #[arg(long)]
     pub force: bool,
 
+    /// Discard local changes and make every tracked page match the server
+    /// again. Files that exist only locally are left alone.
+    #[arg(long)]
+    pub reset: bool,
+
     /// Do not merge diverged pages; stop instead.
     #[arg(long)]
     pub no_merge: bool,

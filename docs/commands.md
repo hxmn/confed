@@ -186,6 +186,7 @@ Fetch, then materialize pages, attachments and comment sidecars into files.
 | `--cql <QUERY>` | Restrict with an arbitrary CQL query. |
 | `--no-fetch` | Use the state already in `.state.db`. |
 | `--force` | Overwrite local changes instead of stopping. |
+| `--reset` | Make every tracked page match the server again, discarding local edits, merges, conflicts, comment drafts and modified attachments. Files that exist only locally are left alone. Preview it with `--reset --dry-run`. |
 | `--no-merge` | Do not three-way merge diverged pages; stop instead. |
 | `--dry-run` | Report what would be written without writing it. |
 | `--no-attachments` | Skip downloading attachments. |

@@ -1001,3 +1001,109 @@ async fn a_stale_rendering_is_not_re_rendered_over_local_edits() {
         "a modified page keeps its edits, stale rendering or not"
     );
 }
+
+/// `--reset` puts every tracked page back to what the server has, whatever
+/// state it was in locally.
+#[tokio::test]
+async fn reset_restores_every_tracked_page_from_the_server() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Edited", None, "<p>Server text for one.</p>");
+    h.mock.seed_page("1002", "Deleted", None, "<p>Server text for two.</p>");
+    h.mock.seed_page("1003", "Conflicted", None, "<p>Shared.</p>");
+    h.pull().await;
+
+    // Three different kinds of local divergence.
+    h.edit_body("Edited.md", "\nLocal edit.\n");
+    std::fs::remove_file(h.path("Deleted.md")).unwrap();
+    h.write("Conflicted.md", &h.read("Conflicted.md").replace("Shared.", "Ours."));
+    h.mock.remote_edit("1003", "<p>Theirs.</p>");
+    h.pull().await;
+    assert_eq!(h.status("1003"), PageState::Conflicted);
+
+    let outcome = h
+        .engine
+        .pull(&mut h.ws, &PullOptions { reset: true, ..PullOptions::everything() })
+        .await
+        .expect("reset");
+
+    assert!(h.read("Edited.md").contains("Server text for one."));
+    assert!(!h.read("Edited.md").contains("Local edit."));
+    assert!(h.path("Deleted.md").exists(), "a locally deleted page comes back");
+    assert!(h.read("Conflicted.md").contains("Theirs."));
+    assert!(!h.read("Conflicted.md").contains("<<<<<<<"), "conflict markers are gone");
+
+    for id in ["1001", "1002", "1003"] {
+        assert_eq!(h.status(id), PageState::Unchanged, "page {id} matches the server");
+    }
+    assert!(outcome.skipped_dirty.is_empty(), "a reset never blocks");
+    assert!(!outcome.discarded.is_empty(), "and it says what it threw away");
+    assert!(outcome.discarded.iter().any(|p| p.path == "Edited.md"));
+}
+
+/// A file that exists only locally is not a tracked page, so a reset leaves it
+/// alone — the same line git draws between `reset --hard` and `clean`.
+#[tokio::test]
+async fn reset_leaves_local_only_files_alone() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Tracked", None, "<p>From the server.</p>");
+    h.pull().await;
+
+    h.write("Draft.md", "---\ntitle: Draft\nlabels: []\n---\n\nNot pushed yet.\n");
+    h.write("notes.txt", "not a page at all\n");
+
+    h.engine
+        .pull(&mut h.ws, &PullOptions { reset: true, ..PullOptions::everything() })
+        .await
+        .expect("reset");
+
+    assert!(h.path("Draft.md").exists(), "an unpushed page is not the server's to reset");
+    assert!(h.read("Draft.md").contains("Not pushed yet."));
+    assert!(h.path("notes.txt").exists());
+}
+
+/// Comment drafts and attachments are local state too.
+#[tokio::test]
+async fn reset_discards_comment_drafts_and_restores_attachments() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.seed_comment("1001", "<p>A real comment.</p>", confed_api::CommentKind::Footer);
+    h.pull().await;
+
+    let mut sidecar = h.read(".Discussed/comments.md");
+    sidecar.push_str("\n<!-- confed:new -->\nAn unpushed draft.\n");
+    h.write(".Discussed/comments.md", &sidecar);
+
+    h.engine
+        .pull(&mut h.ws, &PullOptions { reset: true, ..PullOptions::everything() })
+        .await
+        .expect("reset");
+
+    let sidecar = h.read(".Discussed/comments.md");
+    assert!(sidecar.contains("A real comment."), "the server's comments stay");
+    assert!(!sidecar.contains("An unpushed draft."), "a draft is a local change");
+}
+
+/// Nothing is written until the user asks for it.
+#[tokio::test]
+async fn a_dry_run_reset_reports_without_discarding() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Notes", None, "<p>Server text.</p>");
+    h.pull().await;
+    h.edit_body("Notes.md", "\nWork I might still want.\n");
+
+    let outcome = h
+        .engine
+        .pull(&mut h.ws, &PullOptions { reset: true, dry_run: true, ..PullOptions::everything() })
+        .await
+        .expect("dry run");
+
+    assert!(outcome.dry_run);
+    assert!(
+        outcome.discarded.iter().any(|p| p.path == "Notes.md"),
+        "it says what a real reset would discard: {outcome:?}"
+    );
+    assert!(
+        h.read("Notes.md").contains("Work I might still want."),
+        "but nothing is actually discarded"
+    );
+}

@@ -85,6 +85,7 @@ pub mod pull {
             no_fetch: args.no_fetch,
             force: args.force,
             no_merge: args.no_merge,
+            reset: args.reset,
             dry_run: args.dry_run,
             with_attachments: !args.no_attachments,
             with_comments: !args.no_comments,
@@ -115,6 +116,9 @@ pub mod pull {
         }
         for page in &outcome.conflicted {
             let _ = writeln!(human, "  {} {}", style.red("conflict"), page.path);
+        }
+        for page in &outcome.discarded {
+            let _ = writeln!(human, "  {} {}", style.yellow("discarded"), page.path);
         }
 
         if outcome.is_empty() {
