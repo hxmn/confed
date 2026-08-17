@@ -329,25 +329,49 @@ fn keyring_account(base_url: &str, username: Option<&str>) -> String {
     format!("{base_url}|{}", username.unwrap_or(""))
 }
 
+/// Run a keyring call on a plain OS thread.
+///
+/// The Secret Service backend drives its own async runtime and blocks on it,
+/// which panics outright if it happens on a thread already running one. confed
+/// stores credentials from inside `init`, which is async, so every keyring call
+/// goes through here rather than relying on callers to remember.
+fn off_runtime<T, F>(call: F) -> std::result::Result<T, keyring::Error>
+where
+    T: Send + 'static,
+    F: FnOnce() -> std::result::Result<T, keyring::Error> + Send + 'static,
+{
+    match std::thread::spawn(call).join() {
+        Ok(result) => result,
+        Err(_) => Err(keyring::Error::PlatformFailure(Box::new(std::io::Error::other(
+            "the platform keyring panicked",
+        )))),
+    }
+}
+
 fn keyring_set(account: &str, secret: &Secret) -> std::result::Result<(), keyring::Error> {
-    keyring::Entry::new(KEYRING_SERVICE, account)?.set_password(secret.expose())
+    let (account, secret) = (account.to_string(), secret.expose().to_string());
+    off_runtime(move || keyring::Entry::new(KEYRING_SERVICE, &account)?.set_password(&secret))
 }
 
 fn keyring_get(account: &str) -> std::result::Result<Secret, keyring::Error> {
-    Ok(Secret::new(keyring::Entry::new(KEYRING_SERVICE, account)?.get_password()?))
+    let account = account.to_string();
+    let password =
+        off_runtime(move || keyring::Entry::new(KEYRING_SERVICE, &account)?.get_password())?;
+    Ok(Secret::new(password))
 }
 
 fn keyring_delete(account: &str) -> std::result::Result<(), keyring::Error> {
-    keyring::Entry::new(KEYRING_SERVICE, account)?.delete_credential()
+    let account = account.to_string();
+    off_runtime(move || keyring::Entry::new(KEYRING_SERVICE, &account)?.delete_credential())
 }
 
 /// True when a working credential store is present.
 pub fn keyring_available() -> bool {
     let probe = keyring_account("confed://probe", Some("probe"));
-    match keyring::Entry::new(KEYRING_SERVICE, &probe) {
-        Ok(entry) => !matches!(entry.get_password(), Err(keyring::Error::PlatformFailure(_))),
-        Err(_) => false,
-    }
+    !matches!(
+        off_runtime(move || keyring::Entry::new(KEYRING_SERVICE, &probe)?.get_password()),
+        Err(keyring::Error::PlatformFailure(_)) | Err(keyring::Error::Invalid(_, _))
+    )
 }
 
 #[cfg(unix)]
@@ -549,5 +573,40 @@ mod backend_switch_tests {
         assert_eq!(moved.secret_backend, SecretBackend::Sqlite);
         assert_eq!(store.load().unwrap().unwrap().secret_backend, SecretBackend::Sqlite);
         assert_eq!(store.load_secret(&moved).unwrap().unwrap().expose(), "pat-123");
+    }
+}
+
+#[cfg(test)]
+mod runtime_safety_tests {
+    use super::*;
+
+    /// The Secret Service backend blocks on its own runtime, which panics if it
+    /// happens on a thread already driving one. `confed init` stores credentials
+    /// from inside async code, so this must hold wherever a keyring exists.
+    #[tokio::test]
+    async fn keyring_calls_are_safe_from_inside_the_async_runtime() {
+        // Any outcome is fine; a panic is not.
+        let _ = keyring_available();
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
+        let session = Session {
+            base_url: "https://wiki.example.com".into(),
+            flavor: Flavor::DataCenter,
+            auth_method: AuthMethod::Pat,
+            username: Some("confed-test".into()),
+            secret_backend: SecretBackend::Sqlite,
+            created_at: crate::state::now(),
+            last_verified_at: None,
+        };
+
+        // The keyring path is the one that used to panic; the fallback to
+        // SQLite is what happens on a machine without one.
+        let backend = store.save(&session, &Secret::new("token"), None).unwrap();
+        let mut stored = session.clone();
+        stored.secret_backend = backend;
+        assert_eq!(store.load_secret(&stored).unwrap().unwrap().expose(), "token");
+
+        store.clear(&stored).unwrap();
     }
 }

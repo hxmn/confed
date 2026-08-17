@@ -51,6 +51,8 @@ pub struct FetchOptions {
 pub struct FetchOutcome {
     pub fetched: usize,
     pub unchanged: usize,
+    /// Pages whose content came from `.pages.db` instead of the network.
+    pub from_cache: usize,
     pub deleted_on_remote: Vec<String>,
     pub failed: Vec<FailedPage>,
     /// True when an interrupted fetch was continued rather than restarted.
@@ -238,6 +240,9 @@ impl SyncEngine {
     /// Refresh `.state.db`'s view of the server. Working files are untouched.
     pub async fn fetch(&self, ws: &mut Workspace, opts: &FetchOptions) -> Result<FetchOutcome> {
         let mut outcome = FetchOutcome::default();
+        // Losing the cache costs bandwidth, not correctness, so a store that
+        // will not open is a reason to fetch more, not to fail.
+        let cache = ws.page_store().ok();
         let state = ws.state();
 
         let pending = state.pending_fetches()?;
@@ -258,10 +263,18 @@ impl SyncEngine {
             }
 
             let existing = state.get_remote(&summary.id.0)?;
-            let needs_body = match &existing {
-                Some(r) => r.version != summary.version || r.storage_body.is_none(),
-                None => true,
+            let have_current_body = existing
+                .as_ref()
+                .is_some_and(|r| r.version == summary.version && r.storage_body.is_some());
+
+            // Anything already downloaded at this version is served from the
+            // cache, so the listing above is the only request this page costs.
+            let cached_body = if have_current_body {
+                None
+            } else {
+                cache.as_ref().and_then(|c| c.body(&summary.id.0, summary.version).ok().flatten())
             };
+            let needs_body = !have_current_body && cached_body.is_none();
 
             // Metadata is cheap and always current after a listing.
             state.upsert_remote(&RemotePage {
@@ -275,17 +288,30 @@ impl SyncEngine {
                 author: summary.author.clone(),
                 created_at: summary.created_at.clone(),
                 updated_at: summary.updated_at.clone(),
-                storage_body: None,
-                storage_hash: None,
+                storage_hash: cached_body.as_deref().map(hash_str),
+                storage_body: cached_body.clone(),
                 fetched_at: now(),
                 deleted: false,
             })?;
 
             if needs_body {
                 state.enqueue_fetch(&summary.id.0, &["body", "attachments", "comments"])?;
-            } else {
-                outcome.unchanged += 1;
+                continue;
             }
+
+            if cached_body.is_some() {
+                outcome.from_cache += 1;
+                // Restore the snapshots taken alongside that body, so a rebuilt
+                // state database does not have to ask for those either. They are
+                // exactly as current as they were before the rebuild.
+                if let Some(extras) = cache
+                    .as_ref()
+                    .and_then(|c| c.extras(&summary.id.0, summary.version).ok().flatten())
+                {
+                    restore_extras(state, &summary.id.0, &extras)?;
+                }
+            }
+            outcome.unchanged += 1;
         }
 
         // Pages that vanished from the listing were deleted or trashed.
@@ -393,26 +419,23 @@ impl SyncEngine {
 
         state.clear_page_comments(id)?;
         for comment in &fetched.comments {
-            state.upsert_comment(&CommentRecord {
-                comment_id: comment.id.0.clone(),
-                page_id: id.to_string(),
-                parent_comment_id: comment.parent_comment_id.as_ref().map(|c| c.0.clone()),
-                kind: match comment.kind {
-                    CommentKind::Footer => "footer".into(),
-                    CommentKind::Inline => "inline".into(),
-                },
-                author: comment.author.clone(),
-                created_at: comment.created_at.clone(),
-                body_storage: Some(comment.body_storage.clone()),
-                body_markdown: confed_convert::storage_fragment_to_markdown(&comment.body_storage)
-                    .unwrap_or_else(|_| comment.body_storage.clone()),
-                resolved: comment.resolved,
-                anchor: comment.anchor.as_ref().and_then(|a| serde_json::to_string(a).ok()),
-                synced_at: Some(now()),
-            })?;
+            state.upsert_comment(&comment_record(id, comment))?;
         }
 
         state.mark_fetch_done(id)?;
+
+        if let Ok(cache) = ws.page_store() {
+            let version = fetched.page.summary.version;
+            cache.put_body(id, version, &fetched.page.body_storage)?;
+            cache.put_extras(
+                id,
+                version,
+                &crate::pagestore::PageExtras {
+                    attachments: serde_json::to_string(&fetched.attachments)?,
+                    comments: serde_json::to_string(&fetched.comments)?,
+                },
+            )?;
+        }
         Ok(())
     }
 
@@ -1775,6 +1798,59 @@ impl SyncEngine {
 
 fn status_of<'a>(statuses: &'a [PageStatus], page_id: &str) -> Option<&'a PageStatus> {
     statuses.iter().find(|s| s.page_id.as_deref() == Some(page_id))
+}
+
+/// One API comment as confed stores it.
+fn comment_record(page_id: &str, comment: &Comment) -> CommentRecord {
+    CommentRecord {
+        comment_id: comment.id.0.clone(),
+        page_id: page_id.to_string(),
+        parent_comment_id: comment.parent_comment_id.as_ref().map(|c| c.0.clone()),
+        kind: match comment.kind {
+            CommentKind::Footer => "footer".into(),
+            CommentKind::Inline => "inline".into(),
+        },
+        author: comment.author.clone(),
+        created_at: comment.created_at.clone(),
+        body_storage: Some(comment.body_storage.clone()),
+        body_markdown: confed_convert::storage_fragment_to_markdown(&comment.body_storage)
+            .unwrap_or_else(|_| comment.body_storage.clone()),
+        resolved: comment.resolved,
+        anchor: comment.anchor.as_ref().and_then(|a| serde_json::to_string(a).ok()),
+        synced_at: Some(now()),
+    }
+}
+
+/// Put cached attachment and comment snapshots back into the sync state.
+fn restore_extras(
+    state: &crate::state::StateDb,
+    page_id: &str,
+    extras: &crate::pagestore::PageExtras,
+) -> Result<()> {
+    if state.page_attachments(page_id)?.is_empty() {
+        let attachments: Vec<confed_api::Attachment> =
+            serde_json::from_str(&extras.attachments).unwrap_or_default();
+        for attachment in attachments {
+            state.upsert_attachment(&AttachmentRecord {
+                attachment_id: attachment.id.0.clone(),
+                page_id: page_id.to_string(),
+                filename: attachment.filename.clone(),
+                media_type: attachment.media_type.clone(),
+                file_size: attachment.file_size,
+                version: attachment.version,
+                sha256: None,
+                downloaded: false,
+            })?;
+        }
+    }
+
+    if state.page_comments(page_id)?.is_empty() {
+        let comments: Vec<Comment> = serde_json::from_str(&extras.comments).unwrap_or_default();
+        for comment in comments {
+            state.upsert_comment(&comment_record(page_id, &comment))?;
+        }
+    }
+    Ok(())
 }
 
 /// What `pull` should do with one page.

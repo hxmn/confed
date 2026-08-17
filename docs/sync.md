@@ -290,3 +290,21 @@ Because it destroys work, it reports every page whose local changes it discarded
 confed pull --reset --dry-run    # what would be thrown away
 confed pull --reset              # throw it away
 ```
+
+## What a fetch actually costs
+
+A page body at a given version never changes, so confed downloads it once and keeps it in
+`.pages.db`, keyed by page and version. `fetch` then asks the server one question — which
+versions exist — and takes everything else from the cache:
+
+- **Nothing changed upstream.** One request, whatever the size of the space.
+- **Some pages changed.** One request, plus a body, attachment list and comment list for
+  each page whose version moved.
+- **`.state.db` was rebuilt** — a fresh clone, or `confed init` over an existing tree.
+  Still one request: every body is already cached, and the attachment and comment
+  snapshots taken alongside each one are restored with it, leaving confed exactly as
+  current as it was before the rebuild.
+
+The cache keeps the last few versions of each page, so a page reverted on the server also
+costs nothing. Deleting `.pages.db` is always safe; the next fetch downloads what it needs
+again.

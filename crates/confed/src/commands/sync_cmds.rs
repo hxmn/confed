@@ -30,6 +30,16 @@ pub mod fetch {
             plural(outcome.fetched, "page", "pages"),
             outcome.unchanged
         );
+        if outcome.from_cache > 0 {
+            let _ = writeln!(
+                human,
+                "{}",
+                style.dim(&format!(
+                    "({} restored from the local cache without a request)",
+                    plural(outcome.from_cache, "page", "pages")
+                ))
+            );
+        }
         if outcome.resumed {
             let _ = writeln!(human, "{}", style.dim("(continued an interrupted fetch)"));
         }

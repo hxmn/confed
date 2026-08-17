@@ -13,6 +13,7 @@ pub mod error;
 pub mod frontmatter;
 pub mod lock;
 pub mod merge;
+pub mod pagestore;
 pub mod paths;
 pub mod progress;
 pub mod reanchor;

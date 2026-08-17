@@ -9,7 +9,8 @@ use confed_api::Flavor;
 use std::path::{Path, PathBuf};
 
 /// Files confed manages that must never be committed to git.
-pub const IGNORED_FILES: &[&str] = &[STATE_DB_FILENAME, SESSION_DB_FILENAME, ".confed.lock"];
+pub const IGNORED_FILES: &[&str] =
+    &[STATE_DB_FILENAME, SESSION_DB_FILENAME, crate::pagestore::PAGES_DB_FILENAME, ".confed.lock"];
 
 const GITIGNORE_HEADER: &str = "# confed: local sync state and credentials";
 
@@ -62,6 +63,13 @@ impl Workspace {
 
     pub fn lock(&self) -> Result<WorkspaceLock> {
         WorkspaceLock::acquire(&self.root)
+    }
+
+    /// Content already downloaded, keyed by version. Losing it costs bandwidth,
+    /// not correctness, so failing to open it is not worth failing a command
+    /// over: callers fall back to fetching.
+    pub fn page_store(&self) -> Result<crate::pagestore::PageStore> {
+        crate::pagestore::PageStore::open(&self.root)
     }
 
     pub fn session_store(&self) -> Result<SessionStore> {

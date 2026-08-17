@@ -1107,3 +1107,73 @@ async fn a_dry_run_reset_reports_without_discarding() {
         "but nothing is actually discarded"
     );
 }
+
+/// A version already downloaded is never downloaded again: fetch asks which
+/// versions exist and takes the rest from `.pages.db`.
+#[tokio::test]
+async fn a_version_already_seen_is_served_from_the_cache() {
+    let mut h = Harness::new(Flavor::Cloud);
+    for i in 0..3 {
+        h.mock.seed_page(&format!("100{i}"), &format!("Page {i}"), None, "<p>Body.</p>");
+    }
+    h.pull().await;
+    assert!(h.path(".pages.db").exists(), "the cache is written next to the state");
+
+    // Throwing away the sync state is what a fresh clone looks like. The cache
+    // survives it, so nothing has to be downloaded again.
+    let before = h.mock.calls().len();
+    h.ws.state().conn().execute("DELETE FROM remote_pages", []).unwrap();
+    h.ws.state().clear_fetch_queue().unwrap();
+
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.fetched, 0, "nothing was downloaded");
+    assert_eq!(outcome.from_cache, 3, "every page came from the cache");
+    assert_eq!(h.mock.calls().len(), before, "and no extra call was made");
+
+    // The restored state is complete enough to materialize from.
+    for i in 0..3 {
+        let remote = h.ws.state().get_remote(&format!("100{i}")).unwrap().unwrap();
+        assert_eq!(remote.storage_body.as_deref(), Some("<p>Body.</p>"));
+    }
+}
+
+/// A new version is downloaded, and then cached in its turn.
+#[tokio::test]
+async fn a_new_version_is_fetched_once_and_then_cached() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Notes", None, "<p>One.</p>");
+    h.pull().await;
+
+    h.mock.remote_edit("1001", "<p>Two.</p>");
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.fetched, 1, "the new version is downloaded");
+    assert_eq!(outcome.from_cache, 0);
+
+    // Both versions are now cached, so a revert costs nothing either.
+    let cache = h.ws.page_store().unwrap();
+    assert_eq!(cache.body("1001", 1).unwrap().as_deref(), Some("<p>One.</p>"));
+    assert_eq!(cache.body("1001", 2).unwrap().as_deref(), Some("<p>Two.</p>"));
+
+    h.ws.state().conn().execute("DELETE FROM remote_pages", []).unwrap();
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.fetched, 0);
+    assert_eq!(outcome.from_cache, 1);
+}
+
+/// Losing the cache costs bandwidth, not correctness.
+#[tokio::test]
+async fn a_missing_cache_just_means_fetching_again() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Notes", None, "<p>Body.</p>");
+    h.pull().await;
+
+    h.ws.page_store().unwrap().clear().unwrap();
+    h.ws.state().conn().execute("DELETE FROM remote_pages", []).unwrap();
+
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.fetched, 1, "with nothing cached it is downloaded again");
+    assert_eq!(
+        h.ws.state().get_remote("1001").unwrap().unwrap().storage_body.as_deref(),
+        Some("<p>Body.</p>")
+    );
+}
