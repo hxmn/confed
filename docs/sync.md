@@ -278,6 +278,9 @@ make.
 it was in: local edits, half-finished merges, conflict markers, comment drafts and changed
 attachments are all discarded, and locally deleted pages come back.
 
+Attachments are compared before being downloaded: one whose bytes already match the
+server is left alone, and only files that were changed or deleted come down again.
+
 It follows the line `git reset --hard` draws. Pages confed tracks are restored; files that
 exist only locally — a page you created but never pushed, or anything that is not a page —
 are left exactly where they are. confed has no equivalent of `git clean`, so removing
