@@ -106,12 +106,16 @@ a stateful in-memory server in both Cloud and Data Center modes.
 
 ## Status
 
-Early. The sync engine, both API clients, the converter and the command set are
-implemented and tested; packaging, the TUI and some inline-comment polish are in
-progress. See [`docs/plan/README.md`](docs/plan/README.md) for the current state
-of each phase, and
-[`docs/design/05-open-questions.md`](docs/design/05-open-questions.md) for
-decisions still open.
+Early, but complete enough to use. Both API clients, the converter, the sync
+engine, the command set and the TUI are implemented and tested — 459 tests,
+including scenarios that run end to end against a mock server in both Confluence
+flavors. What is missing is packaging and a release, plus the smaller gaps each
+phase file records.
+
+See [`docs/plan/README.md`](docs/plan/README.md) for the state of each phase and
+the defects the test suite caught along the way, and
+[`docs/design/05-open-questions.md`](docs/design/05-open-questions.md) for the
+decisions still open — the minimum supported Data Center version most of all.
 
 ## License
 
