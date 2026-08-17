@@ -6,8 +6,10 @@
 use crate::cli::ConfigArgs;
 use crate::context::Context;
 use crate::output::Output;
-use confed_core::config::SETTABLE;
+use confed_api::Secret;
+use confed_core::config::{self, SETTABLE};
 use confed_core::error::{ConfedError, Result};
+use confed_core::session::SecretBackend;
 use serde_json::json;
 use std::fmt::Write;
 
@@ -24,6 +26,11 @@ fn meta_key(key: &str) -> Option<&'static str> {
 }
 
 pub fn run(ctx: &mut Context, args: &ConfigArgs) -> Result<Output> {
+    if args.no_keychain || args.force_keychain {
+        let target = if args.no_keychain { SecretBackend::Sqlite } else { SecretBackend::Keyring };
+        return switch_credential_store(ctx, target);
+    }
+
     if let Some(key) = &args.unset {
         let meta = meta_key(key).ok_or_else(|| unknown_key(key))?;
         ctx.workspace()?.state().delete_meta(meta)?;
@@ -84,6 +91,79 @@ pub fn run(ctx: &mut Context, args: &ConfigArgs) -> Result<Output> {
     }
 
     Ok(Output::new(json!({ "entries": entries }), human))
+}
+
+/// Move the stored credential between the OS keychain and `.session.db`.
+///
+/// Reading it may prompt once if it currently lives in the keychain; after a
+/// move to the database, nothing prompts again.
+fn switch_credential_store(ctx: &Context, target: SecretBackend) -> Result<Output> {
+    let ws = ctx.workspace()?;
+    let store = ws.session_store()?;
+    let session = store.load()?.ok_or_else(|| {
+        ConfedError::state_with_hint(
+            "no credentials are stored in this directory",
+            "run `confed init` first",
+        )
+    })?;
+
+    let previous = session.secret_backend;
+    if previous == target {
+        return Ok(Output::new(
+            json!({ "credential_store": target.as_str(), "changed": false }),
+            format!("Credentials are already in {}.\n", describe(target)),
+        ));
+    }
+
+    // If the current backend cannot be read, an explicitly supplied token is
+    // enough to complete the move.
+    let supplied = ctx
+        .resolver
+        .lookup(&config::TOKEN, ctx.global.token.as_deref())
+        .map(|r| Secret::new(r.value));
+
+    let moved = store.switch_backend(&session, target, supplied)?;
+
+    let mut human = format!(
+        "Moved credentials from {} to {}.\n",
+        describe(previous),
+        describe(moved.secret_backend)
+    );
+    let mut output = Output::new(
+        json!({
+            "credential_store": moved.secret_backend.as_str(),
+            "previous": previous.as_str(),
+            "changed": true,
+        }),
+        String::new(),
+    );
+
+    match moved.secret_backend {
+        SecretBackend::Sqlite => {
+            human.push_str(&ctx.style.dim(
+                "Reading them no longer prompts. .session.db is mode 0600 and git-ignored, \n                 but it holds the token in plain text — prefer CONFED_TOKEN on shared machines.\n",
+            ));
+        }
+        SecretBackend::Keyring => {
+            human.push_str(&ctx.style.dim(
+                "The keychain may now ask for permission the first time confed reads them.\n",
+            ));
+        }
+    }
+
+    if target == SecretBackend::Keyring && moved.secret_backend == SecretBackend::Sqlite {
+        output =
+            output.warn("no OS keychain was available, so the credential stayed in .session.db");
+    }
+    output.human = human;
+    Ok(output)
+}
+
+fn describe(backend: SecretBackend) -> &'static str {
+    match backend {
+        SecretBackend::Keyring => "the OS keychain",
+        SecretBackend::Sqlite => ".session.db",
+    }
 }
 
 fn unknown_key(key: &str) -> ConfedError {

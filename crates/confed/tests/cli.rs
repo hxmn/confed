@@ -749,3 +749,47 @@ async fn confluence_markup_is_saved_and_can_be_diffed() {
         );
     }
 }
+
+/// `config --no-keychain` keeps the credential in the database, where reading
+/// it never prompts, and `--force-keychain` asks for it to go back.
+#[tokio::test]
+async fn the_credential_store_can_be_switched_from_the_command_line() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    let output = run(confed(dir.path(), &["config", "--no-keychain", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "config");
+    assert_eq!(value["result"]["credential_store"], json!("sqlite"));
+
+    // Asking twice is a no-op rather than an error.
+    let again = run(confed(dir.path(), &["config", "--no-keychain", "--json"]));
+    assert_eq!(exit_code(&again), 0);
+    assert_eq!(envelope(&again, "config")["result"]["changed"], json!(false));
+
+    // With the credential in the database, ordinary commands still authenticate
+    // without any token in the environment.
+    let pull = run(confed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&pull), 0, "stderr: {}", stderr(&pull));
+    assert!(read(dir.path(), ROOT_FILE).contains("Team Handbook"));
+
+    // And the token never appears in output.
+    for output in [&output, &again, &pull] {
+        let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), stderr(output));
+        assert!(!text.contains("pat-token"), "the token leaked into output");
+    }
+}
+
+/// Switching stores needs a workspace, and says so.
+#[tokio::test]
+async fn switching_the_credential_store_outside_a_workspace_explains_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run(confed(dir.path(), &["config", "--no-keychain", "--json"]));
+    assert_eq!(exit_code(&output), 7);
+    let value = envelope(&output, "config");
+    assert!(
+        value["errors"][0]["hint"].as_str().unwrap_or_default().contains("confed init"),
+        "got {value}"
+    );
+}

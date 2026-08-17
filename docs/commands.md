@@ -460,6 +460,8 @@ Inspect and change stored settings. Writable keys are `space`, `concurrency`, `e
 | `--list` | Show every resolved value and where it came from. Secrets show as `***`. |
 | `--get <KEY>` | Read one value. |
 | `--set <KEY> <VALUE>` | Write one value. |
+| `--no-keychain` | Move the credential into `.session.db` so reading it never prompts. |
+| `--force-keychain` | Move the credential back into the OS keychain. |
 | `--unset <KEY>` | Remove one value. |
 
 ```bash

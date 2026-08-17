@@ -184,3 +184,26 @@ with exit 7 unless you pass `--force`, so a typo cannot silently re-bind a works
 To verify a credential without changing anything, `confed whoami` (exit 3 if it is
 rejected). To see everything at once — permissions, keyring availability, `.gitignore`
 coverage, connectivity — run `confed doctor`.
+
+## Choosing where the credential lives
+
+confed prefers the OS keychain and falls back to `.session.db` when there is none. You can
+move it either way at any time:
+
+```bash
+confed config --no-keychain      # keep it in .session.db; reading never prompts
+confed config --force-keychain   # put it back in the OS keychain
+```
+
+`--no-keychain` is what you want when the keychain asks for a password every time confed
+runs — on a headless box, in a container, or under a desktop keyring that re-locks. The
+credential moves into `.session.db`, which is mode 0600 and git-ignored, and the keychain
+entry is deleted so it never lives in two places.
+
+The cost is that the token sits in that file in plain text, readable by anything running
+as you. On a shared machine prefer `CONFED_TOKEN`, which confed reads without storing
+anything.
+
+Moving *to* the keychain reads the credential once, which may prompt; after that
+`--no-keychain` never does. If the current store cannot be read at all, pass `--token` (or
+set `CONFED_TOKEN`) and confed will use that value for the move.

@@ -235,6 +235,53 @@ impl SessionStore {
         Ok(backend)
     }
 
+    /// Move the stored credential to another backend.
+    ///
+    /// Reading it first may prompt once, if it is in the keyring and the
+    /// platform asks; after moving it to SQLite nothing prompts again. The old
+    /// copy is removed, so the credential never lives in two places.
+    pub fn switch_backend(
+        &self,
+        session: &Session,
+        target: SecretBackend,
+        fallback_secret: Option<Secret>,
+    ) -> Result<Session> {
+        if session.secret_backend == target {
+            return Ok(session.clone());
+        }
+
+        let secret = match self.load_secret(session) {
+            Ok(Some(secret)) => secret,
+            other => fallback_secret.ok_or_else(|| {
+                ConfedError::Auth(format!(
+                    "the stored credential could not be read ({}), so there is nothing to move;                      pass --token or set CONFED_TOKEN to supply it",
+                    match other {
+                        Err(e) => e.to_string(),
+                        _ => "nothing was stored".to_string(),
+                    }
+                ))
+            })?,
+        };
+
+        let mut moved = session.clone();
+        moved.secret_backend = target;
+        let actual = self.save(&moved, &secret, Some(target))?;
+        moved.secret_backend = actual;
+
+        // Leave nothing behind in the backend we moved away from.
+        match (session.secret_backend, actual) {
+            (SecretBackend::Keyring, SecretBackend::Sqlite) => {
+                let account = keyring_account(&session.base_url, session.username.as_deref());
+                let _ = keyring_delete(&account);
+            }
+            (SecretBackend::Sqlite, SecretBackend::Keyring) => {
+                self.conn.execute("UPDATE session SET secret_value = NULL WHERE id = 1", [])?;
+            }
+            _ => {}
+        }
+        Ok(moved)
+    }
+
     /// Fetch the stored secret. Returns `None` when nothing is stored.
     pub fn load_secret(&self, session: &Session) -> Result<Option<Secret>> {
         match session.secret_backend {
@@ -430,5 +477,77 @@ mod tests {
         store.save(&session, &Secret::new("x"), Some(SecretBackend::Sqlite)).unwrap();
         store.clear(&session).unwrap();
         assert!(store.load().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod backend_switch_tests {
+    use super::*;
+
+    fn store(dir: &std::path::Path) -> (SessionStore, Session) {
+        let store = SessionStore::open(dir).unwrap();
+        let session = Session {
+            base_url: "https://wiki.example.com".into(),
+            flavor: Flavor::DataCenter,
+            auth_method: AuthMethod::Pat,
+            username: None,
+            secret_backend: SecretBackend::Sqlite,
+            created_at: crate::state::now(),
+            last_verified_at: None,
+        };
+        store.save(&session, &Secret::new("pat-123"), Some(SecretBackend::Sqlite)).unwrap();
+        (store, session)
+    }
+
+    #[test]
+    fn switching_to_the_backend_already_in_use_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, session) = store(dir.path());
+
+        let moved = store.switch_backend(&session, SecretBackend::Sqlite, None).unwrap();
+        assert_eq!(moved.secret_backend, SecretBackend::Sqlite);
+        assert_eq!(store.load_secret(&moved).unwrap().unwrap().expose(), "pat-123");
+    }
+
+    #[test]
+    fn a_credential_that_cannot_be_read_can_still_be_supplied() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path()).unwrap();
+        // A session claiming the keyring holds it, with nothing actually there.
+        let session = Session {
+            base_url: "https://wiki.example.com".into(),
+            flavor: Flavor::DataCenter,
+            auth_method: AuthMethod::Pat,
+            username: Some("nobody-has-this-account".into()),
+            secret_backend: SecretBackend::Keyring,
+            created_at: crate::state::now(),
+            last_verified_at: None,
+        };
+
+        let err = store.switch_backend(&session, SecretBackend::Sqlite, None).unwrap_err();
+        assert_eq!(err.exit_code(), crate::error::ExitCode::Auth);
+        assert!(err.to_string().contains("CONFED_TOKEN"), "the message says how to fix it");
+
+        let moved = store
+            .switch_backend(&session, SecretBackend::Sqlite, Some(Secret::new("supplied")))
+            .unwrap();
+        assert_eq!(moved.secret_backend, SecretBackend::Sqlite);
+        assert_eq!(store.load_secret(&moved).unwrap().unwrap().expose(), "supplied");
+    }
+
+    #[test]
+    fn moving_to_sqlite_makes_the_secret_readable_without_a_keyring() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, mut session) = store(dir.path());
+        session.secret_backend = SecretBackend::Keyring;
+
+        // Whether or not this machine has a keyring, the fallback path lands the
+        // credential in the database, where reading it never prompts.
+        let moved = store
+            .switch_backend(&session, SecretBackend::Sqlite, Some(Secret::new("pat-123")))
+            .unwrap();
+        assert_eq!(moved.secret_backend, SecretBackend::Sqlite);
+        assert_eq!(store.load().unwrap().unwrap().secret_backend, SecretBackend::Sqlite);
+        assert_eq!(store.load_secret(&moved).unwrap().unwrap().expose(), "pat-123");
     }
 }

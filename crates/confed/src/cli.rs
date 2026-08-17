@@ -555,6 +555,15 @@ pub struct ConfigArgs {
     /// Remove one value.
     #[arg(long, value_name = "KEY")]
     pub unset: Option<String>,
+
+    /// Keep the credential in .session.db (mode 0600) so reading it never
+    /// prompts for a keychain password.
+    #[arg(long, conflicts_with = "force_keychain")]
+    pub no_keychain: bool,
+
+    /// Move the credential back into the OS keychain.
+    #[arg(long)]
+    pub force_keychain: bool,
 }
 
 #[derive(Args, Debug)]
