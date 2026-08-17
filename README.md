@@ -85,9 +85,15 @@ implementation plan, with what shipped and what did not, in
 ## Development
 
 ```bash
-cargo test --workspace                      # unit, wiremock and scenario tests
-cargo clippy --workspace --all-targets      # expected to be warning-free
+make            # list the available tasks
+make test       # unit, wiremock and scenario tests
+make lint       # clippy over every target, warnings denied
+make ci         # everything the CI pipeline runs
 ```
+
+The `Makefile` is a thin wrapper over cargo, so `cargo test --workspace` and
+friends work equally well; `make ci` exists so a green local run means a green
+pipeline.
 
 The workspace is four crates: `confed-api` (both Confluence clients),
 `confed-convert` (storage ⇄ Markdown), `confed-core` (state, merge, sync engine)
