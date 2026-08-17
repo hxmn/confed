@@ -71,3 +71,9 @@ The [`design/`](design/) directory holds the original design notes:
 [open questions](design/05-open-questions.md). They describe intent, which is not always
 what shipped. Where the two disagree, the documents in this directory describe the
 implementation and say so explicitly.
+
+## Reading the space as a website
+
+`confed mkdocs` generates an MkDocs site over the pulled Markdown — see
+[commands.md](commands.md#confed-mkdocs). It links to the pages rather than copying them,
+so `confed pull` is all it takes to update the site.

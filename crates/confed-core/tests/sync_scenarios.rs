@@ -1177,3 +1177,70 @@ async fn a_missing_cache_just_means_fetching_again() {
         Some("<p>Body.</p>")
     );
 }
+
+/// A reset restores an attachment that was changed or deleted locally, and
+/// leaves one that already matches the server alone.
+#[tokio::test]
+async fn reset_only_downloads_attachments_that_actually_differ() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the diagrams.</p>");
+    h.pull().await;
+
+    // Two attachments, both uploaded from the sidecar and then pulled back.
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/kept.png"), b"unchanged bytes").unwrap();
+    std::fs::write(h.path(".Diagrams/edited.png"), b"original bytes").unwrap();
+    h.engine
+        .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
+        .await
+        .expect("push");
+    h.pull().await;
+
+    // One is modified locally; the other is untouched.
+    std::fs::write(h.path(".Diagrams/edited.png"), b"locally modified").unwrap();
+
+    let before = h.mock.calls().len();
+    let outcome = h
+        .engine
+        .pull(&mut h.ws, &PullOptions { reset: true, ..PullOptions::everything() })
+        .await
+        .expect("reset");
+
+    assert_eq!(
+        outcome.attachments_downloaded, 1,
+        "only the modified attachment is downloaded again"
+    );
+    assert_eq!(
+        std::fs::read(h.path(".Diagrams/edited.png")).unwrap(),
+        b"original bytes",
+        "the local change is undone"
+    );
+    assert!(
+        h.mock.calls().len() - before <= 2,
+        "the untouched attachment costs no download: {:?}",
+        h.mock.calls()
+    );
+}
+
+/// A reset still restores an attachment somebody deleted.
+#[tokio::test]
+async fn reset_restores_a_deleted_attachment() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.pull().await;
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/diagram.png"), b"content").unwrap();
+    h.engine
+        .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
+        .await
+        .expect("push");
+    h.pull().await;
+
+    std::fs::remove_file(h.path(".Diagrams/diagram.png")).unwrap();
+    h.engine
+        .pull(&mut h.ws, &PullOptions { reset: true, ..PullOptions::everything() })
+        .await
+        .expect("reset");
+
+    assert_eq!(std::fs::read(h.path(".Diagrams/diagram.png")).unwrap(), b"content");
+}

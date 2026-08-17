@@ -355,6 +355,22 @@ impl<'a> Generator<'a> {
             };
             return format!("<ac:link><ri:page {attr} />{body}</ac:link>");
         }
+
+        // A link into this page's sidecar is a link to an attachment. Left as a
+        // plain <a href> it would be a dead relative link once the page is back
+        // in Confluence. Checked after pages, and only for paths that really are
+        // inside the sidecar — a bare `Other.md` is a page, not a file.
+        if let Some(file) = self.sidecar_filename(&url) {
+            let body = if label.contains('<') {
+                format!("<ac:link-body>{label}</ac:link-body>")
+            } else {
+                format!("<ac:plain-text-link-body>{}</ac:plain-text-link-body>", cdata_text(label))
+            };
+            return format!(
+                r#"<ac:link><ri:attachment ri:filename="{}" />{body}</ac:link>"#,
+                dom::escape_attr(&file)
+            );
+        }
         format!(r#"<a href="{}">{}</a>"#, dom::escape_attr(&url), label)
     }
 
@@ -375,6 +391,23 @@ impl<'a> Generator<'a> {
                 dom::escape_attr(&url)
             ),
         }
+    }
+
+    /// A path inside this page's sidecar directory, and nothing else.
+    ///
+    /// Stricter than [`attachment_filename`](Self::attachment_filename), which
+    /// also accepts a bare filename. That leniency is right for an image — a
+    /// bare name can only be a file — but wrong for a link, where a bare name is
+    /// far more likely to be a page.
+    fn sidecar_filename(&self, url: &str) -> Option<String> {
+        if url.contains("://") {
+            return None;
+        }
+        let dir = self.opts.attachment_dir.trim_end_matches('/');
+        if dir.is_empty() {
+            return None;
+        }
+        url.strip_prefix(&format!("{dir}/")).map(str::to_string)
     }
 
     /// An image whose path points into this page's sidecar directory is an
@@ -783,5 +816,85 @@ mod tests {
     #[test]
     fn thematic_break() {
         assert_eq!(gen("---\n"), "<hr />");
+    }
+}
+
+#[cfg(test)]
+mod attachment_mapping_tests {
+    use crate::ConvertOptions;
+
+    fn opts() -> ConvertOptions {
+        ConvertOptions {
+            attachment_dir: ".Page".into(),
+            base_url: "https://wiki.corp".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Storage → Markdown → storage, for every way a page can point at a file.
+    #[test]
+    fn images_and_files_survive_the_round_trip() {
+        let cases = [
+            (
+                "an attached image",
+                "<p><ac:image><ri:attachment ri:filename=\"diagram.png\"/></ac:image></p>",
+                "![](.Page/diagram.png)",
+                "ri:attachment ri:filename=\"diagram.png\"",
+            ),
+            (
+                "an external image",
+                "<p><ac:image><ri:url ri:value=\"https://example.test/x.png\"/></ac:image></p>",
+                "![](https://example.test/x.png)",
+                "ri:url ri:value=\"https://example.test/x.png\"",
+            ),
+            (
+                "a link to an attached file",
+                "<p><ac:link><ri:attachment ri:filename=\"spec.pdf\"/>\
+                 <ac:plain-text-link-body><![CDATA[the spec]]></ac:plain-text-link-body></ac:link></p>",
+                "[the spec](.Page/spec.pdf)",
+                "<ac:link><ri:attachment ri:filename=\"spec.pdf\" />",
+            ),
+        ];
+
+        for (what, storage, expected_md, expected_back) in cases {
+            let md = crate::storage_to_markdown(storage, &opts()).unwrap().markdown;
+            assert_eq!(md.trim(), expected_md, "{what}: markdown");
+
+            let back = crate::markdown_to_storage(&md, &opts()).unwrap();
+            assert!(back.contains(expected_back), "{what}: went back as {back}");
+            assert!(!back.contains("<a href"), "{what} must not become a plain link: {back}");
+        }
+    }
+
+    #[test]
+    fn an_alt_text_survives_in_both_directions() {
+        let storage =
+            "<p><ac:image ac:alt=\"Network diagram\"><ri:attachment ri:filename=\"net.png\"/>\
+             </ac:image></p>";
+        let md = crate::storage_to_markdown(storage, &opts()).unwrap().markdown;
+        assert_eq!(md.trim(), "![Network diagram](.Page/net.png)");
+
+        let back = crate::markdown_to_storage(&md, &opts()).unwrap();
+        assert!(back.contains(r#"ac:alt="Network diagram""#), "got {back}");
+        assert!(back.contains(r#"ri:filename="net.png""#));
+    }
+
+    #[test]
+    fn an_ordinary_external_link_is_still_a_plain_link() {
+        let md = "See [the site](https://example.test/page) and [a peer](../Other.md).";
+        let back = crate::markdown_to_storage(md, &opts()).unwrap();
+        assert!(back.contains(r#"<a href="https://example.test/page">"#), "got {back}");
+        assert!(!back.contains("ri:attachment"), "only sidecar paths are attachments");
+    }
+
+    #[test]
+    fn a_filename_with_spaces_or_markup_characters_is_handled() {
+        let storage = "<p><ac:link><ri:attachment ri:filename=\"quarterly report.pdf\"/>\
+             <ac:plain-text-link-body><![CDATA[report]]></ac:plain-text-link-body></ac:link></p>";
+        let md = crate::storage_to_markdown(storage, &opts()).unwrap().markdown;
+        assert!(md.contains("quarterly report.pdf"), "got {md}");
+
+        let back = crate::markdown_to_storage(&md, &opts()).unwrap();
+        assert!(back.contains(r#"ri:filename="quarterly report.pdf""#), "got {back}");
     }
 }

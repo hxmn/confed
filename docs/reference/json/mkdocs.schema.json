@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/docs/reference/json/mkdocs.schema.json",
+  "title": "confed mkdocs result",
+  "description": "Files generated to view the workspace as an MkDocs site.",
+  "type": "object",
+  "required": [
+    "site_name",
+    "generated",
+    "skipped",
+    "pages_in_nav",
+    "linked"
+  ],
+  "properties": {
+    "site_name": {
+      "type": "string",
+      "description": "Title of the generated site."
+    },
+    "generated": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Files written this run."
+    },
+    "skipped": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Files left alone because they already existed; --force overwrites them."
+    },
+    "gitignore_added": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Entries added to .gitignore for the build output."
+    },
+    "pages_in_nav": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Pages placed in the generated navigation."
+    },
+    "linked": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Top-level entries symlinked into docs/."
+    }
+  }
+}

@@ -1061,7 +1061,7 @@ impl SyncEngine {
         let mut count = 0;
         for record in records {
             let dest = dir.join(&record.filename);
-            if record.downloaded && dest.exists() && !reset {
+            if !needs_download(&record, &dest, reset) {
                 continue;
             }
             let Some(attachment) =
@@ -1798,6 +1798,27 @@ impl SyncEngine {
 
 fn status_of<'a>(statuses: &'a [PageStatus], page_id: &str) -> Option<&'a PageStatus> {
     statuses.iter().find(|s| s.page_id.as_deref() == Some(page_id))
+}
+
+/// Does this attachment have to come down again?
+///
+/// Normally the recorded state is enough: a file confed downloaded and has not
+/// been told about a newer version of is current. A reset trusts the disk
+/// instead of the record, but still only downloads what actually differs —
+/// re-fetching a file that already matches the server is pure waste, and on a
+/// page full of images it is the slowest part of the reset.
+fn needs_download(record: &AttachmentRecord, dest: &Path, reset: bool) -> bool {
+    if !dest.exists() {
+        return true;
+    }
+    // No recorded hash means the server has a version confed has not seen.
+    let Some(recorded) = record.sha256.as_deref() else { return true };
+
+    if reset {
+        // Compare the bytes on disk, since a reset exists to undo local changes.
+        return attachments::file_sha256(dest).ok().as_deref() != Some(recorded);
+    }
+    !record.downloaded
 }
 
 /// One API comment as confed stores it.

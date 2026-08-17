@@ -156,6 +156,9 @@ pub enum Command {
     /// Export pages to another format.
     Export(ExportArgs),
 
+    /// Generate an MkDocs site over the pulled Markdown.
+    Mkdocs(MkdocsArgs),
+
     /// Generate a shell completion script.
     Completion(CompletionArgs),
 
@@ -188,6 +191,7 @@ impl Command {
             Command::Config(_) => "config",
             Command::Doctor(_) => "doctor",
             Command::Export(_) => "export",
+            Command::Mkdocs(_) => "mkdocs",
             Command::Completion(_) => "completion",
             Command::Tui => "tui",
         }
@@ -583,6 +587,18 @@ pub struct ExportArgs {
 
     #[arg(long, default_value = "export")]
     pub out: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct MkdocsArgs {
+    /// Site title. Defaults to the space name.
+    #[arg(long)]
+    pub site_name: Option<String>,
+
+    /// Overwrite files that are already there, which is how the navigation is
+    /// refreshed after pages change.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]

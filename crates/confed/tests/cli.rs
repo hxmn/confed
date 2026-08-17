@@ -793,3 +793,69 @@ async fn switching_the_credential_store_outside_a_workspace_explains_itself() {
         "got {value}"
     );
 }
+
+/// `confed mkdocs` scaffolds a site over the pulled pages without copying them.
+#[tokio::test]
+async fn mkdocs_scaffolds_a_site_over_the_workspace() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+
+    let output = run(confed(dir.path(), &["mkdocs", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "mkdocs");
+
+    for name in ["mkdocs.yml", "pyproject.toml", "Makefile"] {
+        assert!(dir.path().join(name).exists(), "{name} was not generated");
+    }
+    assert!(value["result"]["pages_in_nav"].as_u64().unwrap() >= 1);
+
+    // docs/ points back at the pages rather than copying them, so a pull is
+    // enough to update the site.
+    let link = dir.path().join("docs").join(ROOT_FILE);
+    assert!(link.symlink_metadata().unwrap().file_type().is_symlink(), "docs/ holds symlinks");
+    assert_eq!(
+        std::fs::read_to_string(&link).unwrap(),
+        read(dir.path(), ROOT_FILE),
+        "the link resolves to the real page"
+    );
+
+    // The navigation follows confed's hierarchy, and dependencies go through uv.
+    let config = read(dir.path(), "mkdocs.yml");
+    assert!(config.contains("docs_dir: docs"));
+    assert!(config.contains("nav:"));
+    assert!(read(dir.path(), "Makefile").contains("$(UV) run mkdocs serve"));
+    assert!(read(dir.path(), "pyproject.toml").contains("mkdocs-material"));
+
+    // The build output stays out of git.
+    let gitignore = read(dir.path(), ".gitignore");
+    for entry in ["site/", ".venv/", "docs/"] {
+        assert!(gitignore.contains(entry), "{entry} is not ignored");
+    }
+}
+
+/// Generated files are not clobbered unless asked, and --force refreshes them.
+#[tokio::test]
+async fn mkdocs_leaves_edited_config_alone_without_force() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+    assert_eq!(exit_code(&run(confed(dir.path(), &["mkdocs", "--json"]))), 0);
+
+    std::fs::write(dir.path().join("mkdocs.yml"), "site_name: Mine\n").unwrap();
+
+    let output = run(confed(dir.path(), &["mkdocs", "--json"]));
+    assert_eq!(exit_code(&output), 0);
+    let value = envelope(&output, "mkdocs");
+    assert!(
+        value["result"]["skipped"].as_array().unwrap().iter().any(|s| s == "mkdocs.yml"),
+        "an existing config is reported as skipped: {value}"
+    );
+    assert_eq!(read(dir.path(), "mkdocs.yml"), "site_name: Mine\n", "the edit survives");
+
+    let forced = run(confed(dir.path(), &["mkdocs", "--force", "--json"]));
+    assert_eq!(exit_code(&forced), 0);
+    assert!(read(dir.path(), "mkdocs.yml").contains("docs_dir: docs"), "--force regenerates");
+}

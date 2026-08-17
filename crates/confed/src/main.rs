@@ -53,6 +53,7 @@ fn run(cli: Cli) -> Result<Output> {
         Command::Diff(args) if !args.remote => return commands::diff::run(&mut ctx, args),
         Command::Resolve(args) => return commands::resolve::run(&mut ctx, args),
         Command::New(args) if !args.push => return commands::new::run(&mut ctx, args),
+        Command::Mkdocs(args) => return commands::mkdocs::run(&mut ctx, args),
         _ => {}
     }
 
@@ -109,7 +110,11 @@ async fn dispatch(
         Command::Whoami => commands::whoami::run(&mut ctx).await,
         Command::Doctor(args) => commands::doctor::run(&mut ctx, &args).await,
         Command::Export(args) => commands::export::run(&mut ctx, &args).await,
-        Command::Config(_) | Command::Resolve(_) | Command::Completion(_) | Command::Tui => {
+        Command::Config(_)
+        | Command::Resolve(_)
+        | Command::Completion(_)
+        | Command::Mkdocs(_)
+        | Command::Tui => {
             unreachable!("handled before the runtime starts")
         }
     }

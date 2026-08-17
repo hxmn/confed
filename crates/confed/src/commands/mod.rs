@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod export;
 pub mod init;
 pub mod log;
+pub mod mkdocs;
 pub mod mv;
 pub mod new;
 pub mod open;
