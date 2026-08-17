@@ -4,7 +4,6 @@
 //! rendered back to Markdown, then a line diff against the working file — so the
 //! TUI and the CLI can never disagree about what changed.
 
-use confed_convert::ConvertOptions;
 use confed_core::error::Result;
 use confed_core::workspace::Workspace;
 use similar::{ChangeTag, TextDiff};
@@ -108,12 +107,9 @@ fn build_diff(ws: &Workspace, page_id: &str, path: &str, side: DiffSide) -> Resu
         return Ok(vec![Line::new(LineKind::Warn, "No base version yet — run `confed fetch`.")]);
     };
 
-    let options = ConvertOptions {
-        attachment_dir: confed_core::paths::sidecar_ref(path),
-        base_url: ws.base_url()?.unwrap_or_default(),
-        space_key: ws.space_key().unwrap_or_default(),
-        ..Default::default()
-    };
+    // The same context the file on disk was rendered with, so the diff shows
+    // real changes rather than a difference in how the two sides were rendered.
+    let options = confed_core::sync::page_convert_options(ws, path);
 
     let storage = match side {
         DiffSide::Base => Some(record.storage_body.clone()),

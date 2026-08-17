@@ -1244,3 +1244,52 @@ async fn reset_restores_a_deleted_attachment() {
 
     assert_eq!(std::fs::read(h.path(".Diagrams/diagram.png")).unwrap(), b"content");
 }
+
+/// Re-rendering the base must reproduce the file on disk exactly.
+///
+/// confed compares those two renderings constantly — `diff` shows the result,
+/// and push's block patcher decides what to upload from it — so any option that
+/// one path passes and another forgets shows up as a change the user never made.
+/// A mention and a page link are the two things that need context to render.
+#[tokio::test]
+async fn the_base_re_renders_to_exactly_what_is_on_disk() {
+    for flavor in [Flavor::Cloud, Flavor::DataCenter] {
+        let mut h = Harness::new(flavor);
+        h.mock.seed_user("key-1", "alice.ng", "Alice Ng");
+        h.mock.seed_page("1001", "Target", None, "<p>The target page.</p>");
+        h.mock.seed_page(
+            "1002",
+            "Source",
+            None,
+            "<p>Ask <ac:link><ri:user ri:userkey=\"key-1\"/></ac:link> about \
+             <ac:link><ri:page ri:content-title=\"Target\"/></ac:link>.</p>",
+        );
+        h.pull().await;
+
+        for page_id in ["1001", "1002"] {
+            let record = h.ws.state().get_page(page_id).unwrap().unwrap();
+            let on_disk =
+                confed_core::frontmatter::parse(&h.read(&record.local_path), &record.local_path)
+                    .unwrap();
+
+            let options = confed_core::sync::page_convert_options(&h.ws, &record.local_path);
+            let rendered = confed_convert::storage_to_markdown(&record.storage_body, &options)
+                .unwrap()
+                .markdown;
+
+            assert_eq!(
+                rendered.trim_end(),
+                on_disk.body.trim_end(),
+                "{flavor}: re-rendering {} differs from the file confed wrote, \
+                 which would show as a phantom diff",
+                record.local_path
+            );
+        }
+
+        // And the page that needed context really did get it, rather than both
+        // sides agreeing on an unresolved fallback.
+        let source = h.read(&h.ws.state().get_page("1002").unwrap().unwrap().local_path);
+        assert!(source.contains("[@Alice Ng]"), "{flavor}: the mention resolved: {source}");
+        assert!(!source.contains("```confluence"), "{flavor}: nothing fell back to raw markup");
+    }
+}

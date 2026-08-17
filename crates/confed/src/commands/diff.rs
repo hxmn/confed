@@ -73,12 +73,10 @@ fn collect(ctx: &Context, args: &DiffArgs, against_remote: bool) -> Result<Vec<P
         }
         let Some(base_record) = base.iter().find(|b| b.page_id == page_id) else { continue };
 
-        let convert_opts = ConvertOptions {
-            attachment_dir: confed_core::paths::sidecar_ref(&local.path),
-            base_url: ws.base_url()?.unwrap_or_default(),
-            space_key: ws.space_key().unwrap_or_default(),
-            ..Default::default()
-        };
+        // The same context the file on disk was rendered with. Anything less —
+        // no resolved people, no page links — re-renders the base differently
+        // and reports changes the user never made.
+        let convert_opts = confed_core::sync::page_convert_options(ws, &local.path);
 
         let (left_label, left_text) = if against_remote {
             let Some(remote_page) = remote.iter().find(|r| r.page_id == page_id) else { continue };

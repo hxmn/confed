@@ -1495,7 +1495,7 @@ impl SyncEngine {
                 let file = crate::frontmatter::parse(&content, &path)?;
 
                 let parent_id = self.resolve_parent(ws, &path, &file, created_ids)?;
-                let convert_opts = convert_options(ws, &path, &HashMap::new());
+                let convert_opts = page_convert_options(ws, &path);
                 let storage = confed_convert::markdown_to_storage(&file.body, &convert_opts)?;
 
                 let created = self
@@ -1539,7 +1539,7 @@ impl SyncEngine {
                     .get_page(&page_id)?
                     .ok_or_else(|| ConfedError::state(format!("{path}: no base record")))?;
 
-                let convert_opts = convert_options(ws, &path, &HashMap::new());
+                let convert_opts = page_convert_options(ws, &path);
                 let body_storage = if op.ops.iter().any(|o| o == "body") {
                     Some(self.build_storage(&base_record, &file.body, &convert_opts)?)
                 } else {
@@ -1680,7 +1680,7 @@ impl SyncEngine {
         local: &MarkdownFile,
     ) -> Result<()> {
         let summary = &page.summary;
-        let convert_opts = convert_options(ws, path, &HashMap::new());
+        let convert_opts = page_convert_options(ws, path);
         let converted = confed_convert::storage_to_markdown(&page.body_storage, &convert_opts)?;
 
         let mut file = local.clone();
@@ -1965,6 +1965,24 @@ fn decide_pull(
 }
 
 /// Conversion context for one page file.
+/// Conversion context for a page, built from what the workspace knows.
+///
+/// Every caller must use this. Rendering the same storage with different
+/// options produces different Markdown, and confed compares those renderings
+/// against each other — `diff` against the file on disk, and push's block
+/// patcher against the base. Options assembled ad hoc at one call site show up
+/// as changes the user never made.
+pub fn page_convert_options(ws: &Workspace, page_path: &str) -> ConvertOptions {
+    let links = ws
+        .state()
+        .all_pages()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|page| (page.page_id, page.local_path))
+        .collect();
+    convert_options(ws, page_path, &links)
+}
+
 fn convert_options(ws: &Workspace, path: &str, links: &HashMap<String, String>) -> ConvertOptions {
     let page_links: HashMap<String, String> =
         links.iter().map(|(id, target)| (id.clone(), paths::relative_link(path, target))).collect();
