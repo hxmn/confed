@@ -14,10 +14,10 @@ Owned by [@Dana Whitfield](https://wiki.example.test/people/557058:abcd). Runboo
 
 ## Endpoints
 
-| Method | Path | Auth |
-| --- | --- | --- |
-| GET | `/v1/payments` | bearer |
-| POST | `/v1/payments` | bearer |
+| Method | Path           | Auth   |
+| ------ | -------------- | ------ |
+| GET    | `/v1/payments` | bearer |
+| POST   | `/v1/payments` | bearer |
 
 ## Deploy
 

@@ -369,13 +369,7 @@ impl Renderer<'_> {
             line.resize(width, " ".to_string());
             cells.push(line);
         }
-        let mut out = String::new();
-        out.push_str(&format!("| {} |\n", cells[0].join(" | ")));
-        out.push_str(&format!("|{}|\n", vec![" --- "; width].join("|")));
-        for row in &cells[1..] {
-            out.push_str(&format!("| {} |\n", row.join(" | ")));
-        }
-        out.trim_end().to_string()
+        format_table(&cells, width)
     }
 
     // -- inline ------------------------------------------------------------
@@ -921,7 +915,7 @@ mod tests {
     #[test]
     fn simple_table_becomes_gfm() {
         let out = md("<table><tbody><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></tbody></table>");
-        assert_eq!(out, "| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+        assert_eq!(out, "| A   | B   |\n| --- | --- |\n| 1   | 2   |\n");
     }
 
     #[test]
@@ -1098,5 +1092,150 @@ mod user_mention_tests {
             <ac:plain-text-link-body><![CDATA[our reviewer]]></ac:plain-text-link-body></ac:link></p>";
         let md = crate::storage_to_markdown(storage, &opts_with_user()).unwrap().markdown;
         assert!(md.contains("[our reviewer](https://wiki.corp/display/~alice.ng)"), "got: {md}");
+    }
+}
+
+/// Widest column confed will pad to.
+///
+/// Aligning to a very long cell would push every other row out to the same
+/// length, which is harder to read than leaving that column ragged — and makes
+/// the diff of a one-word edit span the whole table.
+const MAX_PADDED_WIDTH: usize = 60;
+
+/// Lay a table out with its columns lined up.
+///
+/// Alignment is cosmetic to Markdown but not to the person reading the file, and
+/// these files are read far more often in an editor than rendered.
+fn format_table(cells: &[Vec<String>], width: usize) -> String {
+    let widths: Vec<usize> = (0..width)
+        .map(|column| {
+            let widest = cells
+                .iter()
+                .filter_map(|row| row.get(column))
+                .map(|cell| display_width(cell))
+                .max()
+                .unwrap_or(1);
+            // Three, because the separator row is at least `---`.
+            widest.clamp(3, MAX_PADDED_WIDTH)
+        })
+        .collect();
+
+    let mut out = String::new();
+    write_row(&mut out, &cells[0], &widths);
+    out.push('|');
+    for target in &widths {
+        out.push_str(&format!(" {} |", "-".repeat(*target)));
+    }
+    out.push('\n');
+    for row in &cells[1..] {
+        write_row(&mut out, row, &widths);
+    }
+    out.trim_end().to_string()
+}
+
+fn write_row(out: &mut String, row: &[String], widths: &[usize]) {
+    out.push('|');
+    for (column, target) in widths.iter().enumerate() {
+        let cell = row.get(column).map(String::as_str).unwrap_or(" ").trim_end();
+        let padding = target.saturating_sub(display_width(cell));
+        out.push_str(&format!(" {cell}{} |", " ".repeat(padding)));
+    }
+    out.push('\n');
+}
+
+/// Columns a string occupies in a fixed-width terminal or editor, so a table
+/// containing wide characters still lines up.
+fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+#[cfg(test)]
+mod table_layout_tests {
+    use super::*;
+    use crate::ConvertOptions;
+
+    fn render(storage: &str) -> String {
+        crate::storage_to_markdown(storage, &ConvertOptions::default()).unwrap().markdown
+    }
+
+    #[test]
+    fn columns_line_up() {
+        let storage = "<table><tbody>\
+            <tr><th>Name</th><th>Owner</th></tr>\
+            <tr><td>Onboarding</td><td>HR</td></tr>\
+            <tr><td>DB</td><td>Platform</td></tr>\
+            </tbody></table>";
+
+        assert_eq!(
+            render(storage).trim_end(),
+            "\
+| Name       | Owner    |
+| ---------- | -------- |
+| Onboarding | HR       |
+| DB         | Platform |"
+        );
+    }
+
+    #[test]
+    fn a_very_wide_column_is_left_ragged() {
+        let long = "x".repeat(200);
+        let storage = format!(
+            "<table><tbody><tr><th>A</th></tr><tr><td>{long}</td></tr>\
+             <tr><td>short</td></tr></tbody></table>"
+        );
+        let md = render(&storage);
+
+        // The short row is padded to the cap, not out to 200 columns.
+        let shortest = md.lines().map(|l| l.chars().count()).min().unwrap();
+        assert!(shortest <= MAX_PADDED_WIDTH + 4, "rows blew out to {shortest} columns:\n{md}");
+        assert!(md.contains(&long), "the long cell is still intact");
+    }
+
+    #[test]
+    fn wide_characters_are_measured_by_the_space_they_take() {
+        // Each CJK character occupies two columns, so a naive char count would
+        // misalign these rows against the ASCII one.
+        let storage = "<table><tbody><tr><th>Key</th><th>Name</th></tr>\
+            <tr><td>jp</td><td>日本語</td></tr>\
+            <tr><td>en</td><td>English</td></tr></tbody></table>";
+        let md = render(storage);
+
+        let widths: Vec<usize> = md.lines().map(display_width).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "every row should be the same width:\n{md}"
+        );
+    }
+
+    #[test]
+    fn an_empty_cell_still_holds_its_column_open() {
+        let storage = "<table><tbody><tr><th>A</th><th>B</th></tr>\
+            <tr><td></td><td>filled</td></tr></tbody></table>";
+        let md = render(storage);
+        for line in md.lines() {
+            assert_eq!(line.matches('|').count(), 3, "row lost a column: {line}");
+        }
+    }
+
+    #[test]
+    fn the_separator_row_matches_the_column_widths() {
+        let md =
+            render("<table><tbody><tr><th>Column</th></tr><tr><td>v</td></tr></tbody></table>");
+        let lines: Vec<&str> = md.lines().collect();
+        assert_eq!(display_width(lines[0]), display_width(lines[1]));
+        assert!(lines[1].contains("------"), "got {}", lines[1]);
+    }
+
+    #[test]
+    fn an_aligned_table_still_parses_back_to_the_same_table() {
+        let storage = "<table><tbody><tr><th>Name</th><th>Owner</th></tr>\
+            <tr><td>Onboarding</td><td>HR</td></tr></tbody></table>";
+        let md = render(storage);
+        let back = crate::markdown_to_storage(&md, &ConvertOptions::default()).unwrap();
+
+        assert!(back.contains("<table>"), "got {back}");
+        assert!(back.contains("Onboarding"));
+        // Padding is layout, not content: it must not survive into the cells.
+        assert!(!back.contains("Onboarding "), "padding leaked into the cell: {back}");
     }
 }
