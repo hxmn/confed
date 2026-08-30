@@ -28,7 +28,9 @@ Owned by [@Dana Whitfield](https://wiki.example.test/people/557058:abcd). Runboo
 ## Open work
 
 ```confluence
-<ac:structured-macro ac:name="jira" ac:schema-version="1"><ac:parameter ac:name="key">PAY-31</ac:parameter></ac:structured-macro>
+<ac:structured-macro ac:name="jira" ac:schema-version="1">
+  <ac:parameter ac:name="key">PAY-31</ac:parameter>
+</ac:structured-macro>
 ```
 
 - [ ] Add idempotency keys

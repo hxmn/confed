@@ -3,12 +3,16 @@ source: crates/confed-convert/tests/golden.rs
 ---
 ```confluence
 <ac:structured-macro ac:name="expand" ac:schema-version="1">
-<ac:parameter ac:name="title">Nested everything</ac:parameter>
-<ac:rich-text-body>
-<ac:structured-macro ac:name="info" ac:schema-version="1">
-<ac:rich-text-body><p>An info inside an expand.</p></ac:rich-text-body>
-</ac:structured-macro>
-<ac:structured-macro ac:name="jira" ac:schema-version="1"><ac:parameter ac:name="key">PROJ-9</ac:parameter></ac:structured-macro>
-</ac:rich-text-body>
+  <ac:parameter ac:name="title">Nested everything</ac:parameter>
+  <ac:rich-text-body>
+    <ac:structured-macro ac:name="info" ac:schema-version="1">
+      <ac:rich-text-body>
+        <p>An info inside an expand.</p>
+      </ac:rich-text-body>
+    </ac:structured-macro>
+    <ac:structured-macro ac:name="jira" ac:schema-version="1">
+      <ac:parameter ac:name="key">PROJ-9</ac:parameter>
+    </ac:structured-macro>
+  </ac:rich-text-body>
 </ac:structured-macro>
 ```

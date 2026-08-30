@@ -6,7 +6,7 @@
 mod corpus;
 
 use confed_convert::blockmap::{hash_text, BlockKind};
-use confed_convert::{mdblock, storage_parse, storage_to_markdown};
+use confed_convert::{mdblock, pretty, storage_parse, storage_to_markdown};
 
 #[test]
 fn parser_survives_the_corpus_and_spans_reproduce_the_source() {
@@ -63,10 +63,12 @@ fn block_hashes_match_the_markdown_they_describe() {
     }
 }
 
-/// A preserved block's fence body must be the exact source bytes — that is the
-/// entire promise of a preserved block.
+/// A preserved block's fence body must be the source subtree, differing from it
+/// only in whitespace no renderer can see — that is the entire promise of a
+/// preserved block. `minify` deletes exactly the whitespace the printer is
+/// allowed to add, so equality after it is the promise stated precisely.
 #[test]
-fn preserved_fences_hold_the_exact_source_bytes() {
+fn preserved_fences_hold_the_source_subtree() {
     let mut seen = 0usize;
     for f in corpus::load() {
         let c = storage_to_markdown(&f.storage, &corpus::options()).unwrap();
@@ -78,10 +80,32 @@ fn preserved_fences_hold_the_exact_source_bytes() {
             let md = c.block_map.block_markdown(i, &c.markdown).unwrap();
             let raw = &f.storage[entry.storage_span.0..entry.storage_span.1];
             let body = fence_body(&md);
-            assert_eq!(body, raw, "{}: preserved fence body differs", f.name);
+            assert_eq!(
+                pretty::minify(&body),
+                pretty::minify(raw),
+                "{}: preserved fence body is not the source subtree",
+                f.name
+            );
+            assert_eq!(body, pretty::format(raw), "{}: fence body is not laid out", f.name);
         }
     }
     assert!(seen >= 8, "corpus should exercise preserved blocks; saw {seen}");
+}
+
+/// Laying a fixture out changes how it reads and nothing else, at every level of
+/// every document in the corpus.
+#[test]
+fn formatting_preserves_the_document_and_is_a_fixed_point() {
+    for f in corpus::load() {
+        let once = pretty::format(&f.storage);
+        assert_eq!(
+            pretty::minify(&once),
+            pretty::minify(&f.storage),
+            "{}: formatting changed the document",
+            f.name
+        );
+        assert_eq!(pretty::format(&once), once, "{}: formatting is not a fixed point", f.name);
+    }
 }
 
 fn fence_body(md: &str) -> String {

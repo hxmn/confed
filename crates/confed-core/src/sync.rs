@@ -878,11 +878,11 @@ impl SyncEngine {
         ))
     }
 
-    /// Keep the page's Confluence markup next to its Markdown, exactly as the
-    /// server has it. It is what the Markdown was rendered from and what a push
-    /// patches, so it is the thing to read when a conversion looks wrong.
+    /// Keep the page's Confluence markup next to its Markdown. It is what the
+    /// Markdown was rendered from and what a push patches, so it is the thing to
+    /// read when a conversion looks wrong.
     fn write_storage_copy(&self, ws: &Workspace, page_path: &str, storage: &str) -> Result<()> {
-        write_atomic(&ws.absolute(&paths::storage_file_for(page_path)), storage)
+        write_atomic(&ws.absolute(&paths::storage_file_for(page_path)), &storage_file_text(storage))
     }
 
     /// Write the markup copy only when it is missing or out of date.
@@ -892,10 +892,11 @@ impl SyncEngine {
     /// page's file, and its mtime, on every pull.
     fn ensure_storage_copy(&self, ws: &Workspace, page_path: &str, storage: &str) -> Result<()> {
         let path = ws.absolute(&paths::storage_file_for(page_path));
-        if std::fs::read_to_string(&path).is_ok_and(|existing| existing == storage) {
+        let text = storage_file_text(storage);
+        if std::fs::read_to_string(&path).is_ok_and(|existing| existing == text) {
             return Ok(());
         }
-        self.write_storage_copy(ws, page_path, storage)
+        write_atomic(&path, &text)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2459,6 +2460,21 @@ fn move_sidecar(old: &Path, new: &Path) {
     }
     // Only removes the directory if it is now empty, so nothing is lost.
     let _ = std::fs::remove_dir(old);
+}
+
+/// What goes in a `storage.xml` sidecar: the page's markup, laid out across
+/// lines and newline-terminated.
+///
+/// The file exists to be read and diffed, and Confluence ships a page body as a
+/// single line thousands of bytes long. Formatting only moves whitespace between
+/// block-level siblings — see [`confed_convert::pretty`] — and nothing reads the
+/// file back, so the sidecar stays a faithful copy of what the server has.
+fn storage_file_text(storage: &str) -> String {
+    let body = confed_convert::pretty::format(storage);
+    if body.is_empty() {
+        return body;
+    }
+    format!("{body}\n")
 }
 
 /// Write via a temp file + rename so an interrupted write never truncates a page.

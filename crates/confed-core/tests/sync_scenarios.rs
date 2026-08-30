@@ -741,7 +741,9 @@ async fn a_dry_run_reports_checking_rather_than_writing() {
 }
 
 /// Every page keeps a copy of its Confluence markup beside its Markdown, so the
-/// source of a conversion is always inspectable without a round trip.
+/// source of a conversion is always inspectable without a round trip. Confluence
+/// ships a body as one line, so the copy is laid out to be read — and that is
+/// the only thing that changes about it.
 #[tokio::test]
 async fn pull_saves_the_confluence_markup_beside_each_page() {
     let mut h = Harness::new(Flavor::Cloud);
@@ -751,9 +753,22 @@ async fn pull_saves_the_confluence_markup_beside_each_page() {
     h.mock.seed_page("1002", "Nested", Some("1001"), "<p>Child.</p>");
     h.pull().await;
 
-    // Byte-for-byte what the server holds, not a re-serialization of it.
-    assert_eq!(h.read(".Onboarding/storage.xml"), body);
-    assert_eq!(h.read("Onboarding/.Nested/storage.xml"), "<p>Child.</p>");
+    let on_disk = h.read(".Onboarding/storage.xml");
+    assert_eq!(
+        on_disk,
+        concat!(
+            "<p>Intro.</p>\n",
+            "<ac:structured-macro ac:name=\"jira\">\n",
+            "  <ac:parameter ac:name=\"key\">PROJ-1</ac:parameter>\n",
+            "</ac:structured-macro>\n"
+        )
+    );
+    assert_eq!(
+        confed_convert::pretty::minify(&on_disk),
+        confed_convert::pretty::minify(body),
+        "the copy is the server's markup, not a re-serialization of it"
+    );
+    assert_eq!(h.read("Onboarding/.Nested/storage.xml"), "<p>Child.</p>\n");
 }
 
 /// The copy tracks the page: it is refreshed by pull, refreshed again by push,
@@ -763,12 +778,12 @@ async fn the_markup_copy_follows_the_page_and_is_not_an_attachment() {
     let mut h = Harness::new(Flavor::Cloud);
     h.mock.seed_page("1001", "Notes", None, "<p>First.</p>");
     h.pull().await;
-    assert_eq!(h.read(".Notes/storage.xml"), "<p>First.</p>");
+    assert_eq!(h.read(".Notes/storage.xml"), "<p>First.</p>\n");
 
     // A remote edit refreshes it.
     h.mock.remote_edit("1001", "<p>Second, from the server.</p>");
     h.pull().await;
-    assert_eq!(h.read(".Notes/storage.xml"), "<p>Second, from the server.</p>");
+    assert_eq!(h.read(".Notes/storage.xml"), "<p>Second, from the server.</p>\n");
 
     // So does a local edit that gets pushed.
     h.edit_body("Notes.md", "\nA local addition.\n");
@@ -781,7 +796,11 @@ async fn the_markup_copy_follows_the_page_and_is_not_an_attachment() {
     assert!(outcome.attachments_uploaded.is_empty(), "the copy is not an attachment");
 
     let on_disk = h.read(".Notes/storage.xml");
-    assert_eq!(on_disk, h.mock.page_body("1001").unwrap(), "it matches what the server now has");
+    assert_eq!(
+        confed_convert::pretty::minify(&on_disk),
+        confed_convert::pretty::minify(&h.mock.page_body("1001").unwrap()),
+        "it matches what the server now has"
+    );
     assert!(on_disk.contains("A local addition"));
 
     let remote_attachments =
@@ -821,8 +840,8 @@ async fn pull_backfills_the_markup_copy_for_unchanged_pages() {
     assert!(outcome.is_empty(), "no page needed rewriting: {outcome:?}");
 
     // …and the copies come back anyway.
-    assert_eq!(h.read(".Alpha/storage.xml"), "<p>One.</p>");
-    assert_eq!(h.read(".Beta/storage.xml"), "<p>Two.</p>");
+    assert_eq!(h.read(".Alpha/storage.xml"), "<p>One.</p>\n");
+    assert_eq!(h.read(".Beta/storage.xml"), "<p>Two.</p>\n");
 }
 
 /// A stale or hand-edited copy is corrected, and an already-correct one is left
@@ -837,7 +856,7 @@ async fn the_markup_copy_is_repaired_but_not_needlessly_rewritten() {
     h.pull().await;
     assert_eq!(
         h.read(".Notes/storage.xml"),
-        "<p>Body.</p>",
+        "<p>Body.</p>\n",
         "the copy mirrors the server, so a hand edit is corrected"
     );
 

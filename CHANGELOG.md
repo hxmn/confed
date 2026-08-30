@@ -20,6 +20,25 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-30
+
+### Changed
+
+- Confluence markup is now laid out across indented lines instead of the single
+  line the API returns — both in each page's `.<page>/storage.xml` sidecar and
+  inside ```` ```confluence ```` fences in the Markdown, where it is meant to be
+  edited. A newline is only ever added between two block-level elements inside a
+  container that lays its children out as blocks (`ac:structured-macro`,
+  `ac:rich-text-body`, `ac:layout*`, `ac:task*`, tables, lists, `div`,
+  `blockquote`). A paragraph, a heading, an `ac:link`, an `ac:parameter`, a table
+  cell holding inline markup, a CDATA body: all keep their exact bytes, because a
+  newline between two inline elements would become a rendered space. A fence you
+  do not edit still goes back to Confluence byte-for-byte, because push copies
+  the original storage for unchanged blocks; one you edit goes up as the fence
+  reads.
+- The converter version bumped to 4, so the next `pull` re-renders pages already
+  in a workspace rather than waiting for each to change on the server.
+
 ## [0.1.0] - 2026-08-30
 
 First release. Both API clients, the converter, the sync engine, the command set
@@ -78,5 +97,6 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/hxmn/confed/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hxmn/confed/releases/tag/v0.1.0

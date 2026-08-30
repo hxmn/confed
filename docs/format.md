@@ -185,7 +185,12 @@ alerts. The full mapping in both directions is tabulated in
 ## Preserved `confluence` blocks
 
 Anything the converter cannot express in Markdown without losing information is wrapped in
-a fenced block and kept byte-for-byte:
+a fenced block. Confluence stores a macro as one long line; confed lays it out across lines
+so it can be read and edited, and that layout is the *only* difference from what the server
+holds — a newline goes between two block-level elements inside a container that lays its
+children out as blocks, and nowhere else. Never inside a paragraph, an `ac:link`, an
+`ac:parameter`, a CDATA body, or a table cell holding inline markup, where the newline
+would be a rendered space:
 
 ````markdown
 ```confluence
@@ -202,6 +207,10 @@ alignment attributes, an emoticon with no Unicode mapping, tables with `colspan`
 or block content in a cell, and top-level XML comments. The taint propagates upward: a
 paragraph, list item or table cell containing one of those turns the whole top-level block
 into a fence, because half a paragraph cannot be preserved.
+
+A fence you do not touch goes back to Confluence as the exact bytes it came down as: push
+copies the original storage for every unchanged block, so the layout never reaches the
+server. A fence you *do* edit goes up as the fence reads, indentation and all.
 
 You may edit inside a fence if you know the storage format, and you may delete a whole
 fence to delete the element. Two rules:
@@ -236,8 +245,9 @@ duplicate. `confed attach` is the convenient front end for both.
 
 ## The Confluence markup copy
 
-Every page keeps `storage.xml` in its sidecar: the body exactly as Confluence stores it,
-byte for byte, refreshed by `pull` and again by `push`. `pull` writes it for every page in
+Every page keeps `storage.xml` in its sidecar: the body as Confluence stores it, laid out
+across indented lines rather than left as the single line the API returns, refreshed by
+`pull` and again by `push`. `pull` writes it for every page in
 scope, including ones it had no other reason to touch, so a workspace synced by an older
 confed is filled in by the next pull and a deleted copy comes back. A copy that is already
 correct is left alone rather than rewritten. It is what the Markdown was
@@ -362,8 +372,9 @@ checklist<!--/c 77120--> before Friday.
 Two guarantees bound all of this, and both are enforced by tests rather than by
 convention:
 
-1. **Nothing is lost.** Anything unmodellable is preserved byte-for-byte in a
-   ` ```confluence ` fence.
+1. **Nothing is lost.** Anything unmodellable is preserved in a ` ```confluence ` fence,
+   which holds the source subtree with only ignorable whitespace laid out between its
+   block-level elements.
 2. **Only edited blocks are regenerated.** Push diffs your Markdown against the base at
    top-level-block granularity and copies the *original storage bytes* for every block
    whose Markdown is unchanged.

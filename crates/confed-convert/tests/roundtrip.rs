@@ -3,12 +3,16 @@
 mod corpus;
 
 use confed_convert::blockmap::{slice_lines, BlockKind};
-use confed_convert::{markdown_to_storage, storage_to_markdown, ConvertError, ConvertOptions};
+use confed_convert::{
+    markdown_to_storage, pretty, storage_to_markdown, ConvertError, ConvertOptions,
+};
 
-/// `confluence` fences go back up exactly as they came down. This is the
-/// property that lets confed be trusted with macros it does not understand.
+/// `confluence` fences go back up exactly as they came down: byte for byte
+/// against the fence, and against the source subtree once the whitespace the
+/// printer laid out is taken back off. This is the property that lets confed be
+/// trusted with macros it does not understand.
 #[test]
-fn preserved_fences_survive_markdown_to_storage_byte_for_byte() {
+fn preserved_fences_survive_markdown_to_storage() {
     let mut checked = 0usize;
     for f in corpus::load() {
         let c = storage_to_markdown(&f.storage, &corpus::options()).unwrap();
@@ -19,9 +23,11 @@ fn preserved_fences_survive_markdown_to_storage_byte_for_byte() {
             let md = c.block_map.block_markdown(i, &c.markdown).unwrap();
             let out = markdown_to_storage(&md, &corpus::options())
                 .unwrap_or_else(|e| panic!("{} block {i}: {e}", f.name));
+            let raw = &f.storage[b.storage_span.0..b.storage_span.1];
+            assert_eq!(out, pretty::format(raw), "{}: preserved block {i} was rewritten", f.name);
             assert_eq!(
-                out,
-                &f.storage[b.storage_span.0..b.storage_span.1],
+                pretty::minify(&out),
+                pretty::minify(raw),
                 "{}: preserved block {i} did not survive",
                 f.name
             );

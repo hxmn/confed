@@ -5,9 +5,9 @@ Tracking issue:
 
 ```confluence
 <ac:structured-macro ac:name="jira" ac:schema-version="1" ac:macro-id="7f1a2b3c">
-<ac:parameter ac:name="server">Jira</ac:parameter>
-<ac:parameter ac:name="serverId">1111-2222</ac:parameter>
-<ac:parameter ac:name="key">PROJ-142</ac:parameter>
+  <ac:parameter ac:name="server">Jira</ac:parameter>
+  <ac:parameter ac:name="serverId">1111-2222</ac:parameter>
+  <ac:parameter ac:name="key">PROJ-142</ac:parameter>
 </ac:structured-macro>
 ```
 
@@ -15,8 +15,8 @@ Diagram:
 
 ```confluence
 <ac:structured-macro ac:name="drawio" ac:schema-version="1" ac:macro-id="dd01">
-<ac:parameter ac:name="diagramName">flow</ac:parameter>
-<ac:parameter ac:name="revision">7</ac:parameter>
+  <ac:parameter ac:name="diagramName">flow</ac:parameter>
+  <ac:parameter ac:name="revision">7</ac:parameter>
 </ac:structured-macro>
 ```
 

@@ -696,11 +696,16 @@ impl Renderer<'_> {
 // ---------------------------------------------------------------------------
 
 /// Wrap raw storage bytes in a fence that their own content cannot close early.
-/// The body is byte-identical to the source subtree — that is the whole point
-/// of a preserved block.
+///
+/// The body is the source subtree, laid out across lines by [`crate::pretty`]:
+/// somebody is expected to read and edit this, and a macro Confluence shipped as
+/// one 4000-byte line is not editable. Only whitespace between block-level
+/// siblings moves, so the fence still says exactly what the source said — and on
+/// push it goes back up exactly as the fence holds it.
 pub fn preserved_fence(raw: &str) -> String {
-    let fence = "`".repeat(fence_len(raw));
-    format!("{fence}confluence\n{raw}\n{fence}")
+    let body = crate::pretty::format(raw);
+    let fence = "`".repeat(fence_len(&body));
+    format!("{fence}confluence\n{body}\n{fence}")
 }
 
 fn fence_len(body: &str) -> usize {
@@ -1020,13 +1025,29 @@ mod tests {
     #[test]
     fn colspan_table_is_preserved_verbatim() {
         let src = r#"<table><tbody><tr><td colspan="2">wide</td></tr></tbody></table>"#;
-        assert_eq!(md(src), format!("```confluence\n{src}\n```\n"));
+        assert_eq!(
+            md(src),
+            concat!(
+                "```confluence\n",
+                "<table>\n  <tbody>\n    <tr>\n      <td colspan=\"2\">wide</td>\n    </tr>\n  </tbody>\n</table>\n",
+                "```\n"
+            )
+        );
     }
 
     #[test]
     fn unknown_macro_is_preserved_verbatim() {
         let src = r#"<ac:structured-macro ac:name="jira" ac:macro-id="7f1a"><ac:parameter ac:name="key">PROJ-142</ac:parameter></ac:structured-macro>"#;
-        assert_eq!(md(src), format!("```confluence\n{src}\n```\n"));
+        assert_eq!(
+            md(src),
+            concat!(
+                "```confluence\n",
+                "<ac:structured-macro ac:name=\"jira\" ac:macro-id=\"7f1a\">\n",
+                "  <ac:parameter ac:name=\"key\">PROJ-142</ac:parameter>\n",
+                "</ac:structured-macro>\n",
+                "```\n"
+            )
+        );
     }
 
     #[test]

@@ -3,7 +3,9 @@
 //! Two guarantees shape everything here:
 //!
 //! 1. **Nothing is lost.** Elements the converter does not model are preserved
-//!    verbatim inside ```` ```confluence ```` fences and re-emitted byte-identically.
+//!    inside ```` ```confluence ```` fences and re-emitted exactly as the fence
+//!    holds them. The fence body is the source subtree laid out across lines by
+//!    [`pretty`], which only moves whitespace no renderer can see.
 //! 2. **Only edited blocks are regenerated.** [`markdown_to_storage_patched`] copies
 //!    the original storage bytes for every top-level block the user did not touch,
 //!    so lossiness is confined to blocks that actually changed.
@@ -12,7 +14,7 @@
 /// converted Markdown out of date. It feeds the render fingerprint confed keeps
 /// per page, so an improvement reaches a workspace on the next pull without
 /// waiting for each page to change on the server.
-pub const CONVERTER_VERSION: u32 = 3;
+pub const CONVERTER_VERSION: u32 = 4;
 
 pub mod blockmap;
 pub mod dom;
@@ -20,6 +22,7 @@ pub mod error;
 pub mod macros;
 pub mod marks;
 pub mod mdblock;
+pub mod pretty;
 pub mod storage_parse;
 pub mod to_markdown;
 pub mod to_storage;

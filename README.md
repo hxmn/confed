@@ -24,8 +24,9 @@ confed push -m "Clarify the first-week checklist"
 macros, which does not map cleanly onto Markdown. Rather than regenerating the
 whole document on every push, confed keeps a map from each storage block to the
 Markdown lines it produced, and re-emits the original bytes for every block you
-did not touch. Macros it cannot model are preserved verbatim inside
-```` ```confluence ```` fences and round-trip byte for byte.
+did not touch. Macros it cannot model are preserved inside
+```` ```confluence ```` fences — indented so you can actually read them, and
+round-tripping byte for byte when you leave them alone.
 
 **Conflicts work like git.** confed keeps three snapshots per page — the base it
 last synced, your working file, and what the server has now — so a divergence

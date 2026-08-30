@@ -113,13 +113,14 @@ confed:                    # TOOL-MANAGED — DO NOT EDIT ANY OF THIS
 
 - Write normal Markdown (CommonMark + GFM tables, task lists, GitHub alerts).
 - Fenced ```` ```confluence ```` blocks contain raw Confluence storage XML for macros
-  confed does not model. They are re-uploaded byte-for-byte. Edit them only if you know
+  confed does not model, indented for reading. One you do not touch is re-uploaded
+  byte-for-byte; one you edit is uploaded as the fence reads. Edit them only if you know
   the storage format; deleting the whole block deletes the macro. Never touch
   `ac:macro-id`.
 - Attachments are referenced relative to the sidecar: `![alt](.Onboarding/diagram.png)`.
-- `.<page>/storage.xml` is the body as Confluence stores it, refreshed on every sync.
-  Read it to see what a conversion produced; editing it does nothing, because pushes are
-  built from the Markdown.
+- `.<page>/storage.xml` is the body as Confluence stores it, indented, refreshed on every
+  sync. Read it to see what a conversion produced; editing it does nothing, because pushes
+  are built from the Markdown.
 - Only blocks you actually change are regenerated on push, so untouched content is
   never reformatted.
 
