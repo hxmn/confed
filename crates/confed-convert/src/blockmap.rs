@@ -125,6 +125,11 @@ pub fn slice_lines(text: &str, start: usize, end: usize) -> String {
 
 pub fn hash_text(text: &str) -> String {
     let mut hasher = Sha256::new();
+    // Inline comment marks are a layer over the content, never content: a
+    // block whose only difference is a mark must hash the same, or an untouched
+    // paragraph would be regenerated because somebody commented on it.
+    let text =
+        if text.contains("<!--") { crate::marks::strip(text).body } else { text.to_string() };
     // Normalize trailing whitespace so cosmetic edits do not look like content
     // changes and force a needless block regeneration.
     hasher.update(text.trim_end().as_bytes());
@@ -174,6 +179,12 @@ mod tests {
         assert_eq!(slice_lines(md, 0, 1), "a\n");
         assert_eq!(slice_lines(md, 1, 3), "b\nc\n");
         assert_eq!(slice_lines(md, 2, 9), "c\n");
+    }
+
+    #[test]
+    fn hashing_is_blind_to_inline_comment_marks() {
+        assert_eq!(hash_text("a <!--c 1 note-->b<!--/c 1--> c"), hash_text("a b c"));
+        assert_ne!(hash_text("a <!-- other -->b c"), hash_text("a b c"));
     }
 
     #[test]

@@ -77,6 +77,11 @@ Never lossy: blocks the user didn't touch, and preserved `confluence` fences.
 
 **Decision: sidecar with anchor text + context (option 2), not invisible in-body markers.**
 
+> **Revised by [design 06](06-inline-comment-marks.md):** open inline threads are now
+> also shown in the body as a stripped *mark layer* (`<!--c ID …-->…<!--/c ID-->`),
+> placed from the storage marker rather than by text search. The sidecar, the anchor
+> record and the re-anchoring rules below all stay; re-anchoring becomes the fallback.
+
 Why not markers (`<!-- confed:inline … -->` wrapping the span): (a) they corrupt the
 block-level diff — every marker makes an untouched paragraph look modified, defeating §3;
 (b) editors, formatters, and LLM agents mangle or delete invisible HTML comments;

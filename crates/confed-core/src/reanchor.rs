@@ -104,6 +104,19 @@ pub fn reanchor(anchor: &InlineAnchor, body: &str) -> Reanchored {
     orphan(anchor)
 }
 
+/// The anchor for the span `body[start..end]`, with fresh context — what a
+/// mark found in the file says about where its comment sits.
+pub fn anchor_at(body: &str, start: usize, end: usize, marker_ref: Option<String>) -> InlineAnchor {
+    InlineAnchor {
+        text: body[start..end].to_string(),
+        context_before: take_before(body, start),
+        context_after: take_after(body, end),
+        marker_ref,
+        orphaned: false,
+        ..Default::default()
+    }
+}
+
 /// Re-anchor a batch, reporting how many ended up orphaned.
 pub fn reanchor_all(anchors: &[InlineAnchor], body: &str) -> Vec<Reanchored> {
     anchors.iter().map(|a| reanchor(a, body)).collect()
@@ -118,6 +131,7 @@ fn found(anchor: &InlineAnchor, body: &str, offset: usize, kind: MatchKind) -> R
             context_after: take_after(body, end),
             marker_ref: anchor.marker_ref.clone(),
             orphaned: false,
+            ..Default::default()
         },
         kind,
         offset: Some(offset),
@@ -261,6 +275,7 @@ mod tests {
             context_after: after.into(),
             marker_ref: Some("m1".into()),
             orphaned: false,
+            ..Default::default()
         }
     }
 

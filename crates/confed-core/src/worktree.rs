@@ -126,6 +126,8 @@ pub struct PageStatus {
     pub moved_from: Option<String>,
     /// Hand edits to the tool-managed `confed:` block.
     pub tampering: Vec<Tampering>,
+    /// Inline comments drafted in the body as `new` marks, waiting for a push.
+    pub comment_drafts: usize,
 }
 
 impl PageStatus {
@@ -258,6 +260,7 @@ pub fn compute_status(
                     field_changes: FieldChanges::default(),
                     moved_from: None,
                     tampering: Vec::new(),
+                    comment_drafts: local.file.drafts().count(),
                 },
             );
             continue;
@@ -282,6 +285,7 @@ pub fn compute_status(
                     field_changes: FieldChanges::default(),
                     moved_from: None,
                     tampering: Vec::new(),
+                    comment_drafts: local.file.drafts().count(),
                 },
             );
             continue;
@@ -354,6 +358,7 @@ pub fn compute_status(
                 field_changes,
                 moved_from,
                 tampering,
+                comment_drafts: local.file.drafts().count(),
             },
         );
     }
@@ -383,6 +388,7 @@ pub fn compute_status(
                 field_changes: FieldChanges::default(),
                 moved_from: None,
                 tampering: Vec::new(),
+                comment_drafts: 0,
             },
         );
     }
@@ -407,6 +413,7 @@ pub fn compute_status(
                 field_changes: FieldChanges::default(),
                 moved_from: None,
                 tampering: Vec::new(),
+                comment_drafts: 0,
             },
         );
     }

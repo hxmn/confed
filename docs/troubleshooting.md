@@ -151,6 +151,15 @@ than guessed. The message says which.
 | `this directory is already bound to space DOCS` | `confed init` with a different space. | `--force` if you meant it. |
 | `unresolved` from `confed resolve` | Conflict markers remain in the file. | Edit the listed line numbers, or use `--ours` / `--theirs`. |
 
+### A broken inline comment draft
+
+`push` exits 7 with the file and line when a `<!--c new …-->` mark is never closed, has
+no comment text, wraps no text, or sits inside a code block. Nothing has been uploaded.
+Fix the mark — `<!--c new Your comment-->the text<!--/c new-->`, one line, no `--` — or
+move the draft to the sidecar as `<!-- confed:new anchor="the text" -->`. A malformed
+mark for an *existing* comment (a numeric id) is never an error: the next pull repairs
+it.
+
 ## Exit 8 — partial success
 
 **Symptom.** `confed fetch` or `confed push` finishes, reports some successes, and exits 8.

@@ -233,6 +233,9 @@ pub fn finish_resolution(
 
     ws.state().upsert_page(&updated)?;
     ws.state().log("resolve", Some(&record.page_id), None, Some(updated.version), "ok", None)?;
+    // A conflicted file carried no inline comment marks; now that the hunks
+    // are gone they can be placed again.
+    confed_core::sync::sync_marks(ws, &record.page_id, &record.local_path)?;
     Ok(Vec::new())
 }
 

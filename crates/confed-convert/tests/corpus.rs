@@ -60,5 +60,6 @@ pub fn options() -> ConvertOptions {
         base_url: "https://wiki.example.test".to_string(),
         space_key: "TEAM".to_string(),
         users,
+        inline_marks: Default::default(),
     }
 }

@@ -24,9 +24,11 @@ off as you go — this file + phase files are the cross-session progress tracker
 | 07 Comments | [07-comments.md](07-comments.md) | ✅ done | sidecar + `comment` commands, inline read/re-anchor, Cloud inline create |
 | 08 Agent docs | [08-agent-docs.md](08-agent-docs.md) | ✅ done | generated CLAUDE.md/AGENTS.md, JSON schemas, `docs/` user docs |
 | 09 Testing & release | [09-testing-release.md](09-testing-release.md) | partial | CI matrix, e2e suite, packaged v0.1.0 |
+| 10 Inline marks | [10-inline-marks.md](10-inline-marks.md) | ✅ done (mkdocs/TUI highlighting pending) | inline threads shown in the page body as a stripped mark layer; `new` marks push as inline comments ([design 06](../design/06-inline-comment-marks.md)) |
 
 Ordering notes: 02 and 03 are parallelizable after 01. 07 and 08 are parallelizable
-after 05. Comment *snapshot fetching* lands in 04; all comment UX is 07.
+after 05. Comment *snapshot fetching* lands in 04; all comment UX is 07. 10 follows 07 and touches
+03's converter and 04's engine.
 
 ## Conventions for executing this plan
 

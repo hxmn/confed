@@ -18,6 +18,7 @@ pub mod blockmap;
 pub mod dom;
 pub mod error;
 pub mod macros;
+pub mod marks;
 pub mod mdblock;
 pub mod storage_parse;
 pub mod to_markdown;
@@ -25,6 +26,7 @@ pub mod to_storage;
 
 pub use blockmap::{BlockEntry, BlockKind, BlockMap};
 pub use error::{ConvertError, ConvertResult};
+pub use marks::{Mark, MarkId, MarkIssue, PlacedMark, Stripped};
 
 use std::collections::HashMap;
 
@@ -64,6 +66,27 @@ pub struct ConvertOptions {
     /// confed cannot resolve makes its block preserve verbatim rather than
     /// render a link to the wrong place.
     pub users: HashMap<String, UserLink>,
+    /// Open inline comments to show in the body as marks (design 06), keyed by
+    /// Confluence's marker ref — the `ac:ref` of the `ac:inline-comment-marker`
+    /// element in storage. Empty means "render no marks".
+    pub inline_marks: HashMap<String, InlineMark>,
+}
+
+/// One inline comment as the converter needs to know it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InlineMark {
+    /// Comment id, written into the mark so readers can find the thread.
+    pub id: String,
+    /// One-line preview written into the opener; see [`marks::preview`].
+    pub preview: String,
+}
+
+impl ConvertOptions {
+    /// Comment id → marker ref, the inverse of [`ConvertOptions::inline_marks`],
+    /// for putting markers back into regenerated storage.
+    pub fn marker_ref_for(&self, comment_id: &str) -> Option<&str> {
+        self.inline_marks.iter().find(|(_, m)| m.id == comment_id).map(|(r, _)| r.as_str())
+    }
 }
 
 /// Result of rendering a storage body to Markdown.

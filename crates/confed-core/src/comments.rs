@@ -253,6 +253,7 @@ fn parse_marker(line: &str) -> Option<Marker> {
                 context_after: attrs.get("context-after").cloned().unwrap_or_default(),
                 marker_ref: attrs.get("marker-ref").cloned(),
                 orphaned: attrs.get("orphaned").map(|v| v == "true").unwrap_or(false),
+                ..Default::default()
             });
             Some(Marker::Comment(Box::new(SidecarComment {
                 id: attrs.get("id").cloned(),
@@ -382,6 +383,7 @@ mod tests {
                 context_after: " and then".into(),
                 marker_ref: Some("m1".into()),
                 orphaned: false,
+                ..Default::default()
             })
             .unwrap(),
         );

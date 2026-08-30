@@ -57,6 +57,10 @@ impl Harness {
         self.write(relative, &content);
     }
 
+    fn comment_drafts(&self, page_id: &str) -> usize {
+        worktree::scan(&self.ws).expect("scan").find(page_id).expect("status").comment_drafts
+    }
+
     fn status(&self, page_id: &str) -> PageState {
         worktree::scan(&self.ws)
             .expect("scan")
@@ -461,6 +465,9 @@ async fn inline_anchors_are_refreshed_when_the_body_changes() {
     );
     // The mock seeds an inline anchor on "first week checklist".
     h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    // This scenario is about the text-search fallback, which is what the body
+    // relies on when marks are switched off.
+    h.ws.state().set_meta(confed_core::sync::MARKS_MODE_KEY, "off").unwrap();
     h.pull().await;
 
     let stored_anchor = |h: &Harness| -> confed_api::InlineAnchor {
@@ -1292,4 +1299,269 @@ async fn the_base_re_renders_to_exactly_what_is_on_disk() {
         assert!(source.contains("[@Alice Ng]"), "{flavor}: the mention resolved: {source}");
         assert!(!source.contains("```confluence"), "{flavor}: nothing fell back to raw markup");
     }
+}
+
+// ------------------------------------------------------------ marks ----
+
+const COMMENTED: &str = "<p>Read this during your <ac:inline-comment-marker ac:ref=\"marker-1\">first week checklist</ac:inline-comment-marker> and then ask questions.</p>";
+
+// An open inline thread is shown at its span, and never counts as an edit.
+both_flavors!(inline_comments_are_shown_as_marks_in_the_body, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    let id =
+        h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+
+    let file = h.read("Onboarding.md");
+    let expected = format!(
+        "Read this during your <!--c {id} Alice Ng: Link the template?-->first week checklist<!--/c {id}--> and then ask questions."
+    );
+    assert!(file.contains(&expected), "{file}");
+    assert_eq!(h.status("1001"), PageState::Unchanged, "a mark is not a local change");
+    assert_eq!(h.comment_drafts("1001"), 0);
+
+    let again = h.pull().await;
+    assert!(again.is_empty(), "{again:?}");
+    assert_eq!(h.read("Onboarding.md"), file, "a second pull is byte-for-byte stable");
+
+    // Resolved on the server: the mark leaves the body on the next pull.
+    h.mock.resolve_seeded(&id);
+    h.mock.remote_edit("1001", COMMENTED);
+    h.pull().await;
+    let file = h.read("Onboarding.md");
+    assert!(!file.contains("<!--c"), "resolved threads are not shown: {file}");
+    assert!(file.contains("first week checklist"), "the text itself stays");
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+});
+
+// `ids` mode drops the preview; `off` restores the old behaviour.
+both_flavors!(marks_mode_controls_what_is_written, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    let id =
+        h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+
+    h.ws.state().set_meta(confed_core::sync::MARKS_MODE_KEY, "ids").unwrap();
+    h.pull().await;
+    assert!(h
+        .read("Onboarding.md")
+        .contains(&format!("<!--c {id}-->first week checklist<!--/c {id}-->")));
+
+    h.ws.state().set_meta(confed_core::sync::MARKS_MODE_KEY, "off").unwrap();
+    h.pull().await;
+    assert!(!h.read("Onboarding.md").contains("<!--c"), "off means no marks at all");
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+});
+
+/// A `new` mark becomes an inline comment on push, at the right occurrence of
+/// repeated text, and the base learns about the marker the server added.
+#[tokio::test]
+async fn a_new_mark_pushes_as_an_inline_comment() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page(
+        "1001",
+        "Teams",
+        None,
+        "<p>The platform team owns it.</p><p>The platform team is small.</p>",
+    );
+    h.pull().await;
+
+    // Comment on the *second* "platform team".
+    let file = h.read("Teams.md").replace(
+        "The platform team is small.",
+        "The <!--c new Still the right team?-->platform team<!--/c new--> is small.",
+    );
+    h.write("Teams.md", &file);
+    assert_eq!(h.status("1001"), PageState::Unchanged, "a draft is comment work, not page work");
+    assert_eq!(h.comment_drafts("1001"), 1);
+
+    let plan = h
+        .engine
+        .plan_push(&h.ws, &PushOptions { with_comments: true, ..Default::default() })
+        .unwrap();
+    assert_eq!(plan.comment_ops.len(), 1, "{plan:?}");
+    assert!(plan.comment_ops[0].contains("platform team"));
+
+    let outcome = h.push().await;
+    assert_eq!(outcome.comments_added.len(), 1);
+    let id = &outcome.comments_added[0];
+
+    let file = h.read("Teams.md");
+    assert!(!file.contains("<!--c new"), "the draft was rewritten: {file}");
+    assert!(file.contains(&format!("<!--c {id} ")), "…with its id: {file}");
+    assert!(file.contains(&format!("platform team<!--/c {id}--> is small")), "{file}");
+    assert_eq!(h.comment_drafts("1001"), 0);
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+
+    let comments = h.engine.client().list_comments(&confed_api::PageId::new("1001")).await.unwrap();
+    let anchor = comments[0].anchor.as_ref().expect("inline anchor");
+    assert_eq!(anchor.text, "platform team");
+    assert_eq!(anchor.match_index, Some(1), "the second occurrence was meant");
+    assert_eq!(anchor.match_count, Some(2));
+
+    // The server put a marker into the body without bumping the version, and
+    // the base followed, so a later unrelated push does not wipe it out.
+    let marker = format!("<ac:inline-comment-marker ac:ref=\"marker-{id}\">platform team</ac:inline-comment-marker> is small");
+    assert!(h.mock.page_body("1001").unwrap().contains(&marker));
+    let base = h.ws.state().get_page("1001").unwrap().unwrap();
+    assert!(
+        base.storage_body.contains(&marker),
+        "the base carries the marker: {}",
+        base.storage_body
+    );
+    assert!(h.read(".Teams/storage.xml").contains(&marker));
+
+    h.edit_body("Teams.md", "\nAn unrelated paragraph.\n");
+    h.push().await;
+    let body = h.mock.page_body("1001").unwrap();
+    assert!(body.contains(&marker), "the marker survived an unrelated push: {body}");
+    assert!(body.contains("An unrelated paragraph"));
+
+    // Pushing again posts nothing twice.
+    let again = h.push().await;
+    assert!(again.comments_added.is_empty());
+}
+
+// Editing the paragraph a thread sits in keeps the thread attached.
+both_flavors!(an_edited_commented_paragraph_keeps_its_marker, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    let id =
+        h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+
+    let file = h.read("Onboarding.md").replace("ask questions", "ask many questions");
+    h.write("Onboarding.md", &file);
+    assert_eq!(h.status("1001"), PageState::Modified);
+    h.push().await;
+
+    let body = h.mock.page_body("1001").unwrap();
+    assert!(body.contains("ask many questions"), "{body}");
+    assert!(
+        body.contains("<ac:inline-comment-marker ac:ref=\"marker-1\">first week checklist</ac:inline-comment-marker>"),
+        "the regenerated paragraph still carries the marker: {body}"
+    );
+    let file = h.read("Onboarding.md");
+    assert!(file.contains(&format!("<!--c {id} ")), "the mark stays after push: {file}");
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+});
+
+// A mark an editor stripped comes back on the next pull; the user's edits do not
+// get touched in the process.
+both_flavors!(a_deleted_mark_is_re_placed_without_touching_edits, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    let id =
+        h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+
+    let raw = h.read("Onboarding.md");
+    let stripped = confed_convert::marks::strip(&raw).body + "\nA local addition.\n";
+    h.write("Onboarding.md", &stripped);
+    assert!(!h.read("Onboarding.md").contains("<!--c"));
+
+    h.engine
+        .pull(&mut h.ws, &PullOptions { no_fetch: true, ..PullOptions::everything() })
+        .await
+        .expect("pull");
+    let file = h.read("Onboarding.md");
+    assert!(file.contains(&format!("<!--c {id} ")), "re-placed by text search: {file}");
+    assert!(file.contains("A local addition."), "edits kept: {file}");
+    assert_eq!(h.status("1001"), PageState::Modified);
+});
+
+/// Data Center shows marks but cannot create inline comments.
+#[tokio::test]
+async fn data_center_shows_marks_but_refuses_drafts() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+    assert!(h.read("Onboarding.md").contains("<!--c "), "read side works on DC");
+
+    let file = h
+        .read("Onboarding.md")
+        .replace("ask questions", "ask <!--c new Who?-->questions<!--/c new-->");
+    h.write("Onboarding.md", &file);
+    let err = h
+        .engine
+        .push(&mut h.ws, &PushOptions { with_comments: true, ..Default::default() })
+        .await
+        .expect_err("DC has no inline create");
+    assert!(matches!(err, confed_core::error::ConfedError::Unsupported(_)), "{err}");
+}
+
+/// A broken draft stops the push with its line, before anything is uploaded.
+#[tokio::test]
+async fn a_malformed_draft_is_refused_with_its_line() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Teams", None, "<p>One.</p><p>Two.</p>");
+    h.pull().await;
+    h.write("Teams.md", &h.read("Teams.md").replace("Two.", "<!--c new-->Two.<!--/c new-->"));
+
+    let err = h
+        .engine
+        .push(&mut h.ws, &PushOptions { with_comments: true, ..Default::default() })
+        .await
+        .expect_err("an empty draft body");
+    assert_eq!(err.exit_code(), confed_core::error::ExitCode::State, "{err}");
+    assert!(err.to_string().contains("no comment text"), "{err}");
+
+    h.write(
+        "Teams.md",
+        &h.read("Teams.md").replace("<!--c new-->Two.<!--/c new-->", "<!--c new Why?-->Two."),
+    );
+    let err = h
+        .engine
+        .push(&mut h.ws, &PushOptions { with_comments: true, ..Default::default() })
+        .await
+        .expect_err("an unterminated draft");
+    assert!(err.to_string().contains("never closed"), "{err}");
+    assert!(h.mock.page_body("1001").unwrap().contains("<p>Two.</p>"), "nothing was uploaded");
+}
+
+/// A conflicted file carries no marks for existing threads — but keeps the
+/// user's drafts — and gets its marks back once the conflict is gone.
+#[tokio::test]
+async fn a_conflicted_page_keeps_drafts_but_no_marks() {
+    let mut h = Harness::new(Flavor::Cloud);
+    let body = format!("<p>Shared.</p>{COMMENTED}");
+    h.mock.seed_page("1001", "Doc", None, &body);
+    let id =
+        h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+
+    let file = h
+        .read("Doc.md")
+        .replace("Shared.", "Ours.")
+        .replace("ask questions", "ask <!--c new Who?-->questions<!--/c new-->");
+    h.write("Doc.md", &file);
+    h.mock.remote_edit("1001", &body.replace("Shared.", "Theirs."));
+    h.pull().await;
+    assert_eq!(h.status("1001"), PageState::Conflicted);
+
+    let file = h.read("Doc.md");
+    assert!(!file.contains(&format!("<!--c {id}")), "no marks in a conflicted file: {file}");
+    assert!(file.contains("<!--c new Who?-->"), "the draft is kept: {file}");
+
+    // Resolve by hand: the next pull places the marks again.
+    let resolved = confed_core::merge::has_conflict_markers(&file);
+    assert!(resolved, "sanity: the file had conflict hunks");
+    let fixed: String = file
+        .lines()
+        .filter(|l| {
+            !l.starts_with("<<<<<<<")
+                && !l.starts_with("|||||||")
+                && !l.starts_with("=======")
+                && !l.starts_with(">>>>>>>")
+        })
+        .filter(|l| *l != "Shared." && *l != "Theirs.")
+        .map(|l| format!("{l}\n"))
+        .collect();
+    h.write("Doc.md", &fixed);
+    h.ws.state().set_sync_state("1001", SyncState::Clean).unwrap();
+    h.engine
+        .pull(&mut h.ws, &PullOptions { no_fetch: true, ..PullOptions::everything() })
+        .await
+        .expect("pull");
+    let file = h.read("Doc.md");
+    assert!(file.contains(&format!("<!--c {id} ")), "marks are back: {file}");
+    assert!(file.contains("<!--c new Who?-->"), "{file}");
 }

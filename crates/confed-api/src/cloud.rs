@@ -454,8 +454,8 @@ impl ConfluenceClient for CloudClient {
             "body": storage_body(body),
             "inlineCommentProperties": {
                 "textSelection": anchor.text,
-                "textSelectionMatchCount": 1,
-                "textSelectionMatchIndex": 0,
+                "textSelectionMatchCount": anchor.match_count.unwrap_or(1),
+                "textSelectionMatchIndex": anchor.match_index.unwrap_or(0),
             },
         });
         let created: v2::Comment = self.http.post_json("api/v2/inline-comments", &payload).await?;

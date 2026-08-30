@@ -18,8 +18,10 @@ use crate::blockmap::{hash_text, slice_lines, BlockMap};
 use crate::dom;
 use crate::error::{ConvertError, ConvertResult};
 use crate::macros;
+use crate::marks::{self, MarkId, Marker};
 use crate::mdblock;
 use crate::ConvertOptions;
+use std::cell::RefCell;
 
 /// The fence language that marks a block of verbatim storage format.
 pub const PRESERVED_LANG: &str = "confluence";
@@ -34,9 +36,13 @@ pub fn generate(markdown: &str, opts: &ConvertOptions) -> ConvertResult<String> 
 /// `line_offset` shifts reported line numbers so errors inside a single patched
 /// block still point at the right line of the whole document.
 fn generate_at(markdown: &str, opts: &ConvertOptions, line_offset: usize) -> ConvertResult<String> {
+    // A user may have written an inline comment mark at the start of a line,
+    // where CommonMark would read it as an HTML block; the same repair the
+    // renderer applies keeps it a paragraph.
+    let markdown = marks::normalize_line_starts(markdown);
     let arena = Arena::new();
-    let root = mdblock::parse(&arena, markdown);
-    let g = Generator { opts, line_offset };
+    let root = mdblock::parse(&arena, &markdown);
+    let g = Generator { opts, line_offset, open_marks: RefCell::new(Vec::new()) };
     let mut out = String::new();
     g.blocks(root, &mut out)?;
     Ok(out)
@@ -45,7 +51,18 @@ fn generate_at(markdown: &str, opts: &ConvertOptions, line_offset: usize) -> Con
 struct Generator<'a> {
     opts: &'a ConvertOptions,
     line_offset: usize,
+    /// Marker refs of the inline comment marks currently open, in opening
+    /// order. Storage markers must nest, so an open mark is closed before any
+    /// element boundary and reopened after it — the same fragmenting Confluence
+    /// does itself.
+    open_marks: RefCell<Vec<String>>,
 }
+
+fn marker_open(r: &str) -> String {
+    format!(r#"<ac:inline-comment-marker ac:ref="{}">"#, dom::escape_attr(r))
+}
+
+const MARKER_CLOSE: &str = "</ac:inline-comment-marker>";
 
 impl<'a> Generator<'a> {
     fn blocks(&self, parent: &'a AstNode<'a>, out: &mut String) -> ConvertResult<()> {
@@ -62,13 +79,13 @@ impl<'a> Generator<'a> {
             NodeValue::Document => self.blocks(node, out)?,
             NodeValue::Paragraph => {
                 out.push_str("<p>");
-                self.inlines(node, out)?;
+                self.inline_run(node, out)?;
                 out.push_str("</p>");
             }
             NodeValue::Heading(h) => {
                 let level = h.level.clamp(1, 6);
                 out.push_str(&format!("<h{level}>"));
-                self.inlines(node, out)?;
+                self.inline_run(node, out)?;
                 out.push_str(&format!("</h{level}>"));
             }
             NodeValue::ThematicBreak => out.push_str("<hr />"),
@@ -135,7 +152,7 @@ impl<'a> Generator<'a> {
             // dropping it.
             _ => {
                 out.push_str("<p>");
-                self.inlines(node, out)?;
+                self.inline_run(node, out)?;
                 out.push_str("</p>");
             }
         }
@@ -156,13 +173,13 @@ impl<'a> Generator<'a> {
         let single_para =
             children.len() == 1 && matches!(children[0].data.borrow().value, NodeValue::Paragraph);
         if single_para {
-            self.inlines(children[0], out)?;
+            self.inline_run(children[0], out)?;
             return Ok(());
         }
         for (i, child) in children.iter().enumerate() {
             let is_para = matches!(child.data.borrow().value, NodeValue::Paragraph);
             if is_para && i == 0 {
-                self.inlines(child, out)?;
+                self.inline_run(child, out)?;
             } else {
                 self.block(child, out)?;
             }
@@ -228,7 +245,7 @@ impl<'a> Generator<'a> {
             for cell in row.children() {
                 let tag = if header { "th" } else { "td" };
                 out.push_str(&format!("<{tag}><p>"));
-                self.inlines(cell, out)?;
+                self.inline_run(cell, out)?;
                 out.push_str(&format!("</p></{tag}>"));
             }
             out.push_str("</tr>");
@@ -238,6 +255,17 @@ impl<'a> Generator<'a> {
     }
 
     fn html_block(&self, literal: &str, out: &mut String) -> ConvertResult<()> {
+        // A line that is only inline comment marks (a closer left alone on a
+        // line) is layer, not content.
+        if literal.trim_start().starts_with("<!--")
+            && marks::parse_marker(first_comment(literal)).is_some()
+        {
+            let stripped = marks::strip(literal);
+            if !stripped.body.trim().is_empty() {
+                out.push_str(&generate_at(&stripped.body, self.opts, self.line_offset)?);
+            }
+            return Ok(());
+        }
         if literal.contains("confed:toc") {
             out.push_str(r#"<ac:structured-macro ac:name="toc" ac:schema-version="1" />"#);
             return Ok(());
@@ -278,6 +306,75 @@ impl<'a> Generator<'a> {
         Ok(())
     }
 
+    /// The inline content of one block. A mark still open at the end is closed
+    /// here: markers never cross a block boundary in storage.
+    fn inline_run(&self, parent: &'a AstNode<'a>, out: &mut String) -> ConvertResult<()> {
+        self.inlines(parent, out)?;
+        let open = std::mem::take(&mut *self.open_marks.borrow_mut());
+        for r in open.iter().rev() {
+            emit_marker_close(out, r);
+        }
+        Ok(())
+    }
+
+    /// Wrap `node`'s inline children in `open_tag`/`close_tag`, keeping every
+    /// open comment marker properly nested around the element.
+    fn wrapped(
+        &self,
+        node: &'a AstNode<'a>,
+        open_tag: &str,
+        close_tag: &str,
+        out: &mut String,
+    ) -> ConvertResult<()> {
+        let outer = self.open_marks.borrow().clone();
+        for r in outer.iter().rev() {
+            emit_marker_close(out, r);
+        }
+        out.push_str(open_tag);
+        for r in &outer {
+            out.push_str(&marker_open(r));
+        }
+        self.inlines(node, out)?;
+        let inner = self.open_marks.borrow().clone();
+        for r in inner.iter().rev() {
+            emit_marker_close(out, r);
+        }
+        out.push_str(close_tag);
+        for r in &inner {
+            out.push_str(&marker_open(r));
+        }
+        Ok(())
+    }
+
+    fn mark(&self, html: &str, out: &mut String) {
+        match marks::parse_marker(html.trim()) {
+            Some(Marker::Open { id: MarkId::Comment(id), .. }) => {
+                if let Some(r) = self.opts.marker_ref_for(&id) {
+                    out.push_str(&marker_open(r));
+                    self.open_marks.borrow_mut().push(r.to_string());
+                }
+            }
+            Some(Marker::Close { id: MarkId::Comment(id) }) => {
+                let Some(r) = self.opts.marker_ref_for(&id) else { return };
+                let mut open = self.open_marks.borrow_mut();
+                let Some(pos) = open.iter().rposition(|o| o == r) else { return };
+                // Close whatever opened after it, close it, reopen the rest.
+                let inner: Vec<String> = open.drain(pos + 1..).collect();
+                for i in inner.iter().rev() {
+                    emit_marker_close(out, i);
+                }
+                open.pop();
+                emit_marker_close(out, r);
+                for i in inner {
+                    out.push_str(&marker_open(&i));
+                    open.push(i);
+                }
+            }
+            // Drafts are created through the API, never written into storage.
+            Some(_) | None => {}
+        }
+    }
+
     fn inline(&self, node: &'a AstNode<'a>, out: &mut String) -> ConvertResult<()> {
         let data = node.data.borrow();
         match &data.value {
@@ -289,35 +386,42 @@ impl<'a> Generator<'a> {
                 out.push_str(&dom::escape_text(&c.literal));
                 out.push_str("</code>");
             }
+            // An inline comment mark becomes the marker Confluence attaches
+            // the thread to.
+            NodeValue::HtmlInline(h) if marks::parse_marker(h.trim()).is_some() => {
+                self.mark(h, out)
+            }
             // `<u>`, `<sub>`, `<sup>` come back through here; they are already
             // storage-legal XHTML.
             NodeValue::HtmlInline(h) => out.push_str(h),
-            NodeValue::Strong => {
-                out.push_str("<strong>");
-                self.inlines(node, out)?;
-                out.push_str("</strong>");
-            }
-            NodeValue::Emph => {
-                out.push_str("<em>");
-                self.inlines(node, out)?;
-                out.push_str("</em>");
-            }
-            NodeValue::Strikethrough => {
-                out.push_str("<del>");
-                self.inlines(node, out)?;
-                out.push_str("</del>");
-            }
+            NodeValue::Strong => self.wrapped(node, "<strong>", "</strong>", out)?,
+            NodeValue::Emph => self.wrapped(node, "<em>", "</em>", out)?,
+            NodeValue::Strikethrough => self.wrapped(node, "<del>", "</del>", out)?,
             NodeValue::Link(l) => {
-                let label = {
-                    let mut s = String::new();
-                    self.inlines(node, &mut s)?;
-                    s
-                };
+                let outer = self.open_marks.borrow().clone();
+                for r in outer.iter().rev() {
+                    emit_marker_close(out, r);
+                }
+                let mut label = String::new();
+                for r in &outer {
+                    label.push_str(&marker_open(r));
+                }
+                self.inlines(node, &mut label)?;
+                let inner = self.open_marks.borrow().clone();
+                for r in inner.iter().rev() {
+                    emit_marker_close(&mut label, r);
+                }
                 out.push_str(&self.link(&l.url, &label));
+                for r in &inner {
+                    out.push_str(&marker_open(r));
+                }
             }
             NodeValue::Image(l) => {
+                // Alt text is an attribute: marks in it have nowhere to go.
+                let saved = self.open_marks.borrow().clone();
                 let mut alt = String::new();
                 self.inlines(node, &mut alt)?;
+                *self.open_marks.borrow_mut() = saved;
                 out.push_str(&self.image(&l.url, &alt));
             }
             NodeValue::Escaped => self.inlines(node, out)?,
@@ -445,6 +549,8 @@ pub fn patch(
 ) -> ConvertResult<String> {
     check_map_matches(base_storage, base_map, base_markdown)?;
 
+    // Marks keep every line count, so the repair cannot move a block.
+    let new_markdown = &marks::normalize_line_starts(new_markdown);
     let new_ranges = mdblock::split_blocks(new_markdown);
     let base_hashes: Vec<String> = base_map.blocks.iter().map(|b| b.hash.clone()).collect();
     let new_texts: Vec<String> =
@@ -554,6 +660,26 @@ fn check_map_matches(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Close a marker — or, when it was opened and nothing came between, take
+/// the empty pair back out.
+fn emit_marker_close(out: &mut String, r: &str) {
+    let open = marker_open(r);
+    if out.ends_with(&open) {
+        out.truncate(out.len() - open.len());
+    } else {
+        out.push_str(MARKER_CLOSE);
+    }
+}
+
+/// The first HTML comment in `s`, delimiters included.
+fn first_comment(s: &str) -> &str {
+    let s = s.trim_start();
+    match s.find("-->") {
+        Some(end) => &s[..end + 3],
+        None => s,
+    }
+}
 
 /// CDATA cannot contain `]]>`; split the section around every occurrence.
 fn cdata(body: &str) -> String {
@@ -816,6 +942,97 @@ mod tests {
     #[test]
     fn thematic_break() {
         assert_eq!(gen("---\n"), "<hr />");
+    }
+}
+
+#[cfg(test)]
+mod inline_mark_tests {
+    use crate::{ConvertOptions, InlineMark};
+
+    fn opts() -> ConvertOptions {
+        let mut o = ConvertOptions::default();
+        for (r, id) in [("r7", "7"), ("r8", "8")] {
+            o.inline_marks.insert(r.into(), InlineMark { id: id.into(), preview: String::new() });
+        }
+        o
+    }
+
+    fn gen(md: &str) -> String {
+        crate::markdown_to_storage(md, &opts()).unwrap()
+    }
+
+    const M7: &str = r#"<ac:inline-comment-marker ac:ref="r7">"#;
+    const M8: &str = r#"<ac:inline-comment-marker ac:ref="r8">"#;
+    const E: &str = "</ac:inline-comment-marker>";
+
+    #[test]
+    fn a_mark_becomes_the_storage_marker() {
+        assert_eq!(gen("a <!--c 7 note-->b<!--/c 7--> c\n"), format!("<p>a {M7}b{E} c</p>"));
+    }
+
+    #[test]
+    fn a_mark_across_emphasis_is_fragmented_so_the_xml_nests() {
+        assert_eq!(
+            gen("a <!--c 7-->b **c<!--/c 7--> d** e\n"),
+            format!("<p>a {M7}b {E}<strong>{M7}c{E} d</strong> e</p>")
+        );
+        assert_eq!(
+            gen("**a <!--c 7-->b** c<!--/c 7--> d\n"),
+            format!("<p><strong>a {M7}b{E}</strong>{M7} c{E} d</p>")
+        );
+    }
+
+    #[test]
+    fn overlapping_marks_nest_by_fragmenting() {
+        assert_eq!(
+            gen("x <!--c 7-->a <!--c 8-->b<!--/c 7--> c<!--/c 8-->\n"),
+            format!("<p>x {M7}a {M8}b{E}{E}{M8} c{E}</p>")
+        );
+    }
+
+    #[test]
+    fn a_mark_inside_a_link_label_stays_inside_the_link() {
+        let out = gen("see [the <!--c 7-->docs<!--/c 7-->](https://x.test) now\n");
+        assert_eq!(out, format!(r#"<p>see <a href="https://x.test">the {M7}docs{E}</a> now</p>"#));
+    }
+
+    #[test]
+    fn drafts_and_unknown_ids_emit_nothing() {
+        assert_eq!(gen("a <!--c new ask-->b<!--/c new--> c\n"), "<p>a b c</p>");
+        assert_eq!(gen("a <!--c 999-->b<!--/c 999--> c\n"), "<p>a b c</p>");
+    }
+
+    #[test]
+    fn a_draft_written_at_a_line_start_is_still_a_paragraph() {
+        assert_eq!(
+            gen("<!--c new Is this right?-->The team<!--/c new--> owns it.\nSecond line.\n"),
+            "<p>The team owns it. Second line.</p>"
+        );
+        assert_eq!(gen("- <!--c 7-->item<!--/c 7-->\n"), format!("<ul><li>i{M7}tem{E}</li></ul>"));
+    }
+
+    #[test]
+    fn a_mark_left_open_is_closed_at_the_block_end() {
+        assert_eq!(gen("a <!--c 7-->b\n\nc\n"), format!("<p>a {M7}b{E}</p><p>c</p>"));
+    }
+
+    #[test]
+    fn a_closer_alone_on_a_line_is_not_content() {
+        assert_eq!(gen("a\n\n<!--/c 7-->\n\nb\n"), "<p>a</p><p>b</p>");
+    }
+
+    #[test]
+    fn marks_never_reach_storage_verbatim() {
+        for md in [
+            "a <!--c 7-->b<!--/c 7-->\n",
+            "<!--c new x-->a<!--/c new-->\n",
+            "# <!--c 8-->T<!--/c 8-->\n",
+            "| <!--c 7-->a<!--/c 7--> |\n| --- |\n| b |\n",
+        ] {
+            let out = gen(md);
+            assert!(!out.contains("<!--c"), "{md:?} -> {out}");
+            crate::dom::check_well_formed(&out).unwrap();
+        }
     }
 }
 

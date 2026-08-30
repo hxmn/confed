@@ -24,6 +24,43 @@ struct StatusEntry {
     moved_from: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tampered_fields: Vec<String>,
+    /// Inline comments drafted in the body or the sidecar, waiting for a push.
+    #[serde(skip_serializing_if = "is_zero")]
+    comment_drafts: usize,
+    /// Inline comments whose anchor text can no longer be found in the page.
+    #[serde(skip_serializing_if = "is_zero")]
+    orphaned_comments: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// Comment work that is not page work: drafts to post, anchors that are lost.
+fn comment_counts(ws: &confed_core::workspace::Workspace, page: &PageStatus) -> (usize, usize) {
+    let mut drafts = page.comment_drafts;
+    let mut orphaned = 0;
+    let Some(page_id) = &page.page_id else { return (drafts, orphaned) };
+    if !page.path.is_empty() {
+        let sidecar = ws
+            .absolute(&confed_core::paths::sidecar_for(&page.path))
+            .join(confed_core::comments::COMMENTS_FILENAME);
+        if let Ok(text) = std::fs::read_to_string(sidecar) {
+            if let Ok(parsed) = confed_core::comments::parse(&text) {
+                drafts += parsed.drafts().count();
+            }
+        }
+    }
+    if let Ok(records) = ws.state().page_comments(page_id) {
+        orphaned = records
+            .iter()
+            .filter(|c| !c.resolved)
+            .filter_map(|c| c.anchor.as_deref())
+            .filter_map(|a| serde_json::from_str::<confed_api::InlineAnchor>(a).ok())
+            .filter(|a| a.orphaned)
+            .count();
+    }
+    (drafts, orphaned)
 }
 
 pub fn run(ctx: &mut Context, args: &StatusArgs) -> Result<Output> {
@@ -52,10 +89,12 @@ fn render(ctx: &Context, args: &StatusArgs, scan: Scan) -> Result<Output> {
     let interesting: Vec<&PageStatus> =
         scan.pages.iter().filter(|p| p.state != PageState::Unchanged).collect();
 
+    let counts: Vec<(usize, usize)> = scan.pages.iter().map(|p| comment_counts(ws, p)).collect();
     let entries: Vec<StatusEntry> = scan
         .pages
         .iter()
-        .map(|p| StatusEntry {
+        .zip(&counts)
+        .map(|(p, &(comment_drafts, orphaned_comments))| StatusEntry {
             page_id: p.page_id.clone(),
             path: p.path.clone(),
             title: p.title.clone(),
@@ -64,6 +103,8 @@ fn render(ctx: &Context, args: &StatusArgs, scan: Scan) -> Result<Output> {
             remote_version: p.remote_version,
             moved_from: p.moved_from.clone(),
             tampered_fields: p.tampering.iter().map(|t| t.field.to_string()).collect(),
+            comment_drafts,
+            orphaned_comments,
         })
         .collect();
 
@@ -77,9 +118,9 @@ fn render(ctx: &Context, args: &StatusArgs, scan: Scan) -> Result<Output> {
     });
 
     let human = if args.short {
-        render_short(&scan)
+        render_short(&scan, &counts)
     } else {
-        render_long(ctx, &scan, &space, last_fetch.as_deref())
+        render_long(ctx, &scan, &counts, &space, last_fetch.as_deref())
     };
 
     let mut output = Output::new(result, human);
@@ -101,13 +142,18 @@ fn render(ctx: &Context, args: &StatusArgs, scan: Scan) -> Result<Output> {
     Ok(output)
 }
 
-fn render_short(scan: &Scan) -> String {
+fn render_short(scan: &Scan, counts: &[(usize, usize)]) -> String {
     let mut out = String::new();
-    for page in &scan.pages {
-        if page.state == PageState::Unchanged {
+    for (page, &(drafts, _)) in scan.pages.iter().zip(counts) {
+        if page.state == PageState::Unchanged && drafts == 0 {
             continue;
         }
-        let _ = writeln!(out, "{} {}", page.state.short_code(), display_path(page));
+        let code = if page.state == PageState::Unchanged { 'c' } else { page.state.short_code() };
+        let mut line = format!("{code} {}", display_path(page));
+        if drafts > 0 {
+            line.push_str(&format!("  +{drafts} comment"));
+        }
+        let _ = writeln!(out, "{line}");
     }
     for path in &scan.untracked_files {
         let _ = writeln!(out, "? {path}");
@@ -115,7 +161,13 @@ fn render_short(scan: &Scan) -> String {
     out
 }
 
-fn render_long(ctx: &Context, scan: &Scan, space: &str, last_fetch: Option<&str>) -> String {
+fn render_long(
+    ctx: &Context,
+    scan: &Scan,
+    counts: &[(usize, usize)],
+    space: &str,
+    last_fetch: Option<&str>,
+) -> String {
     let style = &ctx.style;
     let mut out = String::new();
 
@@ -179,6 +231,40 @@ fn render_long(ctx: &Context, scan: &Scan, space: &str, last_fetch: Option<&str>
             "{}",
             style.dim("  push refuses these; `confed pull --force <page>` rebuilds the block")
         );
+    }
+
+    let with_drafts: Vec<(&PageStatus, usize)> = scan
+        .pages
+        .iter()
+        .zip(counts)
+        .filter(|(_, &(drafts, _))| drafts > 0)
+        .map(|(p, &(drafts, _))| (p, drafts))
+        .collect();
+    if !with_drafts.is_empty() {
+        any = true;
+        let _ = writeln!(out, "\n{}", style.green("Comment drafts (posted on push)"));
+        for (page, drafts) in with_drafts {
+            let _ = writeln!(out, "  {}  {}", display_path(page), style.dim(&format!("+{drafts}")));
+        }
+    }
+    let with_orphans: Vec<(&PageStatus, usize)> = scan
+        .pages
+        .iter()
+        .zip(counts)
+        .filter(|(_, &(_, orphaned))| orphaned > 0)
+        .map(|(p, &(_, orphaned))| (p, orphaned))
+        .collect();
+    if !with_orphans.is_empty() {
+        let _ = writeln!(out, "\n{}", style.yellow("Inline comments whose text is gone"));
+        for (page, orphaned) in with_orphans {
+            let _ = writeln!(
+                out,
+                "  {}  {}",
+                display_path(page),
+                style.dim(&format!("{orphaned} orphaned"))
+            );
+        }
+        let _ = writeln!(out, "{}", style.dim("  see `confed comment list <page> --inline`"));
     }
 
     let untracked = &scan.untracked_files;

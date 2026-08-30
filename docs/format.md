@@ -319,6 +319,44 @@ Agreed, I will add it.
 - Unpushed drafts survive a `confed pull`: the sidecar is rewritten from the server, and
   your drafts are appended back underneath.
 
+### Inline comments in the page body
+
+Open inline threads are also shown *in the page*, at the text they are about, as a pair
+of HTML comments — the mark layer of [design 06](design/06-inline-comment-marks.md):
+
+```markdown
+Complete your <!--c 77120 Alice Ng: Link the checklist template?-->first week
+checklist<!--/c 77120--> before Friday.
+```
+
+- `<!--c ID preview-->` opens the span and `<!--/c ID-->` closes it. The preview is the
+  author, the first line of the comment and `(+N)` replies; it is informational and is
+  never parsed back. Only open threads are shown; resolved and orphaned ones stay in the
+  sidecar.
+- Marks are a **layer, not content**. confed strips them before it hashes, diffs, merges
+  or uploads a body, so a page is never `Modified` because somebody commented on it, an
+  untouched paragraph is never regenerated because it carries a mark, and no mark can
+  leak into Confluence. Deleting a mark changes nothing: the next pull puts it back from
+  what the server knows. Resolution stays explicit (`confed:resolve` in the sidecar).
+- A mark cannot open at the very start of a line — CommonMark would read `<!--` there as
+  an HTML block — so confed starts it one character in when it has to. The comment's
+  real anchor is unaffected.
+- To comment on some text, wrap it with a `new` mark whose preview is your comment:
+
+  ```markdown
+  The <!--c new Is this still the right team?-->platform team<!--/c new--> owns it.
+  ```
+
+  `confed push` creates the comment (Cloud only; exit 9 on Data Center) and rewrites the
+  mark with its id. The draft is one line and may not contain `--`; a longer body, or a
+  span inside a code block, goes through the sidecar's `confed:new anchor="…"` form.
+  A `new` mark that is not closed, wraps nothing, or has no text fails the push with
+  exit 7 and the line number, before anything is uploaded.
+- Editing the text inside a span, or the paragraph around it, keeps the thread attached:
+  push writes the marker back into the regenerated paragraph.
+- `confed config --set comments.marks ids` writes marks without the preview, and `off`
+  keeps page bodies free of marks entirely; `pull --no-comments` skips them for one run.
+
 ## Accepted lossiness
 
 Two guarantees bound all of this, and both are enforced by tests rather than by

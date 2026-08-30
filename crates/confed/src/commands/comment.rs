@@ -6,8 +6,10 @@
 use crate::cli::CommentCommand;
 use crate::context::Context;
 use crate::output::Output;
+use confed_convert::MarkId;
 use confed_core::comments::{self, SidecarComment, SidecarKind};
 use confed_core::error::{ConfedError, Result};
+use confed_core::frontmatter::MarkdownFile;
 use confed_core::paths;
 use confed_core::sync::{write_atomic, PushOptions};
 use serde_json::json;
@@ -16,12 +18,22 @@ use std::fmt::Write;
 pub async fn run(ctx: &mut Context, command: &CommentCommand) -> Result<Output> {
     match command {
         CommentCommand::List { page, unresolved, inline } => list(ctx, page, *unresolved, *inline),
-        CommentCommand::Add { page, body, anchor, push } => {
-            add(ctx, page, body.as_deref(), anchor.as_deref(), None, *push).await
+        CommentCommand::Add { page, body, anchor, occurrence, sidecar, push } => {
+            let placement = AnchorPlacement { occurrence: *occurrence, sidecar: *sidecar };
+            add(ctx, page, body.as_deref(), anchor.as_deref(), placement, None, *push).await
         }
         CommentCommand::Reply { comment_id, body, push } => {
             let page = page_of_comment(ctx, comment_id)?;
-            add(ctx, &page, Some(body), None, Some(comment_id.clone()), *push).await
+            add(
+                ctx,
+                &page,
+                Some(body),
+                None,
+                AnchorPlacement::default(),
+                Some(comment_id.clone()),
+                *push,
+            )
+            .await
         }
         CommentCommand::Resolve { comment_id, push } => resolve(ctx, comment_id, *push).await,
     }
@@ -36,9 +48,30 @@ fn sidecar_path(ctx: &Context, page_id: &str) -> Result<std::path::PathBuf> {
     Ok(ws.absolute(&paths::sidecar_for(&record.local_path)).join(comments::COMMENTS_FILENAME))
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct AnchorPlacement {
+    occurrence: Option<usize>,
+    sidecar: bool,
+}
+
+/// The page file, parsed — so marks and their lines are known.
+fn page_file(ctx: &Context, page_id: &str) -> Result<(std::path::PathBuf, String, MarkdownFile)> {
+    let ws = ctx.workspace()?;
+    let record = ws
+        .state()
+        .get_page(page_id)?
+        .ok_or_else(|| ConfedError::NotFound(format!("no page {page_id}")))?;
+    let path = ws.absolute(&record.local_path);
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| ConfedError::io(format!("reading {}", record.local_path), e))?;
+    let file = confed_core::frontmatter::parse(&content, &record.local_path)?;
+    Ok((path, content, file))
+}
+
 fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Result<Output> {
     let page_id = ctx.resolve_page(page)?;
     let records = ctx.workspace()?.state().page_comments(&page_id)?;
+    let marks = page_file(ctx, &page_id).map(|(_, _, f)| f.marks).unwrap_or_default();
 
     let mut human = String::new();
     let mut entries = Vec::new();
@@ -60,16 +93,20 @@ fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Resul
             ctx.style.dim(&record.created_at.clone().unwrap_or_default()),
             if record.resolved { ctx.style.green("(resolved)") } else { String::new() }
         );
+        let mark = marks
+            .iter()
+            .find(|m| m.id == MarkId::Comment(record.comment_id.clone()) && m.end.is_some());
         if let Some(anchor) = &anchor {
             let _ = writeln!(
                 human,
-                "{indent}  {} {}",
+                "{indent}  {} {}{}",
                 ctx.style.dim("on:"),
                 if anchor.orphaned {
                     ctx.style.yellow(&format!("\"{}\" (anchor text is gone)", anchor.text))
                 } else {
                     format!("\"{}\"", anchor.text)
-                }
+                },
+                mark.map(|m| ctx.style.dim(&format!("  L{}", m.line))).unwrap_or_default()
             );
         }
         for line in record.body_markdown.lines() {
@@ -84,7 +121,12 @@ fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Resul
             "created": record.created_at,
             "resolved": record.resolved,
             "reply_to": record.parent_comment_id,
-            "anchor": anchor.map(|a| json!({ "text": a.text, "orphaned": a.orphaned })),
+            "anchor": anchor.map(|a| json!({
+                "text": a.text,
+                "orphaned": a.orphaned,
+                "placed": mark.is_some(),
+                "line": mark.map(|m| m.line),
+            })),
             "body_markdown": record.body_markdown,
         }));
     }
@@ -100,6 +142,7 @@ async fn add(
     page: &str,
     body: Option<&str>,
     anchor: Option<&str>,
+    placement: AnchorPlacement,
     reply_to: Option<String>,
     push: bool,
 ) -> Result<Output> {
@@ -125,7 +168,41 @@ async fn add(
                 client.flavor()
             )));
         }
-        verify_anchor_is_unique(ctx, &page_id, anchor_text)?;
+        if placement.sidecar {
+            verify_anchor_is_unique(ctx, &page_id, anchor_text)?;
+        } else {
+            // The draft goes into the page body as a mark, at the chosen
+            // occurrence, so repeated text is no obstacle.
+            let (path, _, mut file) = page_file(ctx, &page_id)?;
+            let (start, end) = locate_anchor(&file, anchor_text, placement.occurrence)?;
+            let line = file.body[..start].matches('\n').count() + 1;
+            file.marks.push(confed_convert::Mark {
+                id: MarkId::New,
+                start,
+                end: Some(end),
+                text: anchor_text.to_string(),
+                note: body.clone(),
+                line,
+            });
+            write_atomic(&path, &file.render()?)?;
+            let mut human =
+                format!("Added a draft inline comment at line {line} of {}\n", path.display());
+            let mut result = json!({ "page_id": page_id, "draft": true, "body": body, "anchor": anchor_text, "line": line });
+            if push {
+                let engine = ctx.engine(client)?;
+                let ws = ctx.workspace_mut()?;
+                let _lock = ws.lock()?;
+                let outcome = engine
+                    .push(ws, &PushOptions { with_comments: true, ..Default::default() })
+                    .await?;
+                human = format!("Posted {} comment(s).\n", outcome.comments_added.len());
+                result["posted"] = json!(outcome.comments_added);
+                result["draft"] = json!(false);
+            } else {
+                human.push_str(&ctx.style.dim("Run `confed push` to post it.\n"));
+            }
+            return Ok(Output::new(result, human));
+        }
     }
 
     let path = sidecar_path(ctx, &page_id)?;
@@ -218,6 +295,45 @@ fn write_sidecar(ctx: &Context, page_id: &str, sidecar: &comments::Sidecar) -> R
             .map_err(|e| ConfedError::io(format!("creating {}", parent.display()), e))?;
     }
     write_atomic(&path, &comments::render(page_id, &record.title, &records, &drafts))
+}
+
+/// Where a body draft goes: the only occurrence of the text, or the one the
+/// user picked. Several occurrences with no pick is an error that lists them.
+fn locate_anchor(
+    file: &MarkdownFile,
+    text: &str,
+    occurrence: Option<usize>,
+) -> Result<(usize, usize)> {
+    let body = &file.body;
+    let found: Vec<usize> = body.match_indices(text).map(|(i, _)| i).collect();
+    if found.is_empty() {
+        return Err(ConfedError::state_with_hint(
+            format!("the text \"{text}\" does not appear in the page"),
+            "copy the exact wording from the page body",
+        ));
+    }
+    let index = match occurrence {
+        Some(n) if n >= 1 && n <= found.len() => n - 1,
+        Some(n) => {
+            return Err(ConfedError::usage(format!(
+                "--occurrence {n} is out of range: the text appears {} time(s)",
+                found.len()
+            )))
+        }
+        None if found.len() == 1 => 0,
+        None => {
+            let lines: Vec<String> = found
+                .iter()
+                .enumerate()
+                .map(|(i, &at)| format!("{}: line {}", i + 1, body[..at].matches('\n').count() + 1))
+                .collect();
+            return Err(ConfedError::state_with_hint(
+                format!("the text \"{text}\" appears {} times ({})", found.len(), lines.join(", ")),
+                "pick one with --occurrence N, or include more surrounding words",
+            ));
+        }
+    };
+    Ok((found[index], found[index] + text.len()))
 }
 
 /// An inline anchor has to identify exactly one place in the page.

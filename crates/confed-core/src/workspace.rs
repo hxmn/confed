@@ -122,7 +122,7 @@ impl Workspace {
                 "space_key" => {
                     out.insert("space".to_string(), value);
                 }
-                "base_url" | "flavor" | "concurrency" | "editor" => {
+                "base_url" | "flavor" | "concurrency" | "editor" | "comments.marks" => {
                     out.insert(key, value);
                 }
                 _ => {}

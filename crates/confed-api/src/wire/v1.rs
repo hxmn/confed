@@ -374,6 +374,7 @@ impl Content {
                         context_after: String::new(),
                         marker_ref: props.marker_ref,
                         orphaned,
+                        ..Default::default()
                     }),
                 )
             }

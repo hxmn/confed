@@ -206,6 +206,7 @@ impl Comment {
                 context_after: String::new(),
                 marker_ref: props.inline_marker_ref,
                 orphaned: status.eq_ignore_ascii_case("dangling"),
+                ..Default::default()
             }
         });
         let version = self.version;

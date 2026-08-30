@@ -69,6 +69,14 @@
           "type": "array",
           "description": "Fields of the tool-managed `confed:` block that were hand-edited. push refuses these pages.",
           "items": { "type": "string" }
+        },
+        "comment_drafts": {
+          "type": "integer",
+          "description": "Comments drafted locally — `<!--c new …-->` marks in the body plus `confed:new` entries in the sidecar — that the next push posts. Omitted when zero."
+        },
+        "orphaned_comments": {
+          "type": "integer",
+          "description": "Open inline comments whose anchor text can no longer be found in the page. Omitted when zero."
         }
       }
     }

@@ -300,6 +300,12 @@ pub struct InlineAnchor {
     /// True when the anchor text can no longer be found in the body.
     #[serde(default)]
     pub orphaned: bool,
+    /// When creating: which occurrence of `text` on the page is meant, and how
+    /// many there are. `None` means the text is unique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_count: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

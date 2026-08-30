@@ -251,6 +251,12 @@ confed status --short
 confed status --fetch --json | jq -r '.result.pages[] | select(.state=="diverged") | .path'
 ```
 
+Two comment counts ride along with each page: `comment_drafts` (body `new` marks plus
+sidecar `confed:new` entries, posted by the next push) and `orphaned_comments` (open
+inline comments whose text is gone). Both are omitted from the JSON when zero, and the
+human output lists pages with drafts under *Comment drafts* — with `c` as the short
+code when the page is otherwise unchanged.
+
 ## confed diff
 
 Compare snapshots. By default it is base against your working file — what `push` would
@@ -371,12 +377,19 @@ immediately.
 | Subcommand | Flags |
 |---|---|
 | `comment list <PAGE>` | `--unresolved`, `--inline` |
-| `comment add <PAGE>` | `-m`, `--body <TEXT>`, `--anchor <TEXT>` (Cloud only), `--push` |
+| `comment add <PAGE>` | `-m`, `--body <TEXT>`, `--anchor <TEXT>` (Cloud only), `--occurrence <N>`, `--sidecar`, `--push` |
 | `comment reply <COMMENT_ID>` | `-m`, `--body <TEXT>` (required), `--push` |
 | `comment resolve <COMMENT_ID>` | `--push` (Cloud only) |
 
 Creating an inline comment and resolving a comment do not exist in the Data Center API;
 both exit 9 there with a message saying so.
+
+`--anchor` writes the draft into the page body as a `<!--c new …-->` mark around the
+text (see [format.md](format.md#inline-comments-in-the-page-body)). Text that appears
+more than once is an error listing the occurrences with their lines; `--occurrence N`
+picks one. `--sidecar` writes a `confed:new anchor="…"` entry into the sidecar instead,
+which requires the text to be unique. `comment list --json` reports, for each inline
+comment, whether it is `placed` in the body and on which `line`.
 
 ```bash
 confed comment list "Team Handbook/Onboarding.md" --unresolved
@@ -453,6 +466,7 @@ confed whoami --json | jq -e '.result.capabilities.inline_comment_create'  # 1 o
 ## confed config
 
 Inspect and change stored settings. Writable keys are `space`, `concurrency`, `editor`,
+`comments.marks` (`full`, `ids` or `off` — how inline comments are shown in page bodies),
 `base_url` and `flavor`.
 
 | Flag | Meaning |

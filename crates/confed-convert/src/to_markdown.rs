@@ -7,30 +7,39 @@
 //! [`crate::mdblock::split_blocks`] uses when it re-splits the Markdown on push.
 //! Those two agreeing is what makes an untouched block recognisable later.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::blockmap::{hash_text, BlockEntry, BlockKind, BlockMap};
 use crate::dom::{self, Element, Node};
 use crate::error::ConvertResult;
 use crate::macros::{self, TOC_MARKER};
+use crate::marks::{self, MarkId, Sentinel};
 use crate::storage_parse::StorageDoc;
-use crate::{ConvertOptions, Converted};
+use crate::{ConvertOptions, Converted, InlineMark};
 
 pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> ConvertResult<Converted> {
     let nodes = dom::parse_fragment(storage)?;
     let by_start: HashMap<usize, &Node> = nodes.iter().map(|n| (n.span().0, n)).collect();
 
-    let mut r = Renderer { opts, last_bullet: None, unresolved_user: false };
+    let mut r = Renderer {
+        opts,
+        last_bullet: None,
+        unresolved_user: false,
+        mark_mode: false,
+        sentinels: Vec::new(),
+        previewed: HashSet::new(),
+    };
 
     // Render first, assemble second: a block that renders to nothing is dropped
     // from the map entirely and its bytes become part of the inter-block gap,
     // which the patcher re-emits verbatim. That keeps the `<p></p>` spacer
     // paragraphs Confluence emits constantly out of the Markdown without ever
     // losing them.
-    let mut rendered: Vec<(BlockKind, (usize, usize), String)> = Vec::new();
+    let mut rendered: Vec<(BlockKind, (usize, usize), String, String)> = Vec::new();
     for block in &doc.blocks {
         let raw = &storage[block.span.0..block.span.1];
         r.unresolved_user = false;
+        let bullet_before = r.last_bullet;
         let mut text = match by_start.get(&block.span.0) {
             Some(node) => r.render_top(node, block.kind, raw),
             None => preserved_fence(raw),
@@ -49,14 +58,35 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
             r.last_bullet = None;
             continue;
         }
-        rendered.push((kind, block.span, text));
+        // Inline comment marks are placed by a second render that drops a
+        // sentinel wherever a marker opens or closes, mapped back onto the
+        // canonical text so the block reads — and hashes — exactly as it would
+        // without them.
+        let has_marks = kind != BlockKind::Preserved
+            && !opts.inline_marks.is_empty()
+            && raw.contains("inline-comment-marker");
+        let marked = match by_start.get(&block.span.0) {
+            Some(node) if has_marks => {
+                r.last_bullet = bullet_before;
+                r.unresolved_user = false;
+                r.mark_mode = true;
+                r.sentinels.clear();
+                let with = r.render_top(node, block.kind, raw);
+                r.mark_mode = false;
+                let placed = marks::place(&text, with.trim_matches('\n'), &r.sentinels);
+                r.sentinels.clear();
+                placed
+            }
+            _ => text.clone(),
+        };
+        rendered.push((kind, block.span, marked, text));
     }
 
     let mut markdown = String::new();
     let mut blocks = Vec::with_capacity(rendered.len());
     let mut line = 0usize;
     let total = rendered.len();
-    for (i, (kind, span, text)) in rendered.into_iter().enumerate() {
+    for (i, (kind, span, text, canonical)) in rendered.into_iter().enumerate() {
         let start_line = line;
         markdown.push_str(&text);
         markdown.push('\n');
@@ -69,7 +99,7 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
             kind,
             storage_span: span,
             md_span: (start_line, line),
-            hash: hash_text(&text),
+            hash: hash_text(&canonical),
         });
     }
 
@@ -80,6 +110,14 @@ struct Renderer<'a> {
     opts: &'a ConvertOptions,
     /// Set while rendering a block that mentions somebody confed cannot resolve.
     unresolved_user: bool,
+    /// True during the second render of a commented block, when inline comment
+    /// markers emit sentinel characters instead of nothing.
+    mark_mode: bool,
+    /// What each sentinel character stands for, by index.
+    sentinels: Vec<Sentinel>,
+    /// Comment ids whose preview has been written once already; a comment split
+    /// across blocks shows its preview on the first fragment only.
+    previewed: HashSet<String>,
     /// The bullet character used by the previous top-level list, if any.
     ///
     /// Two lists separated by a blank line merge into a *single* CommonMark list
@@ -411,9 +449,38 @@ impl Renderer<'_> {
                 if text.is_empty() {
                     return;
                 }
+                // A mark cannot sit inside a code span, so a marker in here
+                // wraps the whole span instead.
+                let wrapping = self.marks_within(el);
+                for mark in &wrapping {
+                    self.push_sentinel(mark, true, out);
+                }
                 let ticks = "`".repeat(longest_run(&text, '`') + 1);
                 let pad = if text.starts_with('`') || text.ends_with('`') { " " } else { "" };
                 out.push_str(&format!("{ticks}{pad}{text}{pad}{ticks}"));
+                for mark in wrapping.iter().rev() {
+                    self.push_sentinel(mark, false, out);
+                }
+            }
+            "inline-comment-marker" => {
+                let known = if self.mark_mode {
+                    el.attr_local("ref").and_then(|r| self.opts.inline_marks.get(r)).cloned()
+                } else {
+                    None
+                };
+                match known {
+                    Some(mark) => {
+                        self.push_sentinel(&mark, true, out);
+                        let inner = self.inline(&el.children);
+                        out.push_str(&inner);
+                        self.push_sentinel(&mark, false, out);
+                    }
+                    // Unknown (resolved, orphaned, not fetched): drop the wrapper.
+                    None => {
+                        let inner = self.inline(&el.children);
+                        out.push_str(&inner);
+                    }
+                }
             }
             "br" => out.push_str("\\\n"),
             "a" => {
@@ -451,6 +518,38 @@ impl Renderer<'_> {
                 out.push_str(&inner);
             }
         }
+    }
+
+    fn push_sentinel(&mut self, mark: &InlineMark, open: bool, out: &mut String) {
+        let note = if open && self.previewed.insert(mark.id.clone()) {
+            mark.preview.clone()
+        } else {
+            String::new()
+        };
+        self.sentinels.push(Sentinel { id: MarkId::Comment(mark.id.clone()), open, note });
+        out.push(marks::sentinel_char(self.sentinels.len() - 1));
+    }
+
+    /// Known inline comments whose marker is somewhere inside `el`.
+    fn marks_within(&self, el: &Element) -> Vec<InlineMark> {
+        if !self.mark_mode {
+            return Vec::new();
+        }
+        let mut refs = Vec::new();
+        fn collect(nodes: &[Node], refs: &mut Vec<String>) {
+            for n in nodes {
+                if let Node::Element(e) = n {
+                    if e.local() == "inline-comment-marker" {
+                        if let Some(r) = e.attr_local("ref") {
+                            refs.push(r.to_string());
+                        }
+                    }
+                    collect(&e.children, refs);
+                }
+            }
+        }
+        collect(&el.children, &mut refs);
+        refs.iter().filter_map(|r| self.opts.inline_marks.get(r)).cloned().collect()
     }
 
     fn wrap(&mut self, el: &Element, open: &str, close: &str, out: &mut String) {
@@ -1009,6 +1108,100 @@ mod tests {
         let src = r#"<p><ac:link><ri:page ri:space-key="DEV" ri:content-title="Other Page"/></ac:link></p>"#;
         let out = crate::storage_to_markdown(src, &opts).unwrap().markdown;
         assert_eq!(out, "[Other Page](https://wiki.example.com/display/DEV/Other%20Page)\n");
+    }
+}
+
+#[cfg(test)]
+mod inline_mark_tests {
+    use crate::{ConvertOptions, InlineMark};
+
+    fn opts(pairs: &[(&str, &str, &str)]) -> ConvertOptions {
+        let mut o = ConvertOptions::default();
+        for (r, id, preview) in pairs {
+            o.inline_marks.insert(
+                r.to_string(),
+                InlineMark { id: id.to_string(), preview: preview.to_string() },
+            );
+        }
+        o
+    }
+
+    const MARKED: &str = "<p>This sentence has <ac:inline-comment-marker ac:ref=\"9f2c-1\">a commented span</ac:inline-comment-marker> in the middle.</p>";
+
+    #[test]
+    fn a_known_marker_renders_as_a_mark() {
+        let c = crate::storage_to_markdown(MARKED, &opts(&[("9f2c-1", "77120", "Alice: Really?")]))
+            .unwrap();
+        assert_eq!(
+            c.markdown,
+            "This sentence has <!--c 77120 Alice: Really?-->a commented span<!--/c 77120--> in the middle.\n"
+        );
+    }
+
+    #[test]
+    fn an_unknown_marker_is_dropped_as_before() {
+        let c = crate::storage_to_markdown(MARKED, &opts(&[("other", "1", "")])).unwrap();
+        assert_eq!(c.markdown, "This sentence has a commented span in the middle.\n");
+    }
+
+    #[test]
+    fn the_block_map_is_identical_with_and_without_marks() {
+        let plain = crate::storage_to_markdown(MARKED, &ConvertOptions::default()).unwrap();
+        let marked =
+            crate::storage_to_markdown(MARKED, &opts(&[("9f2c-1", "77120", "p")])).unwrap();
+        assert_eq!(plain.block_map.blocks.len(), marked.block_map.blocks.len());
+        for (a, b) in plain.block_map.blocks.iter().zip(&marked.block_map.blocks) {
+            assert_eq!(a.hash, b.hash);
+            assert_eq!(a.md_span, b.md_span);
+        }
+        assert_eq!(crate::marks::strip(&marked.markdown).body, plain.markdown);
+    }
+
+    #[test]
+    fn a_marker_inside_a_code_span_wraps_the_span() {
+        let storage = "<p>run <code>conf<ac:inline-comment-marker ac:ref=\"m\">ed</ac:inline-comment-marker> push</code> now</p>";
+        let c = crate::storage_to_markdown(storage, &opts(&[("m", "5", "")])).unwrap();
+        assert_eq!(c.markdown, "run <!--c 5-->`confed push`<!--/c 5--> now\n");
+    }
+
+    #[test]
+    fn a_marker_across_emphasis_still_parses_as_emphasis() {
+        let storage = "<p>see <strong>bold <ac:inline-comment-marker ac:ref=\"m\">text</ac:inline-comment-marker></strong><ac:inline-comment-marker ac:ref=\"m\"> after</ac:inline-comment-marker> it</p>";
+        let c = crate::storage_to_markdown(storage, &opts(&[("m", "5", "n")])).unwrap();
+        assert_eq!(c.markdown, "see **bold <!--c 5 n-->text** after<!--/c 5--> it\n");
+        let back = crate::markdown_to_storage(
+            &crate::marks::strip(&c.markdown).body,
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert!(back.contains("<strong>bold text</strong>"), "{back}");
+    }
+
+    #[test]
+    fn a_comment_across_two_blocks_previews_once() {
+        let storage = "<p>one <ac:inline-comment-marker ac:ref=\"m\">two</ac:inline-comment-marker></p><p><ac:inline-comment-marker ac:ref=\"m\">three</ac:inline-comment-marker> four</p>";
+        let c = crate::storage_to_markdown(storage, &opts(&[("m", "5", "note")])).unwrap();
+        assert_eq!(
+            c.markdown,
+            "one <!--c 5 note-->two<!--/c 5-->\n\nt<!--c 5-->hree<!--/c 5--> four\n"
+        );
+    }
+
+    #[test]
+    fn a_marker_inside_a_preserved_block_stays_raw() {
+        let storage = "<ac:structured-macro ac:name=\"jira\"><ac:parameter ac:name=\"key\"><ac:inline-comment-marker ac:ref=\"m\">P-1</ac:inline-comment-marker></ac:parameter></ac:structured-macro>";
+        let c = crate::storage_to_markdown(storage, &opts(&[("m", "5", "")])).unwrap();
+        assert!(c.markdown.starts_with("```confluence\n"));
+        assert!(!c.markdown.contains("<!--c"), "{}", c.markdown);
+    }
+
+    #[test]
+    fn a_marker_in_a_heading_and_a_table_cell() {
+        let storage = "<h2>Big <ac:inline-comment-marker ac:ref=\"m\">title</ac:inline-comment-marker></h2><table><tbody><tr><th>A</th></tr><tr><td><ac:inline-comment-marker ac:ref=\"n\">cell</ac:inline-comment-marker></td></tr></tbody></table>";
+        let c =
+            crate::storage_to_markdown(storage, &opts(&[("m", "1", ""), ("n", "2", "")])).unwrap();
+        assert!(c.markdown.contains("## Big <!--c 1-->title<!--/c 1-->"), "{}", c.markdown);
+        assert!(c.markdown.contains("| <!--c 2-->cell<!--/c 2-->"), "{}", c.markdown);
     }
 }
 

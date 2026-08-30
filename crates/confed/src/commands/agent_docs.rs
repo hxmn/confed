@@ -148,6 +148,29 @@ To reply, add `reply-to=<comment-id>` to that marker. To resolve (Cloud only):
 
 Then `confed push`. Do not edit the body of an existing comment — confed ignores it.
 
+### Inline comments in the page body
+
+An open inline thread is shown where it sits, as a pair of HTML comments:
+
+```markdown
+Complete your <!--c 77120 Alice Ng: Link the template?-->first week checklist<!--/c 77120--> today.
+```
+
+- The span between the markers is the commented text; the opener shows who
+  said what. Read it, fix the text if that is what is being asked, then reply
+  and resolve in the sidecar (`reply-to=77120`, `confed:resolve id=77120`).
+- Marks are a layer, not content: `status` and `diff` ignore them, and deleting
+  one changes nothing — the next pull puts it back. Never "resolve" a thread
+  by removing its mark.
+- To comment on some text yourself, wrap it (one line, no `--` inside):
+
+  ```markdown
+  The <!--c new Is this still the right team?-->platform team<!--/c new--> owns it.
+  ```
+
+  `confed push` creates the comment and rewrites the mark with its id. Or use
+  `confed comment add <page> --anchor "platform team" -m "…"`. Cloud only.
+
 ## Do / don't
 
 - **Do** run `confed status` before and after editing.

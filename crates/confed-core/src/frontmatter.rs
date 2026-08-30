@@ -7,6 +7,7 @@
 //! teams can keep their own metadata alongside.
 
 use crate::error::{ConfedError, Result};
+use confed_convert::marks::{self, Mark, MarkIssue, PlacedMark};
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use sha2::{Digest, Sha256};
@@ -94,15 +95,87 @@ impl Frontmatter {
 }
 
 /// A parsed `.md` file.
+///
+/// The body is always the *content*: inline comment marks (design 06) are
+/// stripped on the way in and kept in `marks`, so everything that hashes,
+/// diffs, merges or uploads a body never sees the layer. [`render`] puts the
+/// marks back.
+///
+/// [`render`]: MarkdownFile::render
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarkdownFile {
     pub frontmatter: Frontmatter,
     pub body: String,
+    /// Inline comment marks that were in the body, with offsets into `body`.
+    pub marks: Vec<Mark>,
+    /// Malformed marks. Harmless for existing comments; a push refuses a
+    /// broken draft.
+    pub mark_issues: Vec<MarkIssue>,
 }
 
 impl MarkdownFile {
     pub fn new(frontmatter: Frontmatter, body: impl Into<String>) -> Self {
-        Self { frontmatter, body: body.into() }
+        let stripped = marks::strip(&body.into());
+        Self {
+            frontmatter,
+            body: stripped.body,
+            marks: stripped.marks,
+            mark_issues: stripped.issues,
+        }
+    }
+
+    /// Replace the body, keeping the marks that can still be placed in it.
+    pub fn set_body(&mut self, body: impl Into<String>) {
+        let stripped = marks::strip(&body.into());
+        let mut marks = stripped.marks;
+        for existing in &self.marks {
+            if !marks.iter().any(|m| m.id == existing.id && m.text == existing.text) {
+                marks.push(existing.clone());
+            }
+        }
+        self.body = stripped.body;
+        self.marks = marks;
+        self.mark_issues = stripped.issues;
+    }
+
+    /// Unpushed inline comments written into the body as `new` marks.
+    pub fn drafts(&self) -> impl Iterator<Item = &Mark> {
+        self.marks.iter().filter(|m| m.id.is_new())
+    }
+
+    /// The marks that can still be placed: at their offsets when the text there
+    /// is unchanged, otherwise at the unique occurrence of their text. A mark
+    /// whose text is gone or ambiguous is left out — the database still knows
+    /// the comment, and the next pull re-places it.
+    pub fn placed_marks(&self) -> Vec<PlacedMark> {
+        let body = &self.body;
+        let mut out = Vec::new();
+        for m in &self.marks {
+            let Some(end) = m.end else { continue };
+            let at_offset = end <= body.len()
+                && m.start <= end
+                && body.is_char_boundary(m.start)
+                && body.is_char_boundary(end)
+                && body[m.start..end] == m.text;
+            let (start, end) = if at_offset {
+                (m.start, end)
+            } else if !m.text.is_empty() && body.matches(&m.text).count() == 1 {
+                let start = body.find(&m.text).unwrap_or(0);
+                (start, start + m.text.len())
+            } else {
+                continue;
+            };
+            out.push(PlacedMark { id: m.id.clone(), start, end, note: m.note.clone() });
+        }
+        out
+    }
+
+    /// The body as it is written to disk: content plus the mark layer.
+    pub fn marked_body(&self) -> String {
+        if self.marks.is_empty() {
+            return self.body.clone();
+        }
+        marks::apply(&self.body, &self.placed_marks())
     }
 
     /// Hash of everything the user controls: writable frontmatter plus body.
@@ -153,7 +226,8 @@ impl MarkdownFile {
         }
 
         let yaml = serde_yaml::to_string(&Value::Mapping(map))?;
-        let body = self.body.trim_start_matches('\n');
+        let marked = self.marked_body();
+        let body = marked.trim_start_matches('\n');
         let mut out = String::with_capacity(yaml.len() + body.len() + 16);
         out.push_str("---\n");
         out.push_str(&yaml);
@@ -263,10 +337,10 @@ pub fn parse(content: &str, path: &str) -> Result<MarkdownFile> {
         })?),
     };
 
-    Ok(MarkdownFile {
-        frontmatter: Frontmatter { title, labels, parent_id, managed, extra: map },
-        body: body.to_string(),
-    })
+    Ok(MarkdownFile::new(
+        Frontmatter { title, labels, parent_id, managed, extra: map },
+        body.to_string(),
+    ))
 }
 
 /// Differences between a file's managed block and what confed recorded at the
@@ -414,5 +488,36 @@ mod tests {
         assert_eq!(split("no frontmatter"), None);
         // An unterminated block is not frontmatter.
         assert_eq!(split("---\ntitle: x\n"), None);
+    }
+
+    #[test]
+    fn inline_comment_marks_are_a_layer_over_the_body() {
+        let text = "---\ntitle: T\n---\n\nSee <!--c 7 Alice: hm-->this<!--/c 7--> and <!--c new Why?-->that<!--/c new-->.\n";
+        let file = parse(text, "T.md").unwrap();
+        assert_eq!(file.body, "See this and that.\n");
+        assert_eq!(file.marks.len(), 2);
+        assert_eq!(file.drafts().count(), 1);
+
+        // Hashing sees content only.
+        let plain = parse("---\ntitle: T\n---\n\nSee this and that.\n", "T.md").unwrap();
+        assert_eq!(file.content_hash(), plain.content_hash());
+
+        // Rendering puts the layer back exactly.
+        assert!(file.render().unwrap().ends_with(
+            "See <!--c 7 Alice: hm-->this<!--/c 7--> and <!--c new Why?-->that<!--/c new-->.\n"
+        ));
+    }
+
+    #[test]
+    fn marks_follow_their_text_through_a_body_change() {
+        let mut file =
+            parse("---\ntitle: T\n---\n\nA <!--c new q-->draft<!--/c new--> here.\n", "T.md")
+                .unwrap();
+        file.set_body("Intro.\n\nA draft here, moved.\n");
+        assert!(file.render().unwrap().contains("A <!--c new q-->draft<!--/c new--> here, moved."));
+
+        // Text that is gone or ambiguous drops the mark rather than guessing.
+        file.set_body("draft draft\n");
+        assert!(!file.render().unwrap().contains("<!--c"));
     }
 }

@@ -36,6 +36,16 @@ separately from the crate and are part of the compatibility contract:
 - Comment sidecars (`.<page>/comments.md`) with drafts, replies and resolution
   requests, plus inline-comment re-anchoring that flags anchors it cannot place
   rather than attaching them to the wrong text.
+- Inline comments shown in the page body as marks (`<!--c ID preview-->…<!--/c ID-->`),
+  placed from the server's own markers and stripped before anything is hashed,
+  diffed, merged or uploaded. Wrap text with `<!--c new Your comment-->…<!--/c new-->`
+  and `push` creates the comment at that occurrence (Cloud). `status` counts comment
+  drafts and orphaned comments; `comment add --anchor` writes a body mark, with
+  `--occurrence` for repeated text; `config --set comments.marks full|ids|off`.
+- Editing a paragraph that carries an inline comment no longer orphans the
+  thread: push writes the marker back into the regenerated block, and after
+  posting an inline comment the base body is refreshed so a later push cannot
+  copy stale bytes over the marker the server added.
 - Generated `CLAUDE.md` and `AGENTS.md` agent contracts, a versioned JSON
   envelope on every command, and a documented exit-code table.
 - Credentials in the OS keyring where available, falling back to a `0600`

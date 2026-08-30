@@ -191,9 +191,19 @@ impl MockClient {
                 context_after: " and then".into(),
                 marker_ref: Some("marker-1".into()),
                 orphaned: false,
+                ..Default::default()
             }),
         });
         id
+    }
+
+    /// Resolve a comment the way a colleague would in the browser — on either
+    /// flavor, since this is server state, not an API capability.
+    pub fn resolve_seeded(&self, id: &CommentId) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        if let Some(c) = state.comments.iter_mut().find(|c| c.id == *id) {
+            c.resolved = true;
+        }
     }
 
     pub fn page_body(&self, id: &str) -> Option<String> {
@@ -531,8 +541,26 @@ impl ConfluenceClient for MockClient {
             return Err(ApiError::unsupported(self.capabilities.flavor, "create inline comment"));
         }
         self.record(format!("add_inline_comment:{page}"));
+        let id = CommentId::new(self.fresh_id());
+        // Like Confluence, wrap the selected occurrence in a marker — in the
+        // stored body, without a version bump.
+        let marker = format!("marker-{}", id.0);
+        let mut state = self.state.lock().expect("mock poisoned");
+        let mut anchor = anchor.clone();
+        if let Some(p) = state.pages.get_mut(page.as_str()) {
+            let wanted = anchor.match_index.unwrap_or(0);
+            if let Some((pos, _)) = p.body.match_indices(&anchor.text).nth(wanted) {
+                let wrapped = format!(
+                    r#"<ac:inline-comment-marker ac:ref="{marker}">{}</ac:inline-comment-marker>"#,
+                    anchor.text
+                );
+                p.body.replace_range(pos..pos + anchor.text.len(), &wrapped);
+                p.bodies.insert(p.summary.version, p.body.clone());
+                anchor.marker_ref = Some(marker);
+            }
+        }
         let comment = Comment {
-            id: CommentId::new(self.fresh_id()),
+            id,
             page_id: page.clone(),
             parent_comment_id: None,
             kind: CommentKind::Inline,
@@ -540,9 +568,9 @@ impl ConfluenceClient for MockClient {
             created_at: Some("2026-08-16T00:00:00Z".into()),
             body_storage: body_storage.to_string(),
             resolved: false,
-            anchor: Some(anchor.clone()),
+            anchor: Some(anchor),
         };
-        self.state.lock().expect("mock poisoned").comments.push(comment.clone());
+        state.comments.push(comment.clone());
         Ok(comment)
     }
 

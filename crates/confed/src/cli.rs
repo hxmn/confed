@@ -477,9 +477,17 @@ pub enum CommentCommand {
         page: String,
         #[arg(long, short = 'm')]
         body: Option<String>,
-        /// Anchor an inline comment to this text (Cloud only).
+        /// Anchor an inline comment to this text (Cloud only). The draft is
+        /// written into the page body as a `<!--c new …-->` mark.
         #[arg(long)]
         anchor: Option<String>,
+        /// Which occurrence of the anchor text is meant, 1-based, when it
+        /// appears more than once.
+        #[arg(long, requires = "anchor")]
+        occurrence: Option<usize>,
+        /// Write the draft into the sidecar instead of the page body.
+        #[arg(long)]
+        sidecar: bool,
         #[arg(long)]
         push: bool,
     },

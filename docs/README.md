@@ -67,8 +67,9 @@ workspace, or `crates/confed/src/commands/agent_docs.rs` for the template.
 The [`design/`](design/) directory holds the original design notes:
 [architecture](design/01-architecture.md), [data design](design/02-data-design.md),
 [conversion and conflicts](design/03-conversion-and-conflicts.md),
-[command reference](design/04-command-reference.md), and
-[open questions](design/05-open-questions.md). They describe intent, which is not always
+[command reference](design/04-command-reference.md),
+[open questions](design/05-open-questions.md), and
+[inline comment marks](design/06-inline-comment-marks.md). They describe intent, which is not always
 what shipped. Where the two disagree, the documents in this directory describe the
 implementation and say so explicitly.
 

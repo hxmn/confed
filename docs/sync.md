@@ -204,6 +204,18 @@ confed resolve --list --json | jq -e '.result.conflicted | length == 0' >/dev/nu
 confed push --dry-run --json && confed push --json
 ```
 
+## Inline comment marks are not changes
+
+A page body on disk carries a layer confed does not treat as content: the
+`<!--c ID …-->…<!--/c ID-->` marks that show where open inline threads sit. Every command
+strips that layer when it reads a file, so "modified" means the *content* differs from
+the base — a mark appearing, moving or disappearing is never a local change, never a
+conflict, and never a reason to regenerate a block on push. The only mark that is work is
+a `new` one: `status` counts it as a comment draft, and `push` posts it.
+
+After a merge the marks are placed again from what the server knows; a conflicted file
+carries none (two candidate texts, one comment) until `confed resolve` puts them back.
+
 ## Optimistic version checking
 
 Confluence updates are optimistic: you send the version number you expect the page to

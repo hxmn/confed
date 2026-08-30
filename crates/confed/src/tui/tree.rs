@@ -220,6 +220,7 @@ pub(crate) mod fixtures {
             field_changes: FieldChanges::default(),
             moved_from: None,
             tampering: Vec::new(),
+            comment_drafts: 0,
         }
     }
 

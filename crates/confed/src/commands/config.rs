@@ -21,6 +21,7 @@ fn meta_key(key: &str) -> Option<&'static str> {
         "flavor" => Some("flavor"),
         "concurrency" => Some("concurrency"),
         "editor" => Some("editor"),
+        "comments.marks" => Some(confed_core::sync::MARKS_MODE_KEY),
         _ => None,
     }
 }
@@ -40,6 +41,12 @@ pub fn run(ctx: &mut Context, args: &ConfigArgs) -> Result<Output> {
     if !args.set.is_empty() {
         let (key, value) = (&args.set[0], &args.set[1]);
         let meta = meta_key(key).ok_or_else(|| unknown_key(key))?;
+        if key == "comments.marks" && confed_core::sync::MarksMode::parse(value).is_none() {
+            return Err(ConfedError::usage_with_hint(
+                format!("`{value}` is not a marks mode"),
+                "use `full` (id and preview), `ids` (id only) or `off` (no marks in page bodies)",
+            ));
+        }
         ctx.workspace()?.state().set_meta(meta, value)?;
         return Ok(Output::new(
             json!({ "key": key, "value": value }),

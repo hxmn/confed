@@ -49,6 +49,11 @@ mid-push (mitigated by hashing at plan time and atomic temp-file writes).
 **Q10 — Minimum supported DC version**: recommended 8.x+ (PAT support landed in 7.9;
 8.x simplifies testing matrix). Confirm what your org runs.
 
+**Q11 — Inline comments in the page body**: shown as a stripped mark layer, with
+`new` marks pushing as inline comments — see [design 06](06-inline-comment-marks.md),
+which also lists its own open points (whether Cloud honors re-inserted markers on a
+storage PUT, and the `full` vs `ids` default).
+
 ## Top risks & mitigations
 
 | # | Risk | Mitigation |

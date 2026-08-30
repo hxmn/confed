@@ -110,8 +110,16 @@ pub const EDITOR: ValueSpec = ValueSpec {
     secret: false,
 };
 
+pub const COMMENT_MARKS: ValueSpec = ValueSpec {
+    name: "inline comment marks in page bodies (full, ids, off)",
+    flag: "--comment-marks",
+    env: "CONFED_COMMENT_MARKS",
+    key: "comments.marks",
+    secret: false,
+};
+
 /// Every value `confed config --set` accepts.
-pub const SETTABLE: &[ValueSpec] = &[SPACE, CONCURRENCY, EDITOR, BASE_URL, FLAVOR];
+pub const SETTABLE: &[ValueSpec] = &[SPACE, CONCURRENCY, EDITOR, BASE_URL, FLAVOR, COMMENT_MARKS];
 
 /// Asks the user for a value. The CLI supplies a TTY implementation; tests and
 /// non-interactive runs supply [`NoPrompt`].
