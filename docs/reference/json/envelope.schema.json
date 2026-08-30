@@ -59,6 +59,7 @@
             "doctor",
             "export",
             "mkdocs",
+            "version",
             "completion",
             "tui"
           ]

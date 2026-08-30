@@ -41,7 +41,10 @@ pass `--allow-delete`.
 **Agents are a first-class user.** `confed init` writes `CLAUDE.md` and
 `AGENTS.md` into the directory describing the frontmatter contract, the command
 cheat-sheet, the conflict workflow, and the do-not-touch list. `--json` gives a
-versioned envelope on every command.
+versioned envelope on every command. Those contracts are stamped with the confed
+that wrote them, and `confed version --changelog --since <version>` prints the
+release notes compiled into the binary, so an agent that meets an upgraded confed
+can read what changed before it touches anything.
 
 ## Layout on disk
 
@@ -106,11 +109,12 @@ a stateful in-memory server in both Cloud and Data Center modes.
 
 ## Status
 
-Early, but complete enough to use. Both API clients, the converter, the sync
-engine, the command set and the TUI are implemented and tested — 459 tests,
-including scenarios that run end to end against a mock server in both Confluence
-flavors. What is missing is packaging and a release, plus the smaller gaps each
-phase file records.
+Early, but complete enough to use: **0.1.0** is the first release, and
+[CHANGELOG.md](CHANGELOG.md) records what is in it. Both API clients, the
+converter, the sync engine, the command set and the TUI are implemented and
+tested, including scenarios that run end to end against a mock server in both
+Confluence flavors. What is missing is packaging — no published crate or binary
+artifacts yet — plus the smaller gaps each phase file records.
 
 See [`docs/plan/README.md`](docs/plan/README.md) for the state of each phase and
 the defects the test suite caught along the way, and

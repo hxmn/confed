@@ -1,5 +1,6 @@
 //! confed — an offline-first Confluence editor.
 
+mod changelog;
 mod cli;
 mod commands;
 mod context;
@@ -39,9 +40,11 @@ fn main() -> std::process::ExitCode {
 fn run(cli: Cli) -> Result<Output> {
     let Cli { global, command } = cli;
 
-    // Completion needs neither config nor a workspace.
-    if let Command::Completion(args) = &command {
-        return commands::completion::run(args);
+    // These describe the binary itself: no config, no workspace, no network.
+    match &command {
+        Command::Completion(args) => return commands::completion::run(args),
+        Command::Version(args) => return commands::version::run(args),
+        _ => {}
     }
 
     let mut ctx = Context::build(global)?;
@@ -112,6 +115,7 @@ async fn dispatch(
         Command::Export(args) => commands::export::run(&mut ctx, &args).await,
         Command::Config(_)
         | Command::Resolve(_)
+        | Command::Version(_)
         | Command::Completion(_)
         | Command::Mkdocs(_)
         | Command::Tui => {

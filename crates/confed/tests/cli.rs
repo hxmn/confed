@@ -289,10 +289,23 @@ async fn init_creates_the_workspace_and_reports_it_in_the_envelope() {
         assert!(dir.path().join(name).exists(), "`confed init` did not create {name}");
     }
 
-    // The agent contract names the space it was generated for.
+    // The agent contract names the space it was generated for, and the confed
+    // that generated it, so an agent can tell when it has gone out of date.
     let claude = read(dir.path(), "CLAUDE.md");
     assert!(claude.contains(SPACE), "the agent contract does not name the space");
     assert_eq!(claude, read(dir.path(), "AGENTS.md"), "both agent files must be identical");
+    assert!(
+        claude.starts_with(&format!(
+            "<!-- confed:agent-docs version={} -->",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "the agent contract is not stamped with the confed that wrote it:\n{}",
+        claude.lines().next().unwrap_or_default()
+    );
+    assert!(
+        claude.contains("confed version --changelog --since"),
+        "the agent contract does not say how to read what changed after an upgrade"
+    );
 
     // Credentials and local state must never be committed.
     let gitignore = read(dir.path(), ".gitignore");
@@ -627,6 +640,91 @@ async fn help_and_a_bare_invocation_behave_like_a_normal_cli() {
     let output = run(confed(dir.path(), &["--version"]));
     assert_eq!(exit_code(&output), 0);
     assert!(stdout(&output).starts_with("confed "), "{}", stdout(&output));
+}
+
+#[tokio::test]
+async fn version_reports_the_compatibility_contract_and_the_release_notes() {
+    // Deliberately not a workspace: an agent must be able to ask what confed is
+    // before it has one.
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run(confed(dir.path(), &["version", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "version");
+    let result = &value["result"];
+    assert_eq!(result["version"], json!(env!("CARGO_PKG_VERSION")));
+    assert_eq!(result["version"], value["confed"]["version"]);
+    assert_eq!(result["json_schema"], value["confed"]["schema"]);
+    assert!(result["state_schema"].as_u64().unwrap() >= 1);
+    assert_eq!(result["changelog"], json!([]), "the notes are printed only on request");
+
+    // --changelog answers from notes compiled into the binary, so it works with
+    // no workspace, no network and no checkout.
+    let output = run(confed(dir.path(), &["version", "--changelog", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "version");
+    let entry = &value["result"]["changelog"][0];
+    assert_eq!(entry["version"], json!(env!("CARGO_PKG_VERSION")), "{}", value["result"]);
+    assert!(entry["date"].is_string(), "a released section carries its date");
+    assert!(!entry["notes"].as_str().unwrap().is_empty());
+
+    // Nothing has been released after the build being tested.
+    let output =
+        run(confed(dir.path(), &["version", "--changelog", "--since", env!("CARGO_PKG_VERSION")]));
+    assert_eq!(exit_code(&output), 0);
+    assert!(stderr(&output).contains("nothing newer"), "{}", stderr(&output));
+
+    // A --since that is not a version is a usage error, not an empty answer.
+    let output =
+        run(confed(dir.path(), &["version", "--changelog", "--since", "latest", "--json"]));
+    assert_eq!(exit_code(&output), 2);
+    assert_eq!(envelope(&output, "version")["errors"][0]["code"], json!("USAGE"));
+}
+
+#[tokio::test]
+async fn doctor_reports_an_agent_contract_written_by_another_confed_and_fixes_it() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    // What an upgrade leaves behind: a contract describing an older confed.
+    let stale = format!(
+        "<!-- confed:agent-docs version=0.0.1 -->\n# confed workspace\n\nrules for {SPACE}\n"
+    );
+    std::fs::write(dir.path().join("CLAUDE.md"), &stale).unwrap();
+
+    let output = run(confed_authed(dir.path(), &["doctor", "--json"]));
+    let value = envelope(&output, "doctor");
+    let check = value["result"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == json!("agent docs"))
+        .expect("doctor has no agent docs check");
+    assert_eq!(check["status"], json!("warn"), "{check}");
+    let detail = check["detail"].as_str().unwrap();
+    assert!(detail.contains("0.0.1") && detail.contains(env!("CARGO_PKG_VERSION")), "{detail}");
+    assert_eq!(read(dir.path(), "CLAUDE.md"), stale, "doctor without --fix must not write");
+
+    let output = run(confed_authed(dir.path(), &["doctor", "--fix", "--json"]));
+    let value = envelope(&output, "doctor");
+    let check = value["result"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == json!("agent docs"))
+        .expect("doctor has no agent docs check");
+    assert_eq!(check["fix_applied"], json!(true), "{check}");
+    let rewritten = read(dir.path(), "CLAUDE.md");
+    assert!(
+        rewritten.starts_with(&format!(
+            "<!-- confed:agent-docs version={} -->",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "--fix did not restamp the contract:\n{}",
+        rewritten.lines().next().unwrap_or_default()
+    );
+    assert_eq!(rewritten, read(dir.path(), "AGENTS.md"));
 }
 
 #[tokio::test]

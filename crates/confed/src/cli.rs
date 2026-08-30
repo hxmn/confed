@@ -159,6 +159,9 @@ pub enum Command {
     /// Generate an MkDocs site over the pulled Markdown.
     Mkdocs(MkdocsArgs),
 
+    /// Report this build's versions, and what changed in it.
+    Version(VersionArgs),
+
     /// Generate a shell completion script.
     Completion(CompletionArgs),
 
@@ -192,6 +195,7 @@ impl Command {
             Command::Doctor(_) => "doctor",
             Command::Export(_) => "export",
             Command::Mkdocs(_) => "mkdocs",
+            Command::Version(_) => "version",
             Command::Completion(_) => "completion",
             Command::Tui => "tui",
         }
@@ -610,6 +614,18 @@ pub struct MkdocsArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct VersionArgs {
+    /// Print the release notes for this build, not just its version numbers.
+    #[arg(long)]
+    pub changelog: bool,
+
+    /// With --changelog, print every release newer than this version — what an
+    /// upgrade from it brought.
+    #[arg(long, value_name = "VERSION", requires = "changelog")]
+    pub since: Option<String>,
+}
+
+#[derive(Args, Debug)]
 pub struct CompletionArgs {
     #[arg(value_parser = ["bash", "zsh", "fish", "powershell", "elvish"])]
     pub shell: String,
@@ -670,6 +686,13 @@ mod tests {
     fn the_tui_is_a_subcommand_like_any_other() {
         let cli = Cli::try_parse_from(["confed", "tui"]).unwrap();
         assert_eq!(cli.command.name(), "tui");
+    }
+
+    #[test]
+    fn since_is_only_meaningful_with_the_changelog() {
+        let cli = Cli::try_parse_from(["confed", "version", "--changelog", "--since", "0.1.0"]);
+        assert!(cli.is_ok());
+        assert!(Cli::try_parse_from(["confed", "version", "--since", "0.1.0"]).is_err());
     }
 
     #[test]

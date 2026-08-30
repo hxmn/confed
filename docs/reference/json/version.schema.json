@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/docs/reference/json/version.schema.json",
+  "title": "confed version result",
+  "description": "Everything a caller needs to decide whether the confed it found is the one it expects: the three versions that make up the compatibility contract, and the release notes compiled into the binary.",
+  "type": "object",
+  "required": [
+    "version",
+    "json_schema",
+    "state_schema",
+    "changelog"
+  ],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "The binary's release, the same string as confed.version in the envelope."
+    },
+    "json_schema": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Envelope schema this build produces; bumped only for a breaking change."
+    },
+    "state_schema": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Highest .state.db schema this build understands. A newer database is refused rather than migrated downward."
+    },
+    "changelog": {
+      "type": "array",
+      "description": "Release notes, newest first. Empty unless --changelog was given: with it, the section for this build, or with --since, every release after that version.",
+      "items": {
+        "type": "object",
+        "required": [
+          "version",
+          "notes"
+        ],
+        "properties": {
+          "version": {
+            "type": "string",
+            "description": "The release, or \"Unreleased\" for changes not yet in one."
+          },
+          "date": {
+            "type": "string",
+            "description": "Release date as the changelog records it, usually YYYY-MM-DD. Absent for an unreleased section."
+          },
+          "notes": {
+            "type": "string",
+            "description": "The section body as Markdown, heading excluded."
+          }
+        }
+      }
+    }
+  }
+}

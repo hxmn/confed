@@ -17,7 +17,7 @@ same list from the binary itself.
   [`open`](#confed-open)
 - Maintenance: [`whoami`](#confed-whoami), [`config`](#confed-config),
   [`doctor`](#confed-doctor), [`export`](#confed-export),
-  [`completion`](#confed-completion)
+  [`version`](#confed-version), [`completion`](#confed-completion)
 - Interactive: [`tui`](#confed-tui)
 
 ## Global flags
@@ -495,6 +495,11 @@ coverage, the stored credential and its backend, keyring availability, `.session
 permissions, hand-edited frontmatter, unparseable page files, fetch age, the agent
 contract files, a converter round-trip self-test, and a live `whoami` against the server.
 
+The agent-docs check warns both when `CLAUDE.md` / `AGENTS.md` are missing and when
+they were written by a different confed than the one running — the version is stamped
+into the first line of each file. `--fix` rewrites them in either case; see
+[`confed version`](#confed-version) for reading what changed first.
+
 ```bash
 confed doctor
 confed doctor --fix
@@ -515,6 +520,36 @@ Write pages out in another format, from local state — no server access needed.
 confed export "Runbooks/**" --format html --out /tmp/runbooks
 confed export --format storage --json | jq -r '.result.exported[].out'
 ```
+
+## confed version
+
+Report what this binary is, and what changed in it. Needs neither a workspace nor
+credentials.
+
+| Flag | Meaning |
+|---|---|
+| `--changelog` | Also print the release notes for this build. |
+| `--changelog --since <VERSION>` | Print every release newer than `<VERSION>` instead — what an upgrade from it brought. A `--since` that is not a version number exits 2. |
+
+Three versions make up the compatibility contract, and all three are reported here:
+the binary's own release, the `--json` envelope schema (`json_schema`), and the highest
+`.state.db` schema this build understands (`state_schema`).
+
+```bash
+confed version
+confed version --changelog
+confed version --json | jq -r '.result | "\(.version) envelope=\(.json_schema) state=\(.state_schema)"'
+confed version --changelog --since 0.1.0 --json | jq -r '.result.changelog[].version'
+```
+
+The release notes are compiled into the binary, so this works offline and outside a
+checkout. That is what makes it usable from the generated `CLAUDE.md` / `AGENTS.md`
+contract: those files record the confed that wrote them, and an agent that finds a
+different `confed version` reads `--changelog --since <stamped version>` before
+trusting them, then runs `confed doctor --fix` to regenerate them.
+
+An empty answer is not an error: `--since` the current version exits 0 with an empty
+`changelog` array and a warning on stderr.
 
 ## confed completion
 
@@ -579,7 +614,7 @@ Places where the accepted command line is ahead of the behaviour, or where
 - **`spaces --mine`**, **`open --space` / `--comment`**, **`comment add --editor`**,
   **`export --format pdf`** and **`config --set default-labels`** are described in
   design 04 but are not implemented.
-- **`confed --version`** prints only the binary version, not the JSON-schema and
-  state-schema versions.
+- **`confed --version`** prints only the binary version; `confed version` is the one
+  that reports the JSON-schema and state-schema versions too.
 - **`errors[]` entries carry `code`, `message` and `hint` only** — the `page_id` and
   `path` fields sketched in design 04 are not emitted.

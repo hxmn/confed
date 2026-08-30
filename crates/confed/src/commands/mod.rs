@@ -22,6 +22,7 @@ pub mod search;
 pub mod spaces;
 pub mod status;
 pub mod sync_cmds;
+pub mod version;
 pub mod whoami;
 
 pub use sync_cmds::{fetch, pull, push};

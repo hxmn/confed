@@ -168,26 +168,37 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
     }
 
     // --- agent docs -------------------------------------------------------
-    let missing_docs: Vec<&str> = crate::commands::agent_docs::FILENAMES
-        .iter()
-        .filter(|f| !root.join(f).exists())
-        .copied()
-        .collect();
-    if missing_docs.is_empty() {
-        checks.push(Check::pass("agent docs", "CLAUDE.md and AGENTS.md present"));
-    } else if args.fix {
-        let base_url = ctx.workspace()?.base_url()?.unwrap_or_default();
-        let flavor = ctx.workspace()?.flavor()?.unwrap_or(confed_api::Flavor::Cloud);
-        let space = ctx.workspace()?.space_key().unwrap_or_default();
-        crate::commands::agent_docs::write(&root, &base_url, flavor, &space)?;
-        checks.push(
-            Check::warn("agent docs", format!("missing: {}", missing_docs.join(", "))).fixed(),
-        );
-    } else {
-        checks.push(Check::warn(
+    use crate::commands::agent_docs;
+    let (missing_docs, stale_docs) = agent_docs::audit(&root);
+    if missing_docs.is_empty() && stale_docs.is_empty() {
+        checks.push(Check::pass(
             "agent docs",
-            format!("missing: {} (run with --fix)", missing_docs.join(", ")),
+            format!("CLAUDE.md and AGENTS.md, written by confed {}", agent_docs::VERSION),
         ));
+    } else {
+        let mut problems = Vec::new();
+        if !missing_docs.is_empty() {
+            problems.push(format!("missing: {}", missing_docs.join(", ")));
+        }
+        for (name, stamped) in &stale_docs {
+            // The contract describes a confed that is no longer the one in the
+            // path, so an agent following it may be reading obsolete rules.
+            problems.push(format!(
+                "{name} was written by {stamped}, this is confed {}",
+                agent_docs::VERSION
+            ));
+        }
+        let detail = problems.join("; ");
+
+        if args.fix {
+            let base_url = ctx.workspace()?.base_url()?.unwrap_or_default();
+            let flavor = ctx.workspace()?.flavor()?.unwrap_or(confed_api::Flavor::Cloud);
+            let space = ctx.workspace()?.space_key().unwrap_or_default();
+            agent_docs::write(&root, &base_url, flavor, &space)?;
+            checks.push(Check::warn("agent docs", detail).fixed());
+        } else {
+            checks.push(Check::warn("agent docs", format!("{detail} (run with --fix)")));
+        }
     }
 
     // --- converter self-test ---------------------------------------------
