@@ -202,8 +202,8 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Yellow),
         )));
     }
-    for attachment in &plan.attachment_ops {
-        lines.push(Line::from(format!("attach {attachment}")));
+    for op in &plan.attachment_ops {
+        lines.push(Line::from(format!("attach {op}")));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(

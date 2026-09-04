@@ -581,6 +581,159 @@ async fn deleting_an_attachment_requires_allow_delete() {
     assert!(gone.is_empty(), "with --allow-delete it is removed");
 }
 
+/// A pull that dies mid-download leaves a `*.confed-part` scratch file in the
+/// sidecar. It is confed's own, not page content: push must not offer it, and a
+/// dry run must not hide that it would.
+#[tokio::test]
+async fn a_partial_download_is_never_a_push_candidate() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the video.</p>");
+    h.pull().await;
+
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/video.webm"), b"the whole thing").unwrap();
+    // Both namings: the hidden one confed writes now, and the bare one older
+    // versions left behind and existing workspaces still hold.
+    std::fs::write(h.path(".Diagrams/.video.webm.confed-part"), b"the whole").unwrap();
+    std::fs::write(h.path(".Diagrams/video.webm.confed-part"), b"the whole").unwrap();
+
+    let opts = PushOptions { with_attachments: true, ..Default::default() };
+
+    let plan = h.engine.plan_push(&h.ws, &opts).expect("plan");
+    let planned: Vec<String> = plan.attachment_ops.iter().map(|op| op.file.clone()).collect();
+    assert_eq!(
+        planned,
+        vec![".Diagrams/video.webm".to_string()],
+        "--dry-run lists the real attachment and nothing else: {planned:?}"
+    );
+
+    let outcome = h.engine.push(&mut h.ws, &opts).await.expect("push");
+    assert_eq!(outcome.attachments_uploaded, vec![".Diagrams/video.webm".to_string()]);
+
+    let remote =
+        h.engine.client().list_attachments(&confed_api::PageId::new("1001")).await.unwrap();
+    let names: Vec<&str> = remote.iter().map(|a| a.filename.as_str()).collect();
+    assert_eq!(names, vec!["video.webm"], "no scratch file reached Confluence");
+}
+
+/// The partials themselves are swept on the next pull of the page, so an
+/// interrupted download does not linger in a directory of user content.
+#[tokio::test]
+async fn pull_sweeps_partial_downloads_left_behind() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the diagram.</p>");
+    h.pull().await;
+
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/diagram.png"), b"content").unwrap();
+    h.engine
+        .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
+        .await
+        .expect("push");
+
+    std::fs::write(h.path(".Diagrams/.diagram.png.confed-part"), b"conte").unwrap();
+    std::fs::write(h.path(".Diagrams/video.webm.confed-part"), b"half a video").unwrap();
+
+    h.mock.remote_edit("1001", "<p>See the diagram, again.</p>");
+    h.pull().await;
+
+    assert!(!h.path(".Diagrams/.diagram.png.confed-part").exists());
+    assert!(!h.path(".Diagrams/video.webm.confed-part").exists());
+    assert!(h.path(".Diagrams/diagram.png").exists(), "the real attachment is untouched");
+}
+
+/// A dry run that says nothing about attachments reads as a promise that
+/// nothing else will happen. It has to name the same work the push does.
+#[tokio::test]
+async fn a_dry_run_reports_the_attachment_work_it_would_do() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the diagram.</p>");
+    h.pull().await;
+
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/diagram.png"), b"content").unwrap();
+
+    let dry = h
+        .engine
+        .push(
+            &mut h.ws,
+            &PushOptions { with_attachments: true, dry_run: true, ..Default::default() },
+        )
+        .await
+        .expect("dry run");
+    assert_eq!(dry.attachments_uploaded, vec![".Diagrams/diagram.png".to_string()]);
+    assert!(
+        h.engine
+            .client()
+            .list_attachments(&confed_api::PageId::new("1001"))
+            .await
+            .unwrap()
+            .is_empty(),
+        "a dry run uploads nothing"
+    );
+
+    let real = h
+        .engine
+        .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
+        .await
+        .expect("push");
+    assert_eq!(real.attachments_uploaded, dry.attachments_uploaded, "the plan was kept");
+}
+
+/// Skipping a deletion for want of `--allow-delete` is a decision, not a
+/// non-event: push says so, rather than exiting clean as if nothing was asked.
+#[tokio::test]
+async fn a_refused_attachment_deletion_is_reported_not_dropped() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the diagram.</p>");
+    h.pull().await;
+
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/diagram.png"), b"content").unwrap();
+    h.engine
+        .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
+        .await
+        .expect("push");
+
+    std::fs::remove_file(h.path(".Diagrams/diagram.png")).unwrap();
+
+    let refused = h
+        .engine
+        .push(&mut h.ws, &PushOptions { with_attachments: true, ..Default::default() })
+        .await
+        .expect("push");
+    assert!(refused.attachments_deleted.is_empty(), "nothing was deleted");
+    let blocked = refused
+        .skipped
+        .iter()
+        .find(|s| s.path == ".Diagrams/diagram.png")
+        .unwrap_or_else(|| panic!("the refusal is reported: {refused:?}"));
+    assert!(blocked.reason.contains("--allow-delete"), "and it says what to do: {blocked:?}");
+
+    // The narrower opt-in deletes the attachment without licensing page deletes.
+    let deleted = h
+        .engine
+        .push(
+            &mut h.ws,
+            &PushOptions {
+                with_attachments: true,
+                allow_attachment_delete: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("push");
+    assert_eq!(deleted.attachments_deleted, vec![".Diagrams/diagram.png".to_string()]);
+    assert!(deleted.skipped.iter().all(|s| s.path != ".Diagrams/diagram.png"));
+    assert!(h
+        .engine
+        .client()
+        .list_attachments(&confed_api::PageId::new("1001"))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 /// Two pages swapping titles makes each want the path the other still holds.
 #[tokio::test]
 async fn pages_that_swap_titles_still_pull() {

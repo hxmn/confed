@@ -366,24 +366,20 @@ impl Http {
         if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        let tmp = dest.with_extension(format!(
-            "{}.confed-part",
-            dest.extension().and_then(|e| e.to_str()).unwrap_or("")
-        ));
+        let tmp = partial_path(dest);
         let mut file = tokio::fs::File::create(&tmp).await?;
-        let mut written = 0u64;
-        let mut stream = resp.bytes_stream();
-        {
-            use futures::StreamExt;
-            use tokio::io::AsyncWriteExt;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk?;
-                written += chunk.len() as u64;
-                file.write_all(&chunk).await?;
-            }
-            file.flush().await?;
-        }
+        let written = stream_to_file(resp, &mut file).await;
         drop(file);
+
+        // A half-written download is confed's mess to clean up: leaving it in a
+        // page's sidecar directory would offer it to the next push as content.
+        let written = match written {
+            Ok(written) => written,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(e);
+            }
+        };
         tokio::fs::rename(&tmp, dest).await?;
         Ok(written)
     }
@@ -420,6 +416,34 @@ impl Http {
     }
 }
 
+/// Where a download is staged before it is renamed into place.
+///
+/// The scratch name is both hidden and suffixed, because it is written into a
+/// page's sidecar directory alongside real attachments: whichever half of the
+/// name a scanner keys on, a partial can never be mistaken for user content.
+pub fn partial_path(dest: &Path) -> std::path::PathBuf {
+    let name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("download");
+    dest.with_file_name(format!(".{name}{PARTIAL_SUFFIX}"))
+}
+
+/// Suffix marking confed's own half-finished downloads.
+pub const PARTIAL_SUFFIX: &str = ".confed-part";
+
+async fn stream_to_file(resp: reqwest::Response, file: &mut tokio::fs::File) -> ApiResult<u64> {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let mut written = 0u64;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        written += chunk.len() as u64;
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    Ok(written)
+}
+
 async fn decode<T: DeserializeOwned>(resp: reqwest::Response, context: &str) -> ApiResult<T> {
     let text = resp.text().await?;
     if text.trim().is_empty() {
@@ -451,6 +475,27 @@ mod tests {
         let auth = Auth::Basic { user: "a@b.c".into(), secret: Secret::new("tok") };
         assert!(format!("{auth:?}").contains("***"));
         assert!(!format!("{auth:?}").contains("tok"));
+    }
+
+    #[test]
+    fn partial_downloads_are_named_so_no_scanner_takes_them_for_content() {
+        let tmp = partial_path(Path::new("/space/.Page/Целевой образ схемы.webm"));
+        assert_eq!(
+            tmp,
+            Path::new("/space/.Page/.Целевой образ схемы.webm.confed-part"),
+            "hidden and suffixed, next to the file it will become"
+        );
+
+        let name = tmp.file_name().and_then(|n| n.to_str()).unwrap();
+        assert!(name.starts_with('.'), "hidden, so a dotfile rule skips it");
+        assert!(name.ends_with(PARTIAL_SUFFIX), "suffixed, so a suffix rule skips it");
+
+        // Extension-less names work too: the old naming produced "notes.confed-part"
+        // for "notes", which collides with a real attachment of that name.
+        assert_eq!(
+            partial_path(Path::new("/space/.Page/notes")),
+            Path::new("/space/.Page/.notes.confed-part")
+        );
     }
 
     #[test]

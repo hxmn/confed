@@ -466,6 +466,117 @@ async fn a_dry_run_push_reports_the_page_without_sending_anything() {
     assert!(read(dir.path(), ROOT_FILE).contains("version: 4"));
 }
 
+/// `attach --rm` must never report a removal it did not make. With `--push` it
+/// deletes on the server; without it, it says the deletion is only staged.
+#[tokio::test]
+async fn attach_rm_deletes_on_the_server_or_says_it_did_not() {
+    let server = dc_server().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/rest/api/content/{ROOT_PAGE}/child/attachment")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "id": "att-9", "type": "attachment", "title": "diagram.png",
+                "version": { "number": 1 },
+                "extensions": { "fileSize": 7, "mediaType": "image/png" }
+            }],
+            "size": 1
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/rest/api/content/att-9"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+
+    // Removing something that is not an attachment is an error, not a success.
+    let output = run(confed_authed(dir.path(), &["attach", ROOT_FILE, "--rm", "ghost.png"]));
+    assert_ne!(exit_code(&output), 0, "a no-op must not exit 0: {}", stdout(&output));
+    assert!(stderr(&output).contains("ghost.png"), "stderr: {}", stderr(&output));
+
+    let source = dir.path().join("diagram.png");
+    std::fs::write(&source, b"content").unwrap();
+    let output = run(confed_authed(
+        dir.path(),
+        &["attach", ROOT_FILE, source.to_str().unwrap(), "--push", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "attach");
+    assert_eq!(
+        value["result"]["push"]["attachments_uploaded"],
+        json!([".Team Handbook/diagram.png"]),
+        "push names the file it uploaded"
+    );
+
+    // Without --push the file goes locally and the report says only that.
+    let output =
+        run(confed_authed(dir.path(), &["attach", ROOT_FILE, "--rm", "diagram.png", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "attach");
+    assert_eq!(value["result"]["removed_locally"], json!(true));
+    assert_eq!(value["result"]["removed_on_server"], json!(false));
+    assert_eq!(value["result"]["staged"], json!(true));
+    assert!(
+        !mutations(&server).await.contains(&"DELETE /rest/api/content/att-9".to_string()),
+        "nothing was deleted yet"
+    );
+
+    // A plain push reports the refusal rather than exiting clean.
+    let value = envelope(&run(confed_authed(dir.path(), &["push", "--json"])), "push");
+    assert!(value["result"]["attachments_deleted"].as_array().unwrap().is_empty());
+    let blocked = value["result"]["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["path"] == json!(".Team Handbook/diagram.png"))
+        .unwrap_or_else(|| panic!("the refusal is reported: {}", value["result"]));
+    assert!(blocked["reason"].as_str().unwrap().contains("--allow-delete"));
+
+    // And `--allow-delete` applies it, as the message said it would.
+    let value =
+        envelope(&run(confed_authed(dir.path(), &["push", "--allow-delete", "--json"])), "push");
+    assert_eq!(
+        value["result"]["attachments_deleted"],
+        json!([".Team Handbook/diagram.png"]),
+        "the deletion finally happens and is named"
+    );
+    assert!(
+        mutations(&server).await.contains(&"DELETE /rest/api/content/att-9".to_string()),
+        "the request really left the machine"
+    );
+
+    // With --push, --rm does the whole job itself.
+    assert_eq!(
+        exit_code(&run(confed_authed(
+            dir.path(),
+            &["attach", ROOT_FILE, source.to_str().unwrap(), "--push", "--json"]
+        ))),
+        0
+    );
+    let before = mutations(&server).await.len();
+    let output = run(confed_authed(
+        dir.path(),
+        &["attach", ROOT_FILE, "--rm", "diagram.png", "--push", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "attach");
+    assert_eq!(value["result"]["removed_on_server"], json!(true));
+    assert_eq!(value["result"]["staged"], json!(false));
+    assert_eq!(
+        value["result"]["push"]["attachments_deleted"],
+        json!([".Team Handbook/diagram.png"])
+    );
+    assert!(mutations(&server).await.len() > before, "--push made a request");
+    assert!(
+        !dir.path().join(".Team Handbook/diagram.png").exists(),
+        "and the local copy is gone too"
+    );
+}
+
 /// Every mutating request the mock server has seen, as `METHOD /path`.
 async fn mutations(server: &MockServer) -> Vec<String> {
     server

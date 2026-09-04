@@ -116,6 +116,9 @@ The rules, precisely:
 - Scanning skips every directory whose name starts with `.`, which is what keeps sidecars,
   `.git` and confed's own state out of the page scan.
 - `CLAUDE.md` and `AGENTS.md` are generated files, not pages, and are skipped by name.
+- Inside a sidecar, everything is an attachment except `storage.xml`, `comments.md`,
+  dotfiles, and `*.confed-part` — confed's own scratch name for a download in flight,
+  which `pull` sweeps and `push` never uploads.
 
 confed's own files at the workspace root:
 

@@ -11,7 +11,7 @@
   "$defs": {
     "outcome": {
       "type": "object",
-      "required": ["pushed", "created", "deleted", "attachments_uploaded", "comments_added", "skipped", "failed", "dry_run"],
+      "required": ["pushed", "created", "deleted", "attachments_uploaded", "attachments_deleted", "comments_added", "skipped", "failed", "dry_run"],
       "properties": {
         "pushed": {
           "type": "array",
@@ -28,15 +28,29 @@
           "description": "Pages deleted on the server. Only ever non-empty with --allow-delete.",
           "items": { "$ref": "#/$defs/page_change" }
         },
-        "attachments_uploaded": { "type": "array", "items": { "type": "string" } },
+        "attachments_uploaded": {
+          "type": "array",
+          "description": "Sidecar-relative paths of attachments uploaded, or that a --dry-run would upload.",
+          "items": { "type": "string" }
+        },
+        "attachments_deleted": {
+          "type": "array",
+          "description": "Sidecar-relative paths of attachments deleted on the server. Only ever non-empty with --allow-delete.",
+          "items": { "type": "string" }
+        },
         "comments_added": {
           "type": "array",
           "description": "Ids of comments posted from `confed:new` markers in comment sidecars.",
           "items": { "type": "string" }
         },
+        "comments_pending": {
+          "type": "array",
+          "description": "Comment work a --dry-run found. Absent on a real push, which reports ids in `comments_added`.",
+          "items": { "type": "string" }
+        },
         "skipped": {
           "type": "array",
-          "description": "Pages push refused: unresolved conflicts, tampered frontmatter, a stale base, or a local deletion without --allow-delete.",
+          "description": "Work push refused: unresolved conflicts, tampered frontmatter, a stale base, or a local deletion (of a page or an attachment) without --allow-delete.",
           "items": { "$ref": "#/$defs/blocked_page" }
         },
         "failed": {

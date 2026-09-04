@@ -166,9 +166,18 @@ pub struct PushOptions {
     /// Deletions are skipped unless this is set: an accidental `rm -rf` must not
     /// silently delete a Confluence subtree.
     pub allow_delete: bool,
+    /// Allow attachment deletions without allowing page deletions, so
+    /// `confed attach --rm --push` cannot take the page down with the file.
+    pub allow_attachment_delete: bool,
     pub message: Option<String>,
     pub with_attachments: bool,
     pub with_comments: bool,
+}
+
+impl PushOptions {
+    fn deletes_attachments(&self) -> bool {
+        self.allow_delete || self.allow_attachment_delete
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -191,11 +200,54 @@ pub enum PushKind {
     Delete,
 }
 
+/// One attachment change a push would make.
+#[derive(Clone, Debug, Serialize)]
+pub struct AttachmentOp {
+    pub page_id: String,
+    /// Path of the page that owns it.
+    pub path: String,
+    /// Sidecar-relative path of the file, as reported by push.
+    pub file: String,
+    pub filename: String,
+    /// The server's id, for everything but a first upload.
+    pub attachment_id: Option<String>,
+    pub kind: AttachmentOpKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AttachmentOpKind {
+    Upload,
+    Reupload,
+    Delete,
+}
+
+/// Why an attachment deletion did not happen — said out loud, because a silent
+/// no-op reads as a success.
+fn blocked_attachment(op: &AttachmentOp) -> BlockedPage {
+    BlockedPage {
+        page_id: op.page_id.clone(),
+        path: op.file.clone(),
+        reason: "attachment is gone locally; pass --allow-delete to remove it on the server".into(),
+    }
+}
+
+impl std::fmt::Display for AttachmentOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let verb = match self.kind {
+            AttachmentOpKind::Upload => "upload",
+            AttachmentOpKind::Reupload => "reupload",
+            AttachmentOpKind::Delete => "delete",
+        };
+        write!(f, "{verb:<8} {}", self.file)
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PushPlan {
     pub ops: Vec<PushOp>,
     pub skipped: Vec<BlockedPage>,
-    pub attachment_ops: Vec<String>,
+    pub attachment_ops: Vec<AttachmentOp>,
     pub comment_ops: Vec<String>,
 }
 
@@ -211,7 +263,11 @@ pub struct PushOutcome {
     pub created: Vec<PageChange>,
     pub deleted: Vec<PageChange>,
     pub attachments_uploaded: Vec<String>,
+    pub attachments_deleted: Vec<String>,
     pub comments_added: Vec<String>,
+    /// Comment work a dry run found; a real push reports ids in `comments_added`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub comments_pending: Vec<String>,
     pub skipped: Vec<BlockedPage>,
     pub failed: Vec<FailedPage>,
     pub dry_run: bool,
@@ -1064,6 +1120,18 @@ impl SyncEngine {
         placement: &Placement,
         reset: bool,
     ) -> Result<usize> {
+        let dir = ws.absolute(&placement.sidecar);
+        // Scratch from a download this or an earlier pull gave up on. Sweeping
+        // it here keeps the sidecar directory nothing but page content.
+        let swept = attachments::remove_stale_partials(&dir);
+        if swept > 0 {
+            tracing::debug!(
+                target: "confed::sync",
+                page = %page_id, swept,
+                "removed partial downloads left by an interrupted pull"
+            );
+        }
+
         let records = ws.state().page_attachments(page_id)?;
         if records.is_empty() {
             return Ok(0);
@@ -1071,7 +1139,6 @@ impl SyncEngine {
         let remote_attachments =
             self.client.list_attachments(&PageId::new(page_id)).await.unwrap_or_default();
 
-        let dir = ws.absolute(&placement.sidecar);
         let mut count = 0;
         for record in records {
             let dest = dir.join(&record.filename);
@@ -1314,12 +1381,40 @@ impl SyncEngine {
         if opts.with_attachments {
             for status in &statuses {
                 let Some(page_id) = &status.page_id else { continue };
-                let sidecar = ws.absolute(&paths::sidecar_for(&status.path));
+                // A page fetched but never written has no sidecar to scan.
+                if status.path.is_empty() {
+                    continue;
+                }
+                if !opts.scope.is_empty()
+                    && !opts.scope.iter().any(|s| s == page_id || path_matches(s, &status.path))
+                {
+                    continue;
+                }
+                let sidecar_rel = paths::sidecar_for(&status.path);
+                let sidecar = ws.absolute(&sidecar_rel);
                 let recorded = ws.state().page_attachments(page_id)?;
                 for action in attachments::diff_attachments(&sidecar, &recorded)? {
-                    if action.is_change() {
-                        plan.attachment_ops.push(format!("{}: {:?}", status.path, action));
-                    }
+                    let (kind, attachment_id) = match &action {
+                        attachments::AttachmentAction::Unchanged { .. } => continue,
+                        attachments::AttachmentAction::Upload { .. } => {
+                            (AttachmentOpKind::Upload, None)
+                        }
+                        attachments::AttachmentAction::Reupload { attachment_id, .. } => {
+                            (AttachmentOpKind::Reupload, Some(attachment_id.clone()))
+                        }
+                        attachments::AttachmentAction::Delete { attachment_id, .. } => {
+                            (AttachmentOpKind::Delete, Some(attachment_id.clone()))
+                        }
+                    };
+                    let filename = action.filename().to_string();
+                    plan.attachment_ops.push(AttachmentOp {
+                        page_id: page_id.clone(),
+                        path: status.path.clone(),
+                        file: format!("{sidecar_rel}/{filename}"),
+                        filename,
+                        attachment_id,
+                        kind,
+                    });
                 }
             }
         }
@@ -1381,6 +1476,20 @@ impl SyncEngine {
                     PushKind::Delete => outcome.deleted.push(change),
                 }
             }
+            // A dry run that hides attachment and comment work is worse than no
+            // dry run: it reads as a promise that nothing else will happen.
+            for op in &plan.attachment_ops {
+                match op.kind {
+                    AttachmentOpKind::Upload | AttachmentOpKind::Reupload => {
+                        outcome.attachments_uploaded.push(op.file.clone())
+                    }
+                    AttachmentOpKind::Delete if opts.deletes_attachments() => {
+                        outcome.attachments_deleted.push(op.file.clone())
+                    }
+                    AttachmentOpKind::Delete => outcome.skipped.push(blocked_attachment(op)),
+                }
+            }
+            outcome.comments_pending = plan.comment_ops.clone();
             return Ok(outcome);
         }
 
@@ -1409,7 +1518,7 @@ impl SyncEngine {
         // Attachments after page bodies: a body that references a new file is
         // uploaded first, so the reference is never dangling for long.
         if opts.with_attachments {
-            outcome.attachments_uploaded = self.push_attachments(ws, opts).await?;
+            self.push_attachments(ws, opts, &plan.attachment_ops, &mut outcome).await?;
         }
         if opts.with_comments {
             outcome.comments_added = self.push_comments(ws).await?;
@@ -1419,78 +1528,59 @@ impl SyncEngine {
         Ok(outcome)
     }
 
-    /// Upload new and changed attachments, and delete the ones removed locally.
+    /// Apply the attachment half of a plan: upload new and changed files, and
+    /// delete the ones removed locally.
+    ///
+    /// This runs from the same plan `--dry-run` prints, so what a dry run
+    /// promises and what a push does cannot drift apart.
     async fn push_attachments(
         &self,
         ws: &mut Workspace,
         opts: &PushOptions,
-    ) -> Result<Vec<String>> {
-        let mut uploaded = Vec::new();
+        ops: &[AttachmentOp],
+        outcome: &mut PushOutcome,
+    ) -> Result<()> {
+        for op in ops {
+            let page_id = PageId::new(&op.page_id);
+            let sidecar = ws.absolute(&paths::sidecar_for(&op.path));
+            let file = sidecar.join(&op.filename);
 
-        for record in ws.state().all_pages()? {
-            if !opts.scope.is_empty()
-                && !opts.scope.iter().any(|s| {
-                    s == &record.page_id
-                        || s == &record.local_path
-                        || path_matches(s, &record.local_path)
-                })
-            {
-                continue;
-            }
+            match op.kind {
+                AttachmentOpKind::Upload | AttachmentOpKind::Reupload => {
+                    let existing = op.attachment_id.as_deref().map(confed_api::AttachmentId::new);
+                    let attachment =
+                        self.client.upload_attachment(&page_id, &file, existing.as_ref()).await?;
 
-            let sidecar_rel = paths::sidecar_for(&record.local_path);
-            let sidecar = ws.absolute(&sidecar_rel);
-            let recorded = ws.state().page_attachments(&record.page_id)?;
-            let actions = attachments::diff_attachments(&sidecar, &recorded)?;
-            let page_id = PageId::new(&record.page_id);
-
-            for action in actions {
-                match action {
-                    attachments::AttachmentAction::Unchanged { .. } => {}
-                    attachments::AttachmentAction::Upload { filename }
-                    | attachments::AttachmentAction::Reupload { filename, .. } => {
-                        let existing = recorded
-                            .iter()
-                            .find(|r| r.filename == filename)
-                            .map(|r| confed_api::AttachmentId::new(&r.attachment_id));
-                        let file = sidecar.join(&filename);
-                        let attachment = self
-                            .client
-                            .upload_attachment(&page_id, &file, existing.as_ref())
-                            .await?;
-
-                        ws.state().upsert_attachment(&AttachmentRecord {
-                            attachment_id: attachment.id.0.clone(),
-                            page_id: record.page_id.clone(),
-                            filename: attachment.filename.clone(),
-                            media_type: attachment.media_type.clone(),
-                            file_size: attachments::file_size(&file),
-                            version: attachment.version,
-                            sha256: attachments::file_sha256(&file).ok(),
-                            downloaded: true,
-                        })?;
-                        uploaded.push(format!("{}/{}", sidecar_rel, filename));
+                    ws.state().upsert_attachment(&AttachmentRecord {
+                        attachment_id: attachment.id.0.clone(),
+                        page_id: op.page_id.clone(),
+                        filename: attachment.filename.clone(),
+                        media_type: attachment.media_type.clone(),
+                        file_size: attachments::file_size(&file),
+                        version: attachment.version,
+                        sha256: attachments::file_sha256(&file).ok(),
+                        downloaded: true,
+                    })?;
+                    outcome.attachments_uploaded.push(op.file.clone());
+                }
+                // Deleting an attachment removes content from the server, so it
+                // follows the same explicit opt-in as deleting a page — and is
+                // reported as skipped rather than dropped on the floor.
+                AttachmentOpKind::Delete => {
+                    let Some(attachment_id) = &op.attachment_id else { continue };
+                    if !opts.deletes_attachments() {
+                        outcome.skipped.push(blocked_attachment(op));
+                        continue;
                     }
-                    // Deleting an attachment removes content from the server, so
-                    // it follows the same explicit opt-in as deleting a page.
-                    attachments::AttachmentAction::Delete { attachment_id, filename } => {
-                        if !opts.allow_delete {
-                            tracing::debug!(
-                                target: "confed::sync",
-                                page = %record.page_id, %filename,
-                                "attachment is gone locally; pass --allow-delete to remove it"
-                            );
-                            continue;
-                        }
-                        self.client
-                            .delete_attachment(&confed_api::AttachmentId::new(&attachment_id))
-                            .await?;
-                        ws.state().delete_attachment(&attachment_id)?;
-                    }
+                    self.client
+                        .delete_attachment(&confed_api::AttachmentId::new(attachment_id))
+                        .await?;
+                    ws.state().delete_attachment(attachment_id)?;
+                    outcome.attachments_deleted.push(op.file.clone());
                 }
             }
         }
-        Ok(uploaded)
+        Ok(())
     }
 
     async fn apply_push_op(

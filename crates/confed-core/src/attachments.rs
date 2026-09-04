@@ -7,6 +7,31 @@ use crate::state::AttachmentRecord;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+/// Suffix on confed's own half-finished downloads. A pull that dies mid-stream
+/// can leave one behind in the sidecar directory, so every reader of that
+/// directory has to know it is scratch, not content.
+pub use confed_api::PARTIAL_SUFFIX;
+
+/// Is this one of confed's own scratch files rather than a page attachment?
+pub fn is_partial(name: &str) -> bool {
+    name.ends_with(PARTIAL_SUFFIX)
+}
+
+/// Delete stale partial downloads left in a sidecar directory by an interrupted
+/// pull. Returns how many went. Unreadable entries are left alone.
+pub fn remove_stale_partials(sidecar_dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(sidecar_dir) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.filter_map(std::result::Result::ok) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        if is_partial(name) && path.is_file() && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 /// Content hash of a file on disk, used to decide whether to re-upload.
 pub fn file_sha256(path: &Path) -> Result<String> {
     let bytes = std::fs::read(path)
@@ -78,10 +103,13 @@ pub fn diff_attachments(
                 continue;
             }
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-            // confed's own sidecar files are never attachments.
+            // confed's own sidecar files are never attachments. Partial
+            // downloads are filtered here rather than in the uploader so that
+            // `push --dry-run` does not offer them either.
             if name == crate::comments::COMMENTS_FILENAME
                 || name == crate::paths::STORAGE_FILENAME
                 || name.starts_with('.')
+                || is_partial(name)
             {
                 continue;
             }
@@ -203,6 +231,39 @@ mod tests {
             diff_attachments(dir.path(), &[]).unwrap().is_empty(),
             "uploading these back to Confluence would be nonsense"
         );
+    }
+
+    #[test]
+    fn a_partial_download_is_never_a_push_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        // A pull that died mid-stream, next to the file it was a partial copy of.
+        std::fs::write(dir.path().join("video.webm"), b"the whole thing").unwrap();
+        std::fs::write(dir.path().join(".video.webm.confed-part"), b"the whole").unwrap();
+        // The pre-fix naming, which older workspaces still have on disk.
+        std::fs::write(dir.path().join("video.webm.confed-part"), b"the whole").unwrap();
+
+        let actions = diff_attachments(dir.path(), &[]).unwrap();
+        assert_eq!(
+            actions,
+            vec![AttachmentAction::Upload { filename: "video.webm".into() }],
+            "only the completed download is content"
+        );
+    }
+
+    #[test]
+    fn stale_partials_are_swept_and_real_attachments_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("video.webm"), b"keep me").unwrap();
+        std::fs::write(dir.path().join(".video.webm.confed-part"), b"scratch").unwrap();
+        std::fs::write(dir.path().join("video.webm.confed-part"), b"scratch").unwrap();
+
+        assert_eq!(remove_stale_partials(dir.path()), 2);
+        assert!(dir.path().join("video.webm").exists(), "the attachment survives");
+        assert!(!dir.path().join(".video.webm.confed-part").exists());
+        assert!(!dir.path().join("video.webm.confed-part").exists());
+
+        // Sweeping a directory that is not there is a no-op, not an error.
+        assert_eq!(remove_stale_partials(&dir.path().join("nope")), 0);
     }
 
     #[test]

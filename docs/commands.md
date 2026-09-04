@@ -214,7 +214,7 @@ and comment drafts.
 | `--dry-run`, `--preview` | Show exactly what would be sent, without sending it. |
 | `--interactive` | Confirm each page before uploading. Requires a terminal; exits 2 without one. |
 | `-m`, `--message <TEXT>` | Version comment recorded on the server. |
-| `--allow-delete` | Actually delete pages on the server that were deleted locally. |
+| `--allow-delete` | Actually delete pages and attachments on the server that were deleted locally. |
 | `--no-attachments` | Do not upload attachments. |
 | `--no-comments` | Do not post comment drafts. |
 
@@ -223,6 +223,15 @@ an unresolved conflict, hand-edited tool-managed frontmatter, and a base version
 than the last fetched remote version. The first and third make the command exit 4; a
 local deletion without `--allow-delete` is merely skipped and the command still exits 0.
 A page the server rejects lands in `result.failed` and the command exits 8.
+
+Attachment work is reported too, and `--dry-run` reports exactly what the real push
+would do: `result.attachments_uploaded` and `result.attachments_deleted` hold
+sidecar-relative paths, and an attachment gone locally without `--allow-delete` joins
+`result.skipped` rather than being dropped quietly.
+
+confed's own partial downloads (`*.confed-part`, left by a `pull` that died
+mid-stream) are never push candidates and never appear in a plan. The next `pull` of
+the page sweeps them out of the sidecar.
 
 ```bash
 confed push --dry-run                                    # always look first
@@ -358,13 +367,25 @@ uploaded by the next `push`.
 | Flag | Meaning |
 |---|---|
 | *(positional)* | `<PAGE> [FILES...]` |
-| `--list` | List the page's attachments. |
+| `--list` | List the page's attachments as of the last fetch. |
+| `--remote` | With `--list`, ask the server instead of the local state. |
 | `--rm <FILENAME>` | Remove an attachment by filename. |
-| `--push` | Upload immediately. |
+| `--push` | Upload immediately; with `--rm`, delete on the server immediately. |
+
+`--list` reads the local state, so it is only as fresh as the last `fetch`; the JSON
+says which it is in `result.source` (`cache` or `server`).
+
+`--rm` always removes the local file, and reports what happened on the server rather
+than assuming. With `--push` it deletes the attachment there and then, and
+`result.removed_on_server` is `true`. Without it the deletion is staged:
+`result.staged` is `true`, and the next `confed push --allow-delete` applies it.
+Removing a name that is neither in the sidecar nor on the page is exit 6, not a
+silent success. `--rm --push` cannot delete the page itself, whatever else is
+staged for it — only the attachment.
 
 ```bash
 confed attach "Team Handbook/Onboarding.md" ./diagram.png
-confed attach "Team Handbook/Onboarding.md" --list --json | jq -r '.result.attachments[].file'
+confed attach "Team Handbook/Onboarding.md" --list --remote --json | jq -r '.result.attachments[].file'
 confed attach 163842 --rm old-diagram.png --push
 ```
 

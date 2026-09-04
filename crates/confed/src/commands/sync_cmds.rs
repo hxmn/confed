@@ -189,6 +189,7 @@ pub mod push {
             scope: args.paths.clone(),
             dry_run: args.dry_run,
             allow_delete: args.allow_delete,
+            allow_attachment_delete: args.allow_delete,
             message: args.message.clone(),
             with_attachments: !args.no_attachments,
             with_comments: !args.no_comments,
@@ -242,6 +243,12 @@ pub mod push {
         for page in &outcome.deleted {
             let _ = writeln!(human, "  {:<8} {}", "deleted", page.path);
         }
+        for file in &outcome.attachments_uploaded {
+            let _ = writeln!(human, "  {:<8} {}", "uploaded", file);
+        }
+        for file in &outcome.attachments_deleted {
+            let _ = writeln!(human, "  {:<8} {}", "unlinked", file);
+        }
         for skipped in &outcome.skipped {
             let _ = writeln!(
                 human,
@@ -262,10 +269,16 @@ pub mod push {
         }
 
         let total = outcome.created.len() + outcome.pushed.len() + outcome.deleted.len();
-        if total == 0 && outcome.skipped.is_empty() {
+        let files = outcome.attachments_uploaded.len() + outcome.attachments_deleted.len();
+        if total == 0 && files == 0 && outcome.skipped.is_empty() {
             let _ = writeln!(human, "{}", style.green("Nothing to push."));
         } else if !args.dry_run {
-            let _ = writeln!(human, "\n{} pushed.", plural(total, "page", "pages"));
+            let attachments = if files > 0 {
+                format!(", {}", plural(files, "attachment", "attachments"))
+            } else {
+                String::new()
+            };
+            let _ = writeln!(human, "\n{} pushed{}.", plural(total, "page", "pages"), attachments);
         }
 
         let mut output = Output::from_data(&outcome, human);

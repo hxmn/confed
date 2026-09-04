@@ -453,15 +453,19 @@ pub struct AttachArgs {
     /// Files to attach.
     pub files: Vec<PathBuf>,
 
-    /// List the page's attachments.
+    /// List the page's attachments, as of the last fetch.
     #[arg(long)]
     pub list: bool,
+
+    /// List from the server instead of the local state.
+    #[arg(long, requires = "list")]
+    pub remote: bool,
 
     /// Remove an attachment by filename.
     #[arg(long = "rm", value_name = "FILENAME")]
     pub remove: Option<String>,
 
-    /// Upload immediately.
+    /// Upload immediately; with --rm, delete on the server immediately.
     #[arg(long)]
     pub push: bool,
 }
