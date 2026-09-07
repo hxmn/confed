@@ -420,16 +420,23 @@ confed comment list 163842 --json | jq -r '.result.comments[] | "\(.author): \(.
 
 ## confed log
 
-Version history for one page.
+Version history for one page, or — with no page — recent activity across the space this
+directory is bound to, most recently changed first.
 
 | Flag | Meaning |
 |---|---|
-| `--limit <N>` | How many versions to show. Default 20. |
-| `--local` | Show confed's own sync log for the page instead of the server's history. |
+| `--limit <N>` | How many versions, or pages, to show. Default 20. |
+| `--local` | Show confed's own sync log instead of the server's history. |
 
-The human output marks the version your local file is based on with `*`.
+For one page the human output marks the version your local file is based on with `*`.
+For the space it prints when, version, author, title and — for pages you have pulled —
+the file to edit. The server does the ordering, so a space log is one request whatever
+the space's size. `--local` never touches the network or your credential store.
 
 ```bash
+confed log                                   # what changed in the space lately
+confed log --limit 5 --json | jq -r '.result.pages[] | "\(.when) \(.title)"'
+confed log --local                           # every sync confed has made here
 confed log "Team Handbook/Onboarding.md"
 confed log 163842 --limit 5 --json | jq -r '.result.versions[] | "v\(.number) \(.author)"'
 confed log 163842 --local --json | jq -r '.result.entries[] | "\(.ts) \(.op) \(.result)"'

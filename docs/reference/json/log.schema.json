@@ -2,9 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/log.schema.json",
   "title": "confed log result",
-  "description": "The `result` of `confed log --json`. Without --local it is the server's version history; with --local it is confed's own sync log for the page.",
+  "description": "The `result` of `confed log --json`. With a page it is that page's server version history, or with --local confed's own sync log for it. Without a page it widens to the space this directory is bound to: recent server activity, or with --local the whole workspace's sync log.",
   "anyOf": [
     { "$ref": "#/$defs/server_history" },
+    { "$ref": "#/$defs/space_activity" },
     { "$ref": "#/$defs/local_history" }
   ],
   "$defs": {
@@ -32,11 +33,40 @@
         }
       }
     },
+    "space_activity": {
+      "type": "object",
+      "required": ["space", "cql", "pages"],
+      "properties": {
+        "space": { "type": "string", "description": "The space key this directory is bound to." },
+        "cql": { "type": "string", "description": "The query actually sent to the server." },
+        "pages": {
+          "type": "array",
+          "description": "The most recently changed pages first, as the server ordered them.",
+          "items": {
+            "type": "object",
+            "required": ["page_id", "title", "url"],
+            "properties": {
+              "page_id": { "type": "string" },
+              "title": { "type": "string" },
+              "version": { "type": ["integer", "null"], "minimum": 1 },
+              "author": { "type": ["string", "null"], "description": "Who made the latest change." },
+              "when": { "type": ["string", "null"], "description": "RFC 3339 timestamp of the latest change." },
+              "url": { "type": "string", "description": "Absolute browser URL." },
+              "local_path": {
+                "type": ["string", "null"],
+                "description": "Workspace-relative path when the page has been pulled, null otherwise."
+              }
+            }
+          }
+        }
+      }
+    },
     "local_history": {
       "type": "object",
-      "required": ["page_id", "entries"],
+      "required": ["entries"],
       "properties": {
-        "page_id": { "type": "string" },
+        "page_id": { "type": "string", "description": "Present when the log was scoped to one page." },
+        "space": { "type": "string", "description": "Present when the log spans the space." },
         "entries": {
           "type": "array",
           "items": {
@@ -51,7 +81,12 @@
               "result": { "type": "string", "description": "e.g. `ok`, `merged`, `conflict`." },
               "from_version": { "type": ["integer", "null"] },
               "to_version": { "type": ["integer", "null"] },
-              "detail": { "type": ["string", "null"] }
+              "detail": { "type": ["string", "null"] },
+              "page_id": { "type": ["string", "null"] },
+              "page": {
+                "type": ["string", "null"],
+                "description": "Workspace-relative path of the page the entry is about, when it is still tracked."
+              }
             }
           }
         }

@@ -86,6 +86,20 @@ async fn dc_server() -> MockServer {
         mount_empty_collection(&server, &format!("/rest/api/content/{id}/child/comment")).await;
     }
 
+    // CQL search, as `confed log` (no page) and `confed search` use it. The
+    // server does the ordering: the child was edited most recently.
+    Mock::given(method("GET"))
+        .and(path("/rest/api/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                search_hit(CHILD_PAGE, "Onboarding", 1, "2026-08-30T09:00:00Z"),
+                search_hit(ROOT_PAGE, "Team Handbook", 3, "2026-08-01T00:00:00Z"),
+            ],
+            "start": 0, "limit": 25, "size": 2, "_links": {}
+        })))
+        .mount(&server)
+        .await;
+
     // `push` updates the root page; the response echoes what was sent so the
     // test can assert the edit really left the machine.
     Mock::given(method("PUT"))
@@ -123,6 +137,23 @@ fn summary(id: &str, title: &str, parent: Option<&str>, version: u32) -> Value {
         "ancestors": parent.map(|p| json!([{ "id": p, "type": "page" }])).unwrap_or(json!([])),
         "metadata": { "labels": { "results": [] } },
         "history": { "createdDate": "2026-01-01T00:00:00Z" }
+    })
+}
+
+/// One `/rest/api/search` hit, shaped the way `expand=content.version` makes it.
+fn search_hit(id: &str, title: &str, version: u32, when: &str) -> Value {
+    json!({
+        "content": {
+            "id": id,
+            "type": "page",
+            "status": "current",
+            "title": title,
+            "space": { "id": 500, "key": SPACE, "name": "Documentation" },
+            "version": { "number": version, "when": when, "by": { "displayName": "Alice Ng" } }
+        },
+        "title": title,
+        "url": format!("/pages/viewpage.action?pageId={id}"),
+        "lastModified": when
     })
 }
 
@@ -364,6 +395,95 @@ async fn pull_materializes_the_hierarchy_and_status_is_then_clean() {
     assert_eq!(value["result"]["pages"].as_array().unwrap().len(), 2);
     for page in value["result"]["pages"].as_array().unwrap() {
         assert_eq!(page["state"], json!("unchanged"), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn log_without_a_page_reports_recent_activity_across_the_space() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+
+    let output = run(confed_authed(dir.path(), &["log", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "log");
+
+    let result = &value["result"];
+    assert_eq!(result["space"], json!(SPACE));
+    assert_eq!(
+        result["cql"],
+        json!("space = \"DOCS\" and type = page order by lastmodified desc"),
+        "the server must do the ordering, so --limit means the N most recent"
+    );
+
+    let pages = result["pages"].as_array().expect("pages is a list");
+    assert_eq!(pages.len(), 2);
+    // Newest first, as the server returned them.
+    assert_eq!(pages[0]["title"], json!("Onboarding"));
+    assert_eq!(pages[0]["page_id"], json!(CHILD_PAGE));
+    assert_eq!(pages[0]["when"], json!("2026-08-30T09:00:00Z"));
+    assert_eq!(pages[0]["author"], json!("Alice Ng"), "expanded version, not a bare stub");
+    assert_eq!(pages[0]["version"], json!(1));
+    assert_eq!(pages[0]["local_path"], json!(CHILD_FILE), "a pulled page says where to edit it");
+    assert_eq!(pages[1]["title"], json!("Team Handbook"));
+
+    // Version and author only arrive when search is asked to expand them.
+    let requests = server.received_requests().await.unwrap_or_default();
+    let search = requests
+        .iter()
+        .find(|r| r.url.path() == "/rest/api/search")
+        .expect("confed log queried the search endpoint");
+    let expand = search
+        .url
+        .query_pairs()
+        .find(|(k, _)| k == "expand")
+        .map(|(_, v)| v.into_owned())
+        .unwrap_or_default();
+    assert!(expand.contains("content.version"), "search was not expanded: {expand}");
+
+    // The human rendering names the page and where it lives.
+    let output = run(confed_authed(dir.path(), &["log"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Onboarding"), "{text}");
+    assert!(text.contains(CHILD_FILE), "{text}");
+}
+
+#[tokio::test]
+async fn a_local_log_spans_the_space_and_needs_no_credentials() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+
+    // Something worth logging: an edit pushed back to the root page.
+    let mut content = read(dir.path(), ROOT_FILE);
+    content.push_str("\nAn extra paragraph.\n");
+    std::fs::write(dir.path().join(ROOT_FILE), content).unwrap();
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["push", "--json"]))), 0);
+
+    // No token in the environment: --local must answer from `.state.db` alone.
+    let output = run(confed(dir.path(), &["log", "--local", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "log");
+
+    let result = &value["result"];
+    assert_eq!(result["space"], json!(SPACE));
+    let entries = result["entries"].as_array().expect("entries is a list");
+    assert!(
+        entries.iter().any(|e| e["op"] == json!("push-update") && e["page"] == json!(ROOT_FILE)),
+        "a space-wide log says which page each entry is about: {entries:?}"
+    );
+
+    // Scoped back down to one page, the entries are only that page's.
+    let output = run(confed(dir.path(), &["log", CHILD_FILE, "--local", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "log");
+    assert_eq!(value["result"]["page_id"], json!(CHILD_PAGE));
+    assert!(value["result"]["space"].is_null(), "a page log is not a space log");
+    for entry in value["result"]["entries"].as_array().unwrap() {
+        assert_eq!(entry["page_id"], json!(CHILD_PAGE), "{entry}");
     }
 }
 

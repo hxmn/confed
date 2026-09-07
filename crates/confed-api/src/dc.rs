@@ -428,7 +428,7 @@ impl ConfluenceClient for DcClient {
         let raw: Vec<v1::SearchResult> = collect_offset(
             &self.http,
             "rest/api/search",
-            &[("cql", cql.to_string())],
+            &[("cql", cql.to_string()), ("expand", v1::SEARCH_EXPAND.to_string())],
             limit.min(PAGE_SIZE),
             Some(limit),
         )

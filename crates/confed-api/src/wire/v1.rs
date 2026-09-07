@@ -404,6 +404,10 @@ pub struct SearchContainer {
     pub display_url: Option<String>,
 }
 
+/// What `rest/api/search` must expand for a result to carry its version,
+/// author and space — search returns a bare content stub otherwise.
+pub const SEARCH_EXPAND: &str = "content.version,content.space";
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
@@ -415,6 +419,9 @@ pub struct SearchResult {
     pub excerpt: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    /// Reported by search itself, so recency survives even unexpanded content.
+    #[serde(default)]
+    pub last_modified: Option<String>,
     #[serde(default)]
     pub result_global_container: Option<SearchContainer>,
 }
@@ -448,6 +455,9 @@ impl SearchResult {
                 .as_deref()
                 .map(strip_highlight_markers)
                 .filter(|e| !e.trim().is_empty()),
+            version: content.version.as_ref().and_then(|v| v.number),
+            author: content.author(),
+            when: content.version.as_ref().and_then(|v| v.when.clone()).or(self.last_modified),
         })
     }
 }

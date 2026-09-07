@@ -132,7 +132,7 @@ pub enum Command {
     #[command(subcommand)]
     Comment(CommentCommand),
 
-    /// Version history of a page.
+    /// Version history of a page, or recent activity across the space.
     Log(LogArgs),
 
     /// Open a page in the browser.
@@ -517,10 +517,10 @@ pub enum CommentCommand {
 
 #[derive(Args, Debug)]
 pub struct LogArgs {
-    /// Page to inspect (path or id).
-    pub page: String,
+    /// Page to inspect (path or id). Omit for recent activity across the space.
+    pub page: Option<String>,
 
-    /// How many versions to show.
+    /// How many versions (or, for the space, pages) to show.
     #[arg(long, default_value = "20")]
     pub limit: usize,
 

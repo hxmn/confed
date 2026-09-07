@@ -56,6 +56,7 @@ fn run(cli: Cli) -> Result<Output> {
         Command::Diff(args) if !args.remote => return commands::diff::run(&mut ctx, args),
         Command::Resolve(args) => return commands::resolve::run(&mut ctx, args),
         Command::New(args) if !args.push => return commands::new::run(&mut ctx, args),
+        Command::Log(args) if args.local => return commands::log::run_local(&mut ctx, args),
         Command::Mkdocs(args) => return commands::mkdocs::run(&mut ctx, args),
         _ => {}
     }

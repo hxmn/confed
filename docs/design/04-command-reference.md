@@ -257,12 +257,18 @@ confed comment list "Team Handbook/Onboarding.md" --unresolved
 confed comment add 163842 -m "Reviewed for Q3." --push --json
 ```
 
-### `confed log <path|id>`
+### `confed log [path|id]`
 
 Server version history (`--limit N`, default 20): version, author, date, message, plus
 local base marker. `--local` shows the local `sync_log` instead. `confed diff
 --versions 6..9 <page>` companion for historical diffs (stretch).
 JSON: `{ "page_id", "base_version": 7, "versions": [{"number","author","when","message"}…] }`
+
+With no page it widens to the bound space: `space = "KEY" and type = page order by
+lastmodified desc` through CQL, so the server orders and `--limit` really is the N most
+recent — one request on a space of any size. JSON: `{ "space", "cql", "pages":
+[{"page_id","title","version","author","when","url","local_path"}…] }`. `--local` with no
+page is the whole workspace's `sync_log`, each entry naming its page.
 
 ### `confed open <path|id>`
 

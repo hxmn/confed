@@ -20,6 +20,31 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-07
+
+### Added
+
+- `confed log` with no page now shows recent activity across the space this
+  directory is bound to, instead of failing with "the following required
+  arguments were not provided: <PAGE>". You rarely know which page a colleague
+  touched — that is the thing you are running `log` to find out. It lists the
+  most recently changed pages first with their version, author, timestamp and,
+  for pages you have pulled, the file to edit. The ordering is the server's
+  (`space = "KEY" and type = page order by lastmodified desc` through CQL), so
+  `--limit` really is the N most recent and the whole view costs one request on
+  a space of any size. `log --local` with no page widens the same way, over
+  confed's own sync log, each entry naming its page.
+- `log --local` no longer wakes the OS keyring. It answers from `.state.db`, so
+  it now runs on the offline path alongside `status` and `diff` — useful when
+  the credential store is locked, or there is no network.
+
+### Changed
+
+- CQL search asks the server to expand `content.version,content.space`, so a
+  search result carries the version, author and last-modified time it used to
+  drop. `confed search --json` is unchanged; the extra fields surface through
+  `confed log`.
+
 ## [0.3.0] - 2026-09-04
 
 ### Fixed

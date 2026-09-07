@@ -337,6 +337,12 @@ pub struct SearchResult {
     pub space_key: Option<String>,
     pub url: String,
     pub excerpt: Option<String>,
+    /// The current version, when the server was asked to expand it.
+    pub version: Option<u32>,
+    /// Who last changed the page, when the server was asked to expand it.
+    pub author: Option<String>,
+    /// When it last changed. Search reports this even without an expansion.
+    pub when: Option<String>,
 }
 
 #[cfg(test)]

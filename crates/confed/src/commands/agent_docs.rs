@@ -136,6 +136,7 @@ confed push --dry-run --json          # exactly what would be uploaded
 confed push -m "reason" --json        # upload
 confed comment list <page> --json     # read discussion
 confed log <page> --json              # server version history
+confed log --json                     # what changed lately anywhere in the space
 confed version --json                 # this build, its schemas, its changelog
 ```
 

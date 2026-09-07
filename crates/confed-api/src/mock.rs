@@ -588,12 +588,21 @@ impl ConfluenceClient for MockClient {
 
     async fn search_cql(&self, cql: &str, limit: usize) -> ApiResult<Vec<SearchResult>> {
         let needle = cql.to_ascii_lowercase();
+        // Only a text query filters by title; a listing query (`space = … order by
+        // lastmodified desc`) names no text at all and matches the whole space.
+        let by_text = needle.contains('~');
         let state = self.state.lock().expect("mock poisoned");
-        Ok(state
+        let mut hits: Vec<_> = state
             .pages
             .values()
             .filter(|p| !p.deleted)
-            .filter(|p| needle.is_empty() || needle.contains(&p.summary.title.to_ascii_lowercase()))
+            .filter(|p| !by_text || needle.contains(&p.summary.title.to_ascii_lowercase()))
+            .collect();
+        if needle.contains("order by lastmodified desc") {
+            hits.sort_by(|a, b| b.summary.updated_at.cmp(&a.summary.updated_at));
+        }
+        Ok(hits
+            .into_iter()
             .take(limit)
             .map(|p| SearchResult {
                 page_id: p.summary.id.clone(),
@@ -601,6 +610,9 @@ impl ConfluenceClient for MockClient {
                 space_key: Some(p.summary.space_key.clone()),
                 url: format!("{}/pages/{}", self.base_url, p.summary.id),
                 excerpt: None,
+                version: Some(p.summary.version),
+                author: p.summary.author.clone(),
+                when: p.summary.updated_at.clone(),
             })
             .collect())
     }
