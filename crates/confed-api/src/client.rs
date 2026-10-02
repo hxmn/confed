@@ -76,15 +76,31 @@ pub trait ConfluenceClient: Send + Sync {
         body_storage: &str,
         reply_to: Option<&CommentId>,
     ) -> ApiResult<Comment>;
-    /// Cloud only; Data Center must return [`crate::error::ApiError::Unsupported`].
+    /// Anchor a comment to `anchor.text`, the `match_index`-th of `match_count`
+    /// occurrences in the page's text as the server extracts it.
     async fn add_inline_comment(
         &self,
         page: &PageId,
         anchor: &InlineAnchor,
         body_storage: &str,
     ) -> ApiResult<Comment>;
-    /// Cloud only; Data Center must return [`crate::error::ApiError::Unsupported`].
+    /// Reply to an inline thread. Data Center keeps inline replies in its
+    /// inline-comment API; elsewhere a reply is a reply.
+    async fn add_inline_reply(
+        &self,
+        page: &PageId,
+        parent: &CommentId,
+        body_storage: &str,
+    ) -> ApiResult<Comment> {
+        self.add_footer_comment(page, body_storage, Some(parent)).await
+    }
     async fn resolve_comment(&self, id: &CommentId) -> ApiResult<()>;
+
+    /// The server's product version (`9.5.4`), when it says. Used to warn before
+    /// relying on an undocumented API on a release confed was not tested with.
+    async fn server_version(&self) -> ApiResult<Option<String>> {
+        Ok(None)
+    }
 
     async fn search_cql(&self, cql: &str, limit: usize) -> ApiResult<Vec<SearchResult>>;
 

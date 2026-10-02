@@ -246,8 +246,8 @@ structured accessors over it. All write ops edit the sidecar; `--push` syncs imm
 - `list <page> [--unresolved] [--inline]` — threads with anchors/context.
 - `add <page> [--body|-m TEXT | --editor] [--push]` — footer comment draft.
 - `reply <comment-id> -m TEXT [--push]`
-- `resolve <comment-id> [--push]` — Cloud only (exit 9 on DC).
-- `add --inline <page> --anchor "text to highlight" -m TEXT` — Cloud only; anchor must
+- `resolve <comment-id> [--push]` — on DC inline threads only (a footer comment exits 9).
+- `add --inline <page> --anchor "text to highlight" -m TEXT` — anchor must
   match page text uniquely (exit 7 with candidates listed otherwise).
 - JSON: `{ "comments": [{"id","kind","author","created","resolved","reply_to",
   "anchor":{"text","orphaned"},"body_markdown"}…] }`

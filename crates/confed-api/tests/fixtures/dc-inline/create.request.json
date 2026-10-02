@@ -1,0 +1,19 @@
+{
+  "originalSelection": "Фраза 3.",
+  "body": "<p>test comment</p>",
+  "matchIndex": 0,
+  "numMatches": 1,
+  "serializedHighlights": "[[\"Фраза 3.\",\"3:0\",0,8]]",
+  "authorDisplayName": "Alice Bergmann",
+  "authorUserName": "abergmann",
+  "authorAvatarUrl": "undefined",
+  "containerId": "900000099218",
+  "containerVersion": "1",
+  "parentCommentId": "0",
+  "lastFetchTime": "1790923841129",
+  "hasDeletePermission": true,
+  "hasEditPermission": true,
+  "hasResolvePermission": true,
+  "resolveProperties": { "resolved": false, "resolvedTime": 0 },
+  "deleted": false
+}

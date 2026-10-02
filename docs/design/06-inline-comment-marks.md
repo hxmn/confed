@@ -235,9 +235,24 @@ Validation, before anything is uploaded (exit 7, pointing at the line):
 A malformed mark with a *numeric* id is a warning, never an error: the comment is still
 in the database and is re-placed on the next pull.
 
-Data Center has no inline-create API. `pull` renders marks on DC (a genuine gain: today
-DC users see nothing in the body either); `push` with a `new` mark exits 9 there, as
-`comment add --anchor` does now.
+Data Center's public API has no inline create, so DC goes through the plugin API the
+page view uses (`rest/inlinecomments/1.0`, undocumented; captures of 9.5.4 in
+`crates/confed-api/tests/fixtures/dc-inline`). Three things differ from Cloud:
+
+- **The selection is the server's.** `originalSelection`, `matchIndex` and `numMatches`
+  are checked against the server's own text extraction (HTTP 412 on a mismatch). confed
+  computes them from the page's current storage (`confed_convert::selection`): text
+  nodes with entities decoded, `&nbsp;` kept as U+00A0 (a typed space matches it, and
+  the page's own character is sent), macro parameters and code excluded, no match
+  across blocks. A draft whose paragraph has unpushed edits that cannot be pushed first
+  is refused with exit 7 rather than sent.
+- **Creating a comment saves a page version.** After each post confed fetches the page;
+  if the new version is the base plus one and, with the new comment's marker taken out,
+  reads the same as the base, it is adopted — base storage and version, the file's
+  `confed.version`, and (for an untouched file) the body, re-rendered so file and base
+  agree. Anything else is somebody else's edit and is left for `pull`.
+- **A draft at a paragraph's start** sits one character in (§4); push takes the
+  comment to cover the whole first word (`marks::intended_start`).
 
 ## 7. Command surface
 
@@ -319,7 +334,8 @@ when raw, nestable inside any inline construct, and cheap to recognize with cert
   with the computed match index and rewrites the mark; editing a commented paragraph
   and pushing keeps the marker in the uploaded storage; a comment resolved remotely
   leaves the body on pull; a deleted mark is re-placed on pull; a conflicted page has no
-  marks and gets them back on `resolve`; DC `new` mark → exit 9.
+  marks and gets them back on `resolve`; a DC `new` mark posts and the version it
+  saves is adopted.
 - **Freshness:** a comment created on the server without a version bump refreshes the
   base body, and a subsequent unrelated push still carries the marker.
 

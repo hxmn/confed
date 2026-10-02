@@ -1639,25 +1639,164 @@ both_flavors!(a_deleted_mark_is_re_placed_without_touching_edits, |mut h: Harnes
     assert_eq!(h.status("1001"), PageState::Modified);
 });
 
-/// Data Center shows marks but cannot create inline comments.
-#[tokio::test]
-async fn data_center_shows_marks_but_refuses_drafts() {
-    let mut h = Harness::new(Flavor::DataCenter);
-    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
-    h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
-    h.pull().await;
-    assert!(h.read("Onboarding.md").contains("<!--c "), "read side works on DC");
+// ------------------------------------------------- Data Center inline ----
+//
+// Data Center creates inline comments through its private plugin API, and
+// unlike Cloud each one saves a new page version. The mock does the same.
 
+fn dc_with_page(storage: &str) -> Harness {
+    let h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Onboarding", None, storage);
+    h
+}
+
+fn dc_push_opts() -> PushOptions {
+    PushOptions { with_comments: true, ..Default::default() }
+}
+
+/// A body draft posts on DC; the version the comment created is adopted, so
+/// the page is unchanged afterwards and a push has nothing to upload.
+#[tokio::test]
+async fn data_center_posts_a_body_draft_and_adopts_the_new_version() {
+    let mut h = dc_with_page(COMMENTED);
+    h.pull().await;
     let file = h
         .read("Onboarding.md")
         .replace("ask questions", "ask <!--c new Who?-->questions<!--/c new-->");
     h.write("Onboarding.md", &file);
-    let err = h
-        .engine
-        .push(&mut h.ws, &PushOptions { with_comments: true, ..Default::default() })
-        .await
-        .expect_err("DC has no inline create");
-    assert!(matches!(err, confed_core::error::ConfedError::Unsupported(_)), "{err}");
+
+    let outcome = h.push().await;
+    assert_eq!(outcome.comments_added.len(), 1, "{outcome:?}");
+    let id = &outcome.comments_added[0];
+    assert_eq!(h.mock.page_version("1001"), Some(2), "DC saved a version for the comment");
+
+    let file = h.read("Onboarding.md");
+    assert!(file.contains(&format!("<!--c {id} ")), "the draft became the comment: {file}");
+    assert!(file.contains(&format!("questions<!--/c {id}-->")), "{file}");
+    assert!(file.contains("version: 2"), "the file names the adopted version: {file}");
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+
+    let base = h.ws.state().get_page("1001").unwrap().unwrap();
+    assert_eq!(base.version, 2);
+    assert!(base.storage_body.contains(&format!("ac:ref=\"marker-{id}\"")), "base has the marker");
+
+    let plan = h.engine.plan_push(&h.ws, &dc_push_opts()).unwrap();
+    assert!(plan.ops.is_empty(), "nothing to upload: {:?}", plan.ops);
+    let again = h.push().await;
+    assert!(again.pushed.is_empty() && again.comments_added.is_empty(), "{again:?}");
+}
+
+/// After a comment, an edit elsewhere on the page uploads the commented block
+/// byte for byte, marker included.
+#[tokio::test]
+async fn data_center_keeps_the_new_marker_through_an_unrelated_edit() {
+    let storage = format!("{COMMENTED}<p>Second paragraph.</p>");
+    let mut h = dc_with_page(&storage);
+    h.pull().await;
+    let file = h
+        .read("Onboarding.md")
+        .replace("ask questions", "ask <!--c new Who?-->questions<!--/c new-->");
+    h.write("Onboarding.md", &file);
+    h.push().await;
+    let commented = h.mock.page_body("1001").unwrap();
+    let block_end = commented.find("<p>Second").unwrap();
+
+    h.write("Onboarding.md", &h.read("Onboarding.md").replace("Second paragraph.", "Edited."));
+    let outcome = h.push().await;
+    assert_eq!(outcome.pushed.len(), 1, "{outcome:?}");
+    let after = h.mock.page_body("1001").unwrap();
+    assert_eq!(&after[..block_end], &commented[..block_end], "the commented block is untouched");
+    assert!(after.contains("<p>Edited.</p>"));
+}
+
+/// Text that is in the file but not on the server is an unpushed edit. When
+/// the page itself cannot be pushed (the server moved on), the comment is
+/// refused with exit 7 instead of letting the server reject the selection.
+#[tokio::test]
+async fn data_center_refuses_a_draft_on_an_unpushed_edit() {
+    let mut h = dc_with_page(COMMENTED);
+    h.pull().await;
+    h.mock.remote_edit("1001", &format!("{COMMENTED}<p>Added elsewhere.</p>"));
+    let file = h.read("Onboarding.md").replace(
+        "and then ask questions.",
+        "and then ask <!--c new Who?-->other questions<!--/c new-->.",
+    );
+    h.write("Onboarding.md", &file);
+
+    let err = h.engine.push(&mut h.ws, &dc_push_opts()).await.expect_err("refused");
+    assert_eq!(err.exit_code(), confed_core::error::ExitCode::State, "{err}");
+    assert!(err.to_string().contains("unpushed edits"), "{err}");
+    assert!(h.mock.calls().iter().all(|c| !c.starts_with("add_inline_comment")));
+}
+
+/// With the edit pushed first, the same draft goes through in one push.
+#[tokio::test]
+async fn data_center_pushes_the_edit_then_the_comment_on_it() {
+    let mut h = dc_with_page(COMMENTED);
+    h.pull().await;
+    let file = h.read("Onboarding.md").replace(
+        "and then ask questions.",
+        "and then ask <!--c new Who?-->other questions<!--/c new-->.",
+    );
+    h.write("Onboarding.md", &file);
+    let outcome = h.push().await;
+    assert_eq!(outcome.pushed.len(), 1);
+    assert_eq!(outcome.comments_added.len(), 1);
+    assert_eq!(h.mock.page_version("1001"), Some(3), "the edit, then the comment");
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+}
+
+/// A sidecar draft takes an occurrence; replies to an inline thread go to the
+/// inline API; resolving works; the sidecar does not post anything twice.
+#[tokio::test]
+async fn data_center_sidecar_drafts_replies_and_resolve() {
+    let mut h = dc_with_page("<p>team one</p><p>team two</p>");
+    let root = h.mock.seed_comment("1001", "<p>Root.</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+
+    let mut sidecar = h.read(".Onboarding/comments.md");
+    sidecar.push_str(&format!(
+        "\n<!-- confed:new anchor=\"team\" occurrence=2 -->\nSecond team?\n\
+         \n<!-- confed:new reply-to={root} -->\nAgreed.\n\
+         \n<!-- confed:resolve id={root} -->\n"
+    ));
+    h.write(".Onboarding/comments.md", &sidecar);
+
+    let outcome = h.push().await;
+    assert_eq!(outcome.comments_added.len(), 2, "{outcome:?}");
+    let calls = h.mock.calls();
+    assert!(calls.iter().any(|c| c == "add_inline_comment:1001"), "{calls:?}");
+    assert!(calls.iter().any(|c| c == "add_inline_reply:1001"), "{calls:?}");
+    assert!(calls.iter().any(|c| c.starts_with("resolve_comment:")), "{calls:?}");
+    assert!(
+        h.mock.page_body("1001").unwrap().contains("<p>team one</p><p><ac:inline-comment-marker"),
+        "occurrence 2 is the one marked: {}",
+        h.mock.page_body("1001").unwrap()
+    );
+
+    assert_eq!(h.comment_drafts("1001"), 0, "posted drafts leave the sidecar");
+    let again = h.push().await;
+    assert!(again.comments_added.is_empty(), "nothing is posted twice: {again:?}");
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+}
+
+/// When somebody else edited the page too, the comment's version is not
+/// adopted: that is a remote change for `pull` to merge.
+#[tokio::test]
+async fn data_center_does_not_adopt_a_version_with_other_changes() {
+    let mut h = dc_with_page(COMMENTED);
+    h.pull().await;
+    h.mock.remote_edit("1001", &COMMENTED.replace("questions", "questions twice"));
+    let file = h
+        .read("Onboarding.md")
+        .replace("first week checklist", "<!--c new Hm-->first week checklist<!--/c new-->");
+    h.write("Onboarding.md", &file);
+
+    h.push().await;
+    let base = h.ws.state().get_page("1001").unwrap().unwrap();
+    assert_eq!(base.version, 1, "the base stays where it was");
+    h.pull().await;
+    assert!(h.read("Onboarding.md").contains("questions twice"), "pull brings the other edit");
 }
 
 /// A broken draft stops the push with its line, before anything is uploaded.

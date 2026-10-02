@@ -72,8 +72,8 @@ pub trait ConfluenceClient: Send + Sync {
     fn list_footer_comments(&self, id: &PageId) -> BoxStream<Result<Comment>>;
     fn list_inline_comments(&self, id: &PageId) -> BoxStream<Result<InlineComment>>;
     async fn add_footer_comment(&self, id: &PageId, body: &Storage, reply_to: Option<&CommentId>) -> Result<Comment>;
-    async fn add_inline_comment(&self, id: &PageId, anchor: &InlineAnchor, body: &Storage) -> Result<InlineComment>; // Cloud only
-    async fn resolve_comment(&self, id: &CommentId) -> Result<()>;                                                  // Cloud only
+    async fn add_inline_comment(&self, id: &PageId, anchor: &InlineAnchor, body: &Storage) -> Result<InlineComment>; // DC: private inline-comment API
+    async fn resolve_comment(&self, id: &CommentId) -> Result<()>;                                                  // DC: inline threads only
 
     fn search_cql(&self, cql: &str) -> BoxStream<Result<SearchResult>>;
     async fn get_page_versions(&self, id: &PageId) -> Result<Vec<VersionInfo>>;
@@ -99,8 +99,8 @@ Capability gaps are surfaced through `Capabilities`:
 ```rust
 pub struct Capabilities {
     pub flavor: Flavor,                 // Cloud | DataCenter
-    pub inline_comment_create: bool,    // Cloud only
-    pub comment_resolve: bool,          // Cloud only
+    pub inline_comment_create: bool,    // both (DC: private plugin API)
+    pub comment_resolve: bool,          // both (DC: inline threads only)
     pub adf: bool,                      // Cloud only (we still sync in storage format; see 03)
     pub max_request_concurrency: usize, // default 4 (Cloud), 8 (DC)
 }

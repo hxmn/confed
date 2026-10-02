@@ -337,6 +337,9 @@ impl Http {
             .send_with_retry(&ctx, false, || {
                 self.request(method.clone(), url.clone())
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    // Plugin REST endpoints (Data Center's inline comments) run
+                    // Confluence's XSRF check on JSON writes unless told not to.
+                    .header("X-Atlassian-Token", "no-check")
                     .body(payload.clone())
             })
             .await?;

@@ -57,8 +57,10 @@ pub fn render(base_url: &str, flavor: Flavor, space_key: &str) -> String {
     let flavor_note = match flavor {
         Flavor::Cloud => "Confluence Cloud (REST v2). Inline comments can be created and resolved.",
         Flavor::DataCenter => {
-            "Confluence Data Center (REST v1). Creating and resolving inline comments is \
-             not supported by the server API — those commands exit with code 9."
+            "Confluence Data Center (REST v1). Inline comments are created, replied to and \
+             resolved through Data Center's undocumented inline-comment API (tested on 9.x); \
+             creating one saves a new page version, which confed adopts. Footer comments \
+             cannot be resolved (exit 9)."
         }
     };
 
@@ -179,7 +181,7 @@ binary: reading them needs no network access and no repository checkout.
 | 6 | not found | check the page path or id |
 | 7 | local state problem | dirty files, tampered frontmatter, lock held |
 | 8 | partial success | inspect `result` and `errors` in the JSON |
-| 9 | unsupported on this server | a Cloud-only feature on Data Center |
+| 9 | unsupported on this server | e.g. resolving a footer comment on Data Center, or a server without the inline-comment API |
 | 10 | differences exist | only from `--exit-code` |
 
 ## Conflict workflow
@@ -202,7 +204,10 @@ Comments live in `.<page>/comments.md`. To add one, append:
 Your comment text.
 ```
 
-To reply, add `reply-to=<comment-id>` to that marker. To resolve (Cloud only):
+To comment on specific text, add `anchor="the exact text"` (and `occurrence=N`
+when it appears more than once). To reply, add `reply-to=<comment-id>` to that
+marker. To resolve an inline thread (on Data Center, footer comments cannot be
+resolved):
 
 ```markdown
 <!-- confed:resolve id=98211 -->
@@ -231,7 +236,11 @@ Complete your <!--c 77120 Alice Ng: Link the template?-->first week checklist<!-
   ```
 
   `confed push` creates the comment and rewrites the mark with its id. Or use
-  `confed comment add <page> --anchor "platform team" -m "…"`. Cloud only.
+  `confed comment add <page> --anchor "platform team" -m "…"` (add
+  `--occurrence N` when the text appears more than once: exit 2 says so; exit 6
+  means the text is not on the page). Confluence checks the text against its
+  own copy of the page, so push edits to that paragraph first — otherwise the
+  push stops with exit 7.
 
 ## Do / don't
 
@@ -285,7 +294,8 @@ mod tests {
     #[test]
     fn the_data_center_contract_names_its_capability_gap() {
         let dc = render("https://wiki.corp", Flavor::DataCenter, "DOCS");
-        assert!(dc.contains("not supported by the server API"));
+        assert!(dc.contains("undocumented inline-comment API"));
+        assert!(dc.contains("Footer comments cannot be resolved"));
 
         let cloud = render("https://x.atlassian.net/wiki", Flavor::Cloud, "DOCS");
         assert!(cloud.contains("can be created and resolved"));

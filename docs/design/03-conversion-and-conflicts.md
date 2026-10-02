@@ -101,9 +101,11 @@ Failing all: the comment is marked `orphaned=true` in sidecar and DB — never s
 dropped, and **never deleted server-side by confed**; Confluence itself orphans inline
 comments whose anchor text disappears after a body push, which matches our model.
 
-Capability gap: creating/resolving inline comments is **Cloud-only** (v2 API). On DC,
-inline comments are read-only in the sidecar; `confed comment add --inline` on DC exits
-`9 UNSUPPORTED` with an explanation.
+Creating, replying to and resolving inline comments uses the v2 API on Cloud and, on DC,
+the undocumented `rest/inlinecomments/1.0` plugin API the page view uses (captures in
+`crates/confed-api/tests/fixtures/dc-inline`). DC saves a page version for every new
+inline comment; confed adopts it when the marker is the only change. Resolving a footer
+comment on DC exits `9 UNSUPPORTED`.
 
 ## 5. 3-way merge (`Diverged` pages)
 

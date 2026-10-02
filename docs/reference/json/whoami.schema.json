@@ -18,6 +18,10 @@
     },
     "base_url": { "type": "string" },
     "flavor": { "type": "string", "enum": ["cloud", "datacenter"] },
+    "server_version": {
+      "type": ["string", "null"],
+      "description": "Product version, e.g. \"9.5.4\". Data Center reports it; Cloud does not."
+    },
     "capabilities": {
       "type": "object",
       "required": ["inline_comment_create", "comment_resolve", "adf", "max_request_concurrency"],

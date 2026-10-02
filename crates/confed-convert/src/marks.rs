@@ -623,6 +623,27 @@ pub fn normalize_line_starts(body: &str) -> String {
     out.concat()
 }
 
+/// Undo [`normalize_line_starts`] for an opener at `start`: when it sits exactly
+/// where a marker written at the start of the line's content is moved to, the
+/// span it opens begins at that line start. A mark written to cover `Welcome`
+/// at a paragraph's start reads `W<!--c …-->elcome`, and still means `Welcome`.
+pub fn intended_start(body: &str, start: usize) -> usize {
+    if start > body.len() || !body.is_char_boundary(start) {
+        return start;
+    }
+    let line_start = body[..start].rfind('\n').map_or(0, |i| i + 1);
+    let line = &body[line_start..];
+    let line = &line[..line.find('\n').unwrap_or(line.len())];
+    let content = line_start + content_prefix_len(line);
+    if content < start
+        && content + first_char_span(&body[content..line_start + line.len()]) == start
+    {
+        content
+    } else {
+        start
+    }
+}
+
 /// Indentation, quote and list prefixes at the start of a line, up to where
 /// the inline content begins.
 fn content_prefix_len(line: &str) -> usize {
@@ -1284,6 +1305,22 @@ mod tests {
             ),
             "o<!--c 1-->ne<!--/c 1-->\ntwo\n"
         );
+    }
+
+    #[test]
+    fn the_intended_start_undoes_the_line_start_step() {
+        let marked = apply(
+            "Welcome to the team.\n",
+            &[PlacedMark { id: MarkId::New, start: 0, end: 7, note: "n".into() }],
+        );
+        let s = strip(&marked);
+        let m = &s.marks[0];
+        assert_eq!(m.text, "elcome", "the mark itself sits one character in");
+        assert_eq!(&s.body[intended_start(&s.body, m.start)..m.end.unwrap()], "Welcome");
+
+        let body = "- **bold** item\n";
+        assert_eq!(intended_start(body, 5), 2, "past the bullet and the delimiters");
+        assert_eq!(intended_start("a Welcome\n", 3), 3, "mid-line opens stay put");
     }
 
     #[test]

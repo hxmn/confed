@@ -542,19 +542,39 @@ impl ConfluenceClient for MockClient {
         }
         self.record(format!("add_inline_comment:{page}"));
         let id = CommentId::new(self.fresh_id());
-        // Like Confluence, wrap the selected occurrence in a marker — in the
-        // stored body, without a version bump.
+        // Like Confluence, wrap the selected occurrence in a marker. Cloud does
+        // it in place; Data Center saves a new page version.
         let marker = format!("marker-{}", id.0);
+        let data_center = self.capabilities.flavor == Flavor::DataCenter;
         let mut state = self.state.lock().expect("mock poisoned");
         let mut anchor = anchor.clone();
         if let Some(p) = state.pages.get_mut(page.as_str()) {
             let wanted = anchor.match_index.unwrap_or(0);
+            let count = p.body.matches(&anchor.text).count();
+            // Data Center's SelectionValidator: the count must be the server's.
+            if data_center && anchor.match_count.unwrap_or(1) != count {
+                return Err(ApiError::Rejected(format!(
+                    "create inline comment: HTTP 412: the text selection is wrong \
+                     (\"{}\" occurs {count} time(s), request said {})",
+                    anchor.text,
+                    anchor.match_count.unwrap_or(1)
+                )));
+            }
             if let Some((pos, _)) = p.body.match_indices(&anchor.text).nth(wanted) {
                 let wrapped = format!(
                     r#"<ac:inline-comment-marker ac:ref="{marker}">{}</ac:inline-comment-marker>"#,
                     anchor.text
                 );
                 p.body.replace_range(pos..pos + anchor.text.len(), &wrapped);
+                if data_center {
+                    p.summary.version += 1;
+                    p.history.push(VersionInfo {
+                        number: p.summary.version,
+                        author: Some(self.user.display_name.clone()),
+                        when: Some("2026-08-16T00:00:00Z".into()),
+                        message: None,
+                    });
+                }
                 p.bodies.insert(p.summary.version, p.body.clone());
                 anchor.marker_ref = Some(marker);
             }
@@ -571,6 +591,28 @@ impl ConfluenceClient for MockClient {
             anchor: Some(anchor),
         };
         state.comments.push(comment.clone());
+        Ok(comment)
+    }
+
+    async fn add_inline_reply(
+        &self,
+        page: &PageId,
+        parent: &CommentId,
+        body_storage: &str,
+    ) -> ApiResult<Comment> {
+        self.record(format!("add_inline_reply:{page}"));
+        let comment = Comment {
+            id: CommentId::new(self.fresh_id()),
+            page_id: page.clone(),
+            parent_comment_id: Some(parent.clone()),
+            kind: CommentKind::Inline,
+            author: Some(self.user.display_name.clone()),
+            created_at: Some("2026-08-16T00:00:00Z".into()),
+            body_storage: body_storage.to_string(),
+            resolved: false,
+            anchor: None,
+        };
+        self.state.lock().expect("mock poisoned").comments.push(comment.clone());
         Ok(comment)
     }
 
@@ -665,13 +707,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn data_center_refuses_inline_comment_creation() {
+    async fn data_center_inline_comments_add_a_version_and_check_the_count() {
         let mock = MockClient::new(Flavor::DataCenter);
-        let id = mock.seed_page("1001", "Page", None, "<p>hi</p>");
-        let err = mock
-            .add_inline_comment(&id, &InlineAnchor::default(), "<p>note</p>")
-            .await
-            .unwrap_err();
-        assert!(matches!(err, ApiError::Unsupported { .. }));
+        let id = mock.seed_page("1001", "Page", None, "<p>hi there, hi</p>");
+        let anchor = |count| InlineAnchor {
+            text: "hi".into(),
+            match_index: Some(1),
+            match_count: Some(count),
+            ..Default::default()
+        };
+        let err = mock.add_inline_comment(&id, &anchor(1), "<p>note</p>").await.unwrap_err();
+        assert!(matches!(err, ApiError::Rejected(_)), "{err:?}");
+        assert_eq!(mock.page_version("1001"), Some(1));
+
+        let c = mock.add_inline_comment(&id, &anchor(2), "<p>note</p>").await.unwrap();
+        assert_eq!(mock.page_version("1001"), Some(2), "creating one saves a page version");
+        let marker = c.anchor.unwrap().marker_ref.unwrap();
+        assert!(mock.page_body("1001").unwrap().ends_with(&format!(
+            "hi there, <ac:inline-comment-marker ac:ref=\"{marker}\">hi</ac:inline-comment-marker></p>"
+        )));
     }
 }

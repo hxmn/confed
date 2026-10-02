@@ -16,7 +16,16 @@ pub async fn run(ctx: &mut Context) -> Result<Output> {
     if let Some(email) = &user.email {
         let _ = writeln!(human, "  email       {email}");
     }
-    let _ = writeln!(human, "  server      {} ({})", client.base_url(), caps.flavor);
+    // Only Data Center says (anonymously, from its applinks manifest); its
+    // inline comments rely on an API that may change between releases.
+    let server_version = client.server_version().await.ok().flatten();
+    let _ = writeln!(
+        human,
+        "  server      {} ({}{})",
+        client.base_url(),
+        caps.flavor,
+        server_version.as_deref().map(|v| format!(" {v}")).unwrap_or_default()
+    );
     let _ = writeln!(
         human,
         "  inline comments  {}",
@@ -40,6 +49,7 @@ pub async fn run(ctx: &mut Context) -> Result<Output> {
             },
             "base_url": client.base_url(),
             "flavor": caps.flavor.as_str(),
+            "server_version": server_version,
             "capabilities": {
                 "inline_comment_create": caps.inline_comment_create,
                 "comment_resolve": caps.comment_resolve,

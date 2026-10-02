@@ -171,6 +171,10 @@ fn write_draft(out: &mut String, draft: &SidecarComment) {
     }
     if let Some(anchor) = &draft.anchor {
         attrs.push(format!("anchor={}", quote(&anchor.text)));
+        // Which of several occurrences, 1-based as `--occurrence` takes it.
+        if let Some(index) = anchor.match_index {
+            attrs.push(format!("occurrence={}", index + 1));
+        }
     }
     let suffix = if attrs.is_empty() { String::new() } else { format!(" {}", attrs.join(" ")) };
     out.push_str(&format!("<!-- confed:new{suffix} -->\n"));
@@ -253,6 +257,10 @@ fn parse_marker(line: &str) -> Option<Marker> {
                 context_after: attrs.get("context-after").cloned().unwrap_or_default(),
                 marker_ref: attrs.get("marker-ref").cloned(),
                 orphaned: attrs.get("orphaned").map(|v| v == "true").unwrap_or(false),
+                match_index: attrs
+                    .get("occurrence")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|n| n.checked_sub(1)),
                 ..Default::default()
             });
             Some(Marker::Comment(Box::new(SidecarComment {

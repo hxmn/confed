@@ -20,6 +20,51 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-02
+
+### Added
+
+- Inline comments on Confluence Data Center: `confed comment add <page> --anchor
+  "text" -m "…"`, `<!--c new …-->` marks in the page body and `confed:new anchor="…"`
+  in `comments.md` now post there too, instead of exiting 9. So do replies to an
+  inline thread (`reply-to=…`) and `confed:resolve` / `confed comment resolve` on one.
+  Data Center's public API cannot do any of this, so confed uses the undocumented
+  plugin API the page view itself calls (`rest/inlinecomments/1.0`), with request
+  shapes taken from captures of DC 9.5.4, kept as test fixtures. It may change in any
+  Data Center release: on a major other than 9 confed warns before the first call, and
+  a server that answers 404/405 is reported as unsupported (exit 9) naming the step
+  that failed. Footer comments still cannot be resolved on Data Center (exit 9).
+- Creating an inline comment on Data Center saves a new page version. confed adopts
+  it when the new comment's marker is the only change: the base, the file's
+  `confed.version` and the body move to it, so the page stays `unchanged` and the next
+  push neither conflicts nor drops the marker. If somebody else edited the page too,
+  it is left for `pull` to merge.
+- The selection an inline comment is created with is computed from the page's
+  current storage, the way Confluence extracts text: entities decoded, `&nbsp;` kept as
+  a non-breaking space (a typed space matches it, and the page's own character is
+  sent), macro parameters and code excluded, no match across paragraphs or table
+  cells. `--occurrence N` picks among repeats. Before anything is written or sent, an
+  anchor that is not on the page exits 6, and one that appears more than once without
+  `--occurrence` exits 2, listing where. A draft on a paragraph with edits the server
+  does not have stops the push with exit 7, rather than being refused by the server.
+- `comment add --push --json` reports what was created: `result.comments[]` with
+  `id`, `kind`, `anchor` and Confluence's `marker_ref`.
+- `whoami` shows the server's version (`server_version` in `--json`; Data Center
+  only).
+- `occurrence=N` on a `confed:new anchor="…"` sidecar draft, written by `comment add
+  --sidecar --occurrence N`; it used to be lost.
+
+### Fixed
+
+- A draft in `comments.md` stayed there after it was posted, as did a
+  `confed:resolve` request, so the next push posted the comment again. Each one now
+  leaves the sidecar as soon as the server has it.
+- A body draft for text at the start of a paragraph is written one character in
+  (`W<!--c new …-->elcome`, because a line starting with `<!--` would be an HTML
+  block). Push used to post the comment on `elcome`; it now covers `Welcome`.
+- An inline comment's `--anchor` that was not on the page exited 7; it now exits 6
+  (not found), and an ambiguous one exits 2 (say which), as for other commands.
+
 ## [0.4.1] - 2026-10-02
 
 ### Fixed
@@ -187,7 +232,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/hxmn/confed/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/hxmn/confed/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/hxmn/confed/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/hxmn/confed/compare/v0.2.0...v0.3.0

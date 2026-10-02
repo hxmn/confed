@@ -82,9 +82,11 @@ impl std::str::FromStr for Flavor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Capabilities {
     pub flavor: Flavor,
-    /// Creating inline comments through the API (Cloud only).
+    /// Creating inline comments through the API. On Data Center this is the
+    /// private `rest/inlinecomments/1.0` plugin API, and creating one adds a
+    /// page version.
     pub inline_comment_create: bool,
-    /// Resolving comments through the API (Cloud only).
+    /// Resolving comments through the API (on Data Center, inline threads only).
     pub comment_resolve: bool,
     /// Atlassian Document Format bodies available (Cloud only; confed still syncs storage).
     pub adf: bool,
@@ -106,8 +108,8 @@ impl Capabilities {
     pub fn data_center() -> Self {
         Self {
             flavor: Flavor::DataCenter,
-            inline_comment_create: false,
-            comment_resolve: false,
+            inline_comment_create: true,
+            comment_resolve: true,
             adf: false,
             max_request_concurrency: 8,
         }
@@ -363,8 +365,9 @@ mod tests {
     #[test]
     fn capability_gaps_match_the_design() {
         let dc = Capabilities::data_center();
-        assert!(!dc.inline_comment_create, "DC has no inline comment create API");
-        assert!(!dc.comment_resolve, "DC has no comment resolve API");
+        assert!(dc.inline_comment_create, "through DC's inline-comment plugin API");
+        assert!(dc.comment_resolve, "inline threads, through the same API");
+        assert!(!dc.adf);
         assert!(Capabilities::cloud().inline_comment_create);
     }
 }

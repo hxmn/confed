@@ -972,8 +972,8 @@ async fn whoami_reports_the_server_capabilities() {
     assert_eq!(value["result"]["user"]["display_name"], json!("Test User"));
     assert_eq!(
         value["result"]["capabilities"]["inline_comment_create"],
-        json!(false),
-        "Data Center cannot create inline comments"
+        json!(true),
+        "Data Center creates inline comments through its plugin API"
     );
 }
 
@@ -1187,4 +1187,136 @@ async fn mkdocs_leaves_edited_config_alone_without_force() {
     let forced = run(confed(dir.path(), &["mkdocs", "--force", "--json"]));
     assert_eq!(exit_code(&forced), 0);
     assert!(read(dir.path(), "mkdocs.yml").contains("docs_dir: docs"), "--force regenerates");
+}
+
+#[tokio::test]
+async fn an_inline_anchor_must_name_one_place_before_anything_is_sent() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let before = read(dir.path(), ROOT_FILE);
+
+    // "e" occurs many times in "Welcome to the team."
+    let output = run(confed_authed(
+        dir.path(),
+        &["comment", "add", ROOT_FILE, "--anchor", "e", "-m", "x", "--push", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 2, "ambiguous anchor: {}", stderr(&output));
+
+    let output = run(confed_authed(
+        dir.path(),
+        &["comment", "add", ROOT_FILE, "--anchor", "not on the page", "-m", "x", "--push"],
+    ));
+    assert_eq!(exit_code(&output), 6, "missing anchor: {}", stderr(&output));
+
+    assert!(mutations(&server).await.is_empty(), "nothing was sent");
+    assert_eq!(read(dir.path(), ROOT_FILE), before, "nothing was written");
+}
+
+/// The acceptance run, against a server replaying what DC 9.5.4 answered:
+/// the comment is created through the inline-comment API, the version it
+/// saved is adopted, and the tree is clean afterwards.
+#[tokio::test]
+async fn an_inline_comment_on_data_center_leaves_the_tree_clean() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+
+    let fixtures = format!("{}/../confed-api/tests/fixtures/dc-inline", env!("CARGO_MANIFEST_DIR"));
+    let mut created: Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{fixtures}/create.response.json")).unwrap(),
+    )
+    .unwrap();
+    created["originalSelection"] = json!("Welcome");
+    let marker = created["markerRef"].as_str().unwrap().to_string();
+
+    Mock::given(method("GET"))
+        .and(path("/rest/applinks/1.0/manifest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("<manifest><version>9.5.4</version></manifest>"),
+        )
+        .mount(&server)
+        .await;
+
+    // Before the POST the page is version 3; after it, version 4 with the
+    // selection wrapped in the new marker — what Data Center does.
+    let posted = Arc::new(AtomicBool::new(false));
+    let seen = posted.clone();
+    let wrapped = format!(
+        "<p><ac:inline-comment-marker ac:ref=\"{marker}\">Welcome</ac:inline-comment-marker> to the team.</p>"
+    );
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{ROOT_PAGE}")))
+        .respond_with(move |_: &Request| {
+            let (version, body) = if seen.load(Ordering::SeqCst) {
+                (4, wrapped.clone())
+            } else {
+                (3, "<p>Welcome to the team.</p>".to_string())
+            };
+            let mut page = summary(ROOT_PAGE, "Team Handbook", None, version);
+            page["body"] = json!({ "storage": { "value": body, "representation": "storage" } });
+            ResponseTemplate::new(200).set_body_json(page)
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let flag = posted.clone();
+    Mock::given(method("POST"))
+        .and(path("/rest/inlinecomments/1.0/comments"))
+        .respond_with(move |req: &Request| {
+            let sent: Value = serde_json::from_slice(&req.body).unwrap();
+            assert_eq!(sent["originalSelection"], json!("Welcome"));
+            assert_eq!(
+                (sent["matchIndex"].clone(), sent["numMatches"].clone()),
+                (json!(0), json!(1))
+            );
+            assert_eq!(sent["containerVersion"], json!("3"));
+            flag.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(200).set_body_json(created.clone())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = run(confed_authed(
+        dir.path(),
+        &["comment", "add", ROOT_FILE, "--anchor", "Welcome", "-m", "test", "--push", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "comment");
+    let posted = &value["result"]["comments"][0];
+    assert_eq!(posted["id"], json!("900000099220"), "{value}");
+    assert_eq!(posted["kind"], json!("inline"));
+    assert_eq!(posted["marker_ref"], json!(marker));
+    assert_eq!(posted["anchor"], json!("Welcome"));
+
+    let file = read(dir.path(), ROOT_FILE);
+    assert!(file.contains("<!--c 900000099220 "), "the mark carries the real id: {file}");
+
+    let status = envelope(&run(confed_authed(dir.path(), &["status", "--json"])), "status");
+    assert_eq!(status["result"]["clean"], json!(true), "{status}");
+
+    let before = mutations(&server).await.len();
+    let dry = run(confed_authed(dir.path(), &["push", "--dry-run", "--json"]));
+    assert_eq!(exit_code(&dry), 0, "stderr: {}", stderr(&dry));
+    assert_eq!(mutations(&server).await.len(), before, "a dry run sends nothing");
+    let dry = envelope(&dry, "push");
+    assert!(
+        dry["result"]["pushed"].as_array().is_none_or(Vec::is_empty),
+        "nothing to upload: {dry}"
+    );
+
+    let list = envelope(
+        &run(confed_authed(dir.path(), &["comment", "list", ROOT_FILE, "--json"])),
+        "comment",
+    );
+    let listed = &list["result"]["comments"][0];
+    assert_eq!(listed["kind"], json!("inline"), "{list}");
+    assert_eq!(listed["anchor"]["text"], json!("Welcome"));
 }

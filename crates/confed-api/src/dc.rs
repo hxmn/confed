@@ -4,16 +4,19 @@
 //! Everything lives under `rest/api/*`, spaces are addressed by key, and collections
 //! page with `start`/`limit`.
 //!
-//! Two operations have no Data Center API at all — creating inline comments and
-//! resolving comments — and return [`ApiError::Unsupported`] so callers can report
-//! the capability gap instead of guessing.
+//! Inline comments are the exception: REST v1 cannot create, reply to or resolve
+//! them, so those go through the private plugin API the page view itself uses,
+//! `rest/inlinecomments/1.0`. It is undocumented and may change in any release;
+//! the request shapes come from captures of DC 9.5.4 (`tests/fixtures/dc-inline`),
+//! majors outside [`TESTED_MAJORS`] get a warning, and its failures name the step
+//! that failed.
 
 use crate::client::ConfluenceClient;
 use crate::error::{ApiError, ApiResult};
 use crate::http::{Auth, Http};
 use crate::paginate::{collect_offset, OffsetPage};
 use crate::types::*;
-use crate::wire::{resolve_under_base, v1};
+use crate::wire::{inline_dc, resolve_under_base, v1};
 use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::json;
@@ -28,10 +31,22 @@ const FULL_PAGE_EXPAND: &str = "body.storage,version,ancestors,metadata.labels,s
 const COMMENT_EXPAND: &str =
     "body.storage,extensions.inlineProperties,extensions.resolution,ancestors,history,container";
 
+/// The private inline-comment API.
+const INLINE_API: &str = "rest/inlinecomments/1.0/comments";
+
+/// Data Center majors the inline-comment API was captured on.
+pub const TESTED_MAJORS: &[u32] = &[9];
+
+/// What the page view sends for highlight positions. The real value records
+/// DOM positions confed cannot reproduce; the server accepts an empty list.
+const SERIALIZED_HIGHLIGHTS: &str = "[]";
+
 pub struct DcClient {
     http: Http,
     base_url: String,
     capabilities: Capabilities,
+    /// The product version, fetched once on first use of the private API.
+    version: tokio::sync::OnceCell<Option<String>>,
 }
 
 impl DcClient {
@@ -45,6 +60,7 @@ impl DcClient {
             http: Http::new(base_url, auth, caps.max_request_concurrency)?,
             base_url: base_url.trim_end_matches('/').to_string(),
             capabilities: caps,
+            version: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -60,6 +76,80 @@ impl DcClient {
     async fn fetch_content(&self, id: &str, query: &[(&str, String)]) -> ApiResult<v1::Content> {
         self.http.get_json(&format!("rest/api/content/{id}"), query).await
     }
+
+    async fn cached_version(&self) -> Option<String> {
+        self.version
+            .get_or_init(|| async {
+                let manifest = self.http.get_text("rest/applinks/1.0/manifest", &[]).await.ok()?;
+                parse_manifest_version(&manifest)
+            })
+            .await
+            .clone()
+    }
+
+    /// Before the first call to the private API: warn when this server's major
+    /// is one the API was not captured on.
+    async fn check_inline_api(&self) {
+        let version = self.cached_version().await;
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        let major = version.as_deref().and_then(|v| v.split('.').next()?.parse::<u32>().ok());
+        if major.is_none_or(|m| !TESTED_MAJORS.contains(&m)) {
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "Confluence Data Center {} has not been tested with confed's inline \
+                     comments, which use an undocumented API (tested: {}.x)",
+                    version.as_deref().unwrap_or("of unknown version"),
+                    TESTED_MAJORS.iter().map(u32::to_string).collect::<Vec<_>>().join(".x, ")
+                );
+            });
+        }
+    }
+
+    /// Name the step that failed and what the status means for this API.
+    async fn inline_error(&self, step: &str, err: ApiError) -> ApiError {
+        let on = match self.cached_version().await {
+            Some(v) => format!("Data Center {v}"),
+            None => "this Data Center".to_string(),
+        };
+        match err {
+            ApiError::NotFound(body) | ApiError::Server { status: 405, body } => {
+                ApiError::Unsupported {
+                    flavor: Flavor::DataCenter.as_str(),
+                    operation: format!(
+                        "{step} ({on} does not answer `{INLINE_API}`: {body}; \
+                         add the comment in the browser)"
+                    ),
+                }
+            }
+            ApiError::Server { status, body }
+                if status == 412 || body.to_ascii_lowercase().contains("selection") =>
+            {
+                ApiError::Rejected(format!("{step}: {on} refused it (HTTP {status}): {body}"))
+            }
+            ApiError::Server { status, body } => {
+                ApiError::Server { status, body: format!("{step}: {body}") }
+            }
+            other => other,
+        }
+    }
+}
+
+/// `<version>9.5.4</version>` from the applinks manifest (XML by default,
+/// JSON when the server prefers it).
+fn parse_manifest_version(manifest: &str) -> Option<String> {
+    let value = if let Some(start) = manifest.find("<version>") {
+        let rest = &manifest[start + "<version>".len()..];
+        rest[..rest.find('<')?].to_string()
+    } else {
+        let json: serde_json::Value = serde_json::from_str(manifest).ok()?;
+        json.get("version")?.as_str()?.to_string()
+    };
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn now_millis() -> String {
+    chrono::Utc::now().timestamp_millis().to_string()
 }
 
 /// Data Center answers a stale `version.number` with 409, and some versions with a
@@ -404,23 +494,132 @@ impl ConfluenceClient for DcClient {
 
     async fn add_inline_comment(
         &self,
-        _page: &PageId,
-        _anchor: &InlineAnchor,
-        _body: &str,
+        page: &PageId,
+        anchor: &InlineAnchor,
+        body: &str,
     ) -> ApiResult<Comment> {
-        Err(ApiError::unsupported(
-            Flavor::DataCenter,
-            "create inline comment (Data Center exposes no inline comment API; \
-             add the comment in the browser)",
-        ))
+        self.check_inline_api().await;
+        let version = self
+            .fetch_content(page.as_str(), &[("expand", "version".to_string())])
+            .await?
+            .summary("")
+            .version;
+        // The page view's own request (fixtures/dc-inline/create.request.json),
+        // less the author fields the server takes from the credentials.
+        let payload = json!({
+            "originalSelection": anchor.text,
+            "body": body,
+            "matchIndex": anchor.match_index.unwrap_or(0),
+            "numMatches": anchor.match_count.unwrap_or(1),
+            "serializedHighlights": SERIALIZED_HIGHLIGHTS,
+            "containerId": page.as_str(),
+            "containerVersion": version.to_string(),
+            "parentCommentId": "0",
+            "lastFetchTime": now_millis(),
+            "hasDeletePermission": true,
+            "hasEditPermission": true,
+            "hasResolvePermission": true,
+            "resolveProperties": { "resolved": false, "resolvedTime": 0 },
+            "deleted": false,
+        });
+        let created: inline_dc::InlineComment =
+            match self.http.post_json(INLINE_API, &payload).await {
+                Ok(c) => c,
+                Err(e) => return Err(self.inline_error("create inline comment", e).await),
+            };
+        let mut comment = created.into_comment(page);
+        if comment.body_storage.is_empty() {
+            comment.body_storage = body.to_string();
+        }
+        if let Some(a) = comment.anchor.as_mut() {
+            if a.text.is_empty() {
+                a.text = anchor.text.clone();
+            }
+            a.match_index = anchor.match_index;
+            a.match_count = anchor.match_count;
+        }
+        Ok(comment)
     }
 
-    async fn resolve_comment(&self, _id: &CommentId) -> ApiResult<()> {
-        Err(ApiError::unsupported(
-            Flavor::DataCenter,
-            "resolve comment (Data Center exposes no comment resolution API; \
-             resolve it in the browser)",
-        ))
+    async fn add_inline_reply(
+        &self,
+        page: &PageId,
+        parent: &CommentId,
+        body: &str,
+    ) -> ApiResult<Comment> {
+        self.check_inline_api().await;
+        let parent_id: serde_json::Value = parent
+            .as_str()
+            .parse::<u64>()
+            .map(Into::into)
+            .unwrap_or_else(|_| parent.as_str().into());
+        let payload = json!({ "body": body, "commentId": parent_id });
+        let path = format!(
+            "{INLINE_API}/{}/replies?containerId={}",
+            encode(parent.as_str()),
+            encode(page.as_str())
+        );
+        let created: inline_dc::InlineComment = match self.http.post_json(&path, &payload).await {
+            Ok(c) => c,
+            Err(e) => return Err(self.inline_error("reply to inline comment", e).await),
+        };
+        let mut comment = created.into_comment(page);
+        if comment.body_storage.is_empty() {
+            comment.body_storage = body.to_string();
+        }
+        if comment.parent_comment_id.is_none() {
+            comment.parent_comment_id = Some(parent.clone());
+        }
+        comment.anchor = None;
+        Ok(comment)
+    }
+
+    async fn resolve_comment(&self, id: &CommentId) -> ApiResult<()> {
+        // The page view sends the whole comment back; rebuild it from REST v1.
+        let content =
+            self.fetch_content(id.as_str(), &[("expand", COMMENT_EXPAND.to_string())]).await?;
+        let comment = content.into_comment(&PageId::new(""));
+        let Some(anchor) = comment.anchor.filter(|_| comment.kind == CommentKind::Inline) else {
+            return Err(ApiError::unsupported(
+                Flavor::DataCenter,
+                "resolve a page (footer) comment — Data Center only resolves inline threads",
+            ));
+        };
+        self.check_inline_api().await;
+        let numeric: serde_json::Value =
+            id.as_str().parse::<u64>().map(Into::into).unwrap_or_else(|_| id.as_str().into());
+        let payload = json!({
+            "id": numeric,
+            "originalSelection": anchor.text,
+            "body": comment.body_storage,
+            "matchIndex": 0,
+            "numMatches": 1,
+            "serializedHighlights": SERIALIZED_HIGHLIGHTS,
+            "containerId": comment.page_id.as_str(),
+            "parentCommentId": "0",
+            "markerRef": anchor.marker_ref,
+            "lastFetchTime": now_millis(),
+            "hasDeletePermission": true,
+            "hasEditPermission": true,
+            "hasResolvePermission": true,
+            "resolveProperties": { "resolved": false, "resolvedTime": 0, "resolvedByDangling": false },
+            "deleted": false,
+        });
+        let path = format!("{INLINE_API}/{}/resolve/true/dangling/false", encode(id.as_str()));
+        let answer: inline_dc::ResolveResponse = match self.http.put_json(&path, &payload).await {
+            Ok(r) => r,
+            Err(e) => return Err(self.inline_error("resolve inline comment", e).await),
+        };
+        if answer.resolve_properties.is_some_and(|r| !r.resolved) {
+            return Err(ApiError::Rejected(format!(
+                "resolve inline comment: the server answered but left {id} open"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn server_version(&self) -> ApiResult<Option<String>> {
+        Ok(self.cached_version().await)
     }
 
     async fn search_cql(&self, cql: &str, limit: usize) -> ApiResult<Vec<SearchResult>> {
@@ -491,8 +690,8 @@ mod tests {
     fn capabilities_report_the_data_center_gaps() {
         let c = client();
         assert_eq!(c.flavor(), Flavor::DataCenter);
-        assert!(!c.capabilities().inline_comment_create);
-        assert!(!c.capabilities().comment_resolve);
+        assert!(c.capabilities().inline_comment_create, "through the inline-comment plugin API");
+        assert!(c.capabilities().comment_resolve);
         assert!(!c.capabilities().adf);
     }
 

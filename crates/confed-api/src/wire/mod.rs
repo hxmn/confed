@@ -4,6 +4,7 @@
 //! Nothing here is part of the public API: the flavor clients convert these into
 //! [`crate::types`] before anything leaves the crate.
 
+pub mod inline_dc;
 pub mod v1;
 pub mod v2;
 

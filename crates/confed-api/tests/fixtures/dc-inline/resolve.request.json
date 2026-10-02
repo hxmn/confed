@@ -1,0 +1,30 @@
+{
+  "originalSelection": "Фраза 3.",
+  "body": "<p>test comment</p>",
+  "matchIndex": 0,
+  "numMatches": 1,
+  "serializedHighlights": "[[\"Фраза 3.\",\"3:0\",0,8]]",
+  "authorDisplayName": "Alice Bergmann",
+  "authorUserName": "abergmann",
+  "authorAvatarUrl": "/s/-abc123/9204/1abc234/_/download/attachments/900000123504/user-avatar",
+  "containerId": "900000099218",
+  "containerVersion": 0,
+  "parentCommentId": "0",
+  "lastFetchTime": "1790923841129",
+  "hasDeletePermission": true,
+  "hasEditPermission": true,
+  "hasResolvePermission": true,
+  "resolveProperties": {
+    "resolved": false,
+    "resolvedTime": 0,
+    "resolvedByDangling": false,
+    "jsonObjectSerialize": "{\"resolveProperties\":{\"resolved\":false,\"resolvedTime\":0,\"resolvedByDangling\":false}}"
+  },
+  "deleted": false,
+  "id": 900000099220,
+  "lastModificationDate": "2026-10-02T07:12:28.073Z",
+  "commentDateUrl": "/spaces/ENG/pages/900000099218/Test?focusedCommentId=900000099220#comment-900000099220",
+  "markerRef": "0f8c1a52-4e7b-4c3d-9a6e-2b5d7e9f1c30",
+  "hasReplyPermission": true,
+  "active": true
+}

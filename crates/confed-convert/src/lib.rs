@@ -23,6 +23,7 @@ pub mod macros;
 pub mod marks;
 pub mod mdblock;
 pub mod pretty;
+pub mod selection;
 pub mod storage_parse;
 pub mod to_markdown;
 pub mod to_storage;

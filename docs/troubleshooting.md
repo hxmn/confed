@@ -180,18 +180,32 @@ confed push --json | jq -r '.result.failed[] | "\(.title): \(.error)"'
 
 ## Exit 9 — unsupported on this server
 
-**Symptom.** `error: create inline comment (Data Center exposes no inline comment API; add
-the comment in the browser) is not available on Confluence datacenter`, or the same for
-resolving a comment.
+**Symptom.** `error: create inline comment (Data Center 7.13.0 does not answer
+`rest/inlinecomments/1.0/comments` …) is not available on Confluence datacenter`, or
+`resolve a page (footer) comment — Data Center only resolves inline threads`.
 
-**Cause.** Confluence Data Center has no API for creating inline comments or for resolving
-comments. confed reports the capability gap instead of pretending or silently dropping the
-request. Note that no request is made at all — this is decided client-side from the
-capability table.
+**Cause.** Data Center's public REST API cannot create, reply to or resolve inline
+comments. confed uses the undocumented plugin API the page view itself calls
+(`rest/inlinecomments/1.0`), captured on 9.5.4. A server that answers it with 404 or 405
+does not have it (or has changed it); confed says which step failed. Footer comments have
+no resolve on Data Center at all. On a major other than 9 confed warns before the first
+call.
 
-**Fix.** Do it in the browser. `confed whoami --json | jq .result.capabilities` tells you
-in advance what this server supports. Reading inline comments works everywhere; only
-creating and resolving them are Cloud-only.
+**Fix.** Do it in the browser, and report the server version (`confed whoami`). Reading
+inline comments works everywhere.
+
+## Exit 7 — "the text selection is wrong"
+
+**Symptom.** Creating an inline comment fails with `refused it (HTTP 412)`, or confed
+stops before sending with `is in <file> but not in the page on the server`.
+
+**Cause.** Confluence checks the comment's text, which occurrence it is, and how many
+there are, against its own copy of the page. confed computes those from the page's
+storage, the way the server extracts text (non-breaking spaces kept, macros and code
+excluded). A 412 means the two disagree — usually because the page changed on the server.
+
+**Fix.** `confed pull`, then add the comment again with the text exactly as the page has
+it; `--occurrence N` picks among repeats.
 
 ## Exit 10 — differences exist
 

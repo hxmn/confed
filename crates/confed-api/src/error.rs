@@ -30,6 +30,11 @@ pub enum ApiError {
     #[error("rate limited: {0}")]
     RateLimited(String),
 
+    /// The server understood the request and refused it as stated — e.g. an
+    /// inline comment whose text selection does not match the page (412).
+    #[error("{0}")]
+    Rejected(String),
+
     /// Any other non-success status.
     #[error("server returned {status}: {body}")]
     Server { status: u16, body: String },

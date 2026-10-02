@@ -485,8 +485,11 @@ pub enum CommentCommand {
         page: String,
         #[arg(long, short = 'm')]
         body: Option<String>,
-        /// Anchor an inline comment to this text (Cloud only). The draft is
-        /// written into the page body as a `<!--c new …-->` mark.
+        /// Anchor an inline comment to this text, as it reads on the page. The
+        /// draft is written into the page body as a `<!--c new …-->` mark. Exit 6
+        /// when the text is not on the page, 2 when it appears more than once
+        /// and no --occurrence is given. On Data Center this uses the server's
+        /// undocumented inline-comment API, and posting adds a page version.
         #[arg(long)]
         anchor: Option<String>,
         /// Which occurrence of the anchor text is meant, 1-based, when it
@@ -507,7 +510,7 @@ pub enum CommentCommand {
         #[arg(long)]
         push: bool,
     },
-    /// Mark a comment resolved (Cloud only).
+    /// Mark a comment resolved. On Data Center, inline threads only.
     Resolve {
         comment_id: String,
         #[arg(long)]

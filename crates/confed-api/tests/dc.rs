@@ -449,35 +449,226 @@ async fn footer_comments_are_created_as_child_content() {
     assert_eq!(comment.parent_comment_id, Some(CommentId::new("10")));
 }
 
-#[tokio::test]
-async fn add_inline_comment_is_unsupported_on_data_center() {
-    let server = MockServer::start().await;
-    let err = client(&server)
-        .add_inline_comment(&PageId::new("1001"), &InlineAnchor::default(), "<p>note</p>")
-        .await
-        .unwrap_err();
-    match err {
-        ApiError::Unsupported { flavor, operation } => {
-            assert_eq!(flavor, "datacenter");
-            assert!(operation.contains("inline comment"), "unhelpful message: {operation}");
-        }
-        other => panic!("expected Unsupported, got {other:?}"),
+// --------------------------------------------- inline comments (private API) ----
+//
+// Data Center has no public API for inline comments; confed uses the plugin API
+// the page view calls. These replay the requests captured from DC 9.5.4 in
+// `fixtures/dc-inline`.
+
+const TEST_PAGE: &str = "900000099218";
+
+fn fixture(name: &str) -> serde_json::Value {
+    let path = format!("{}/tests/fixtures/dc-inline/{name}", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap()
+}
+
+/// The applinks manifest, as Data Center serves it (XML) to anyone.
+async fn mount_manifest(server: &MockServer, version: &str) {
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/applinks/1.0/manifest"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(format!(
+            "<manifest><id>abc</id><name>Confluence</name><typeId>confluence</typeId>\
+             <version>{version}</version><buildNumber>10000</buildNumber></manifest>"
+        )))
+        .mount(server)
+        .await;
+}
+
+async fn mount_page_version(server: &MockServer, version: u32) {
+    Mock::given(method("GET"))
+        .and(path(format!("/confluence/rest/api/content/{TEST_PAGE}")))
+        .and(query_param("expand", "version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": TEST_PAGE, "type": "page", "title": "Test", "status": "current",
+            "version": { "number": version }
+        })))
+        .mount(server)
+        .await;
+}
+
+fn selection() -> InlineAnchor {
+    InlineAnchor {
+        text: "Фраза 3.".into(),
+        match_index: Some(0),
+        match_count: Some(1),
+        ..Default::default()
     }
-    assert_eq!(server.received_requests().await.unwrap().len(), 0, "no request is made");
 }
 
 #[tokio::test]
-async fn resolve_comment_is_unsupported_on_data_center() {
+async fn an_inline_comment_is_created_the_way_the_page_view_does_it() {
     let server = MockServer::start().await;
+    mount_manifest(&server, "9.5.4").await;
+    mount_page_version(&server, 1).await;
+    let captured = fixture("create.request.json");
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/inlinecomments/1.0/comments"))
+        .and(header("authorization", "Bearer pat-token"))
+        .and(header("content-type", "application/json"))
+        .and(header("x-atlassian-token", "no-check"))
+        .and(move |req: &Request| {
+            let sent: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            // Everything the server validates matches the browser's request.
+            [
+                "originalSelection",
+                "body",
+                "matchIndex",
+                "numMatches",
+                "containerId",
+                "containerVersion",
+                "parentCommentId",
+                "deleted",
+            ]
+            .iter()
+            .all(|k| sent[k] == captured[k])
+                && sent["serializedHighlights"].is_string()
+                && sent["lastFetchTime"].as_str().is_some_and(|t| t.parse::<u64>().is_ok())
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("create.response.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = client(&server)
+        .add_inline_comment(&PageId::new(TEST_PAGE), &selection(), "<p>test comment</p>")
+        .await
+        .unwrap();
+    assert_eq!(c.id, CommentId::new("900000099220"));
+    assert_eq!(c.kind, CommentKind::Inline);
+    let anchor = c.anchor.unwrap();
+    assert_eq!(anchor.text, "Фраза 3.");
+    assert_eq!(anchor.marker_ref.as_deref(), Some("0f8c1a52-4e7b-4c3d-9a6e-2b5d7e9f1c30"));
+}
+
+#[tokio::test]
+async fn a_reply_to_an_inline_thread_goes_to_its_replies() {
+    let server = MockServer::start().await;
+    mount_manifest(&server, "9.5.4").await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/inlinecomments/1.0/comments/900000099222/replies"))
+        .and(query_param("containerId", TEST_PAGE))
+        .and(header("x-atlassian-token", "no-check"))
+        .and(body_json(json!({ "body": "<p>replya</p>", "commentId": 900000099222u64 })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("reply.response.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = client(&server)
+        .add_inline_reply(&PageId::new(TEST_PAGE), &CommentId::new("900000099222"), "<p>replya</p>")
+        .await
+        .unwrap();
+    assert_eq!(c.id, CommentId::new("900000099224"));
+    assert_eq!(c.parent_comment_id, Some(CommentId::new("900000099222")));
+}
+
+#[tokio::test]
+async fn resolving_sends_the_comment_back_to_its_resolve_endpoint() {
+    let server = MockServer::start().await;
+    mount_manifest(&server, "9.5.4").await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/900000099220"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "900000099220", "type": "comment", "status": "current",
+            "container": { "id": TEST_PAGE, "type": "page" },
+            "body": { "storage": { "value": "<p>test comment</p>", "representation": "storage" } },
+            "extensions": {
+                "location": "inline",
+                "inlineProperties": {
+                    "originalSelection": "Фраза 3.",
+                    "markerRef": "0f8c1a52-4e7b-4c3d-9a6e-2b5d7e9f1c30"
+                },
+                "resolution": { "status": "open" }
+            }
+        })))
+        .mount(&server)
+        .await;
+    let captured = fixture("resolve.request.json");
+    Mock::given(method("PUT"))
+        .and(path(
+            "/confluence/rest/inlinecomments/1.0/comments/900000099220/resolve/true/dangling/false",
+        ))
+        .and(header("x-atlassian-token", "no-check"))
+        .and(move |req: &Request| {
+            let sent: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            ["id", "originalSelection", "body", "containerId", "markerRef", "parentCommentId"]
+                .iter()
+                .all(|k| sent[k] == captured[k])
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("resolve.response.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).resolve_comment(&CommentId::new("900000099220")).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_footer_comment_cannot_be_resolved_on_data_center() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/10"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "10", "type": "comment", "container": { "id": "1001", "type": "page" },
+            "body": { "storage": { "value": "<p>x</p>", "representation": "storage" } }
+        })))
+        .mount(&server)
+        .await;
     let err = client(&server).resolve_comment(&CommentId::new("10")).await.unwrap_err();
+    assert!(matches!(err, ApiError::Unsupported { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_missing_inline_api_is_unsupported_and_names_the_step() {
+    let server = MockServer::start().await;
+    mount_manifest(&server, "7.13.0").await;
+    mount_page_version(&server, 1).await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/inlinecomments/1.0/comments"))
+        .respond_with(ResponseTemplate::new(405).set_body_string("Method Not Allowed"))
+        .mount(&server)
+        .await;
+    let err = client(&server)
+        .add_inline_comment(&PageId::new(TEST_PAGE), &selection(), "<p>x</p>")
+        .await
+        .unwrap_err();
     match err {
-        ApiError::Unsupported { flavor, operation } => {
-            assert_eq!(flavor, "datacenter");
-            assert!(operation.contains("resolve"), "unhelpful message: {operation}");
+        ApiError::Unsupported { operation, .. } => {
+            assert!(operation.contains("create inline comment"), "{operation}");
+            assert!(operation.contains("7.13.0"), "says which server: {operation}");
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
-    assert_eq!(server.received_requests().await.unwrap().len(), 0, "no request is made");
+}
+
+#[tokio::test]
+async fn a_refused_selection_is_rejected_not_a_generic_error() {
+    let server = MockServer::start().await;
+    mount_manifest(&server, "9.5.4").await;
+    mount_page_version(&server, 1).await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/inlinecomments/1.0/comments"))
+        .respond_with(ResponseTemplate::new(412).set_body_string("The text selection is wrong"))
+        .mount(&server)
+        .await;
+    let err = client(&server)
+        .add_inline_comment(&PageId::new(TEST_PAGE), &selection(), "<p>x</p>")
+        .await
+        .unwrap_err();
+    match err {
+        ApiError::Rejected(message) => {
+            assert!(message.contains("create inline comment"), "{message}");
+            assert!(message.contains("412"), "{message}");
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_server_version_comes_from_the_applinks_manifest() {
+    let server = MockServer::start().await;
+    mount_manifest(&server, "9.5.4").await;
+    assert_eq!(client(&server).server_version().await.unwrap().as_deref(), Some("9.5.4"));
 }
 
 #[tokio::test]
@@ -761,8 +952,8 @@ async fn list_spaces_respects_a_limit() {
 async fn capabilities_advertise_the_data_center_gaps() {
     let server = MockServer::start().await;
     let c = client(&server);
-    assert!(!c.capabilities().inline_comment_create);
-    assert!(!c.capabilities().comment_resolve);
+    assert!(c.capabilities().inline_comment_create);
+    assert!(c.capabilities().comment_resolve);
     assert!(!c.capabilities().adf);
     assert_eq!(
         c.page_url(&PageId::new("1001"), "DOCS"),

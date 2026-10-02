@@ -323,10 +323,12 @@ Agreed, I will add it.
 
 - `confed:new` is a draft: it has no `id` yet, and `push` posts it and gives it one. An
   empty draft marker is ignored rather than posting a blank comment.
-- Adding `anchor="…"` to a `confed:new` marker makes it an inline comment. Data Center has
-  no inline comment API, so that push exits 9 there.
-- `confed:resolve id=…` asks the server to resolve a thread. Cloud only; exit 9 on Data
-  Center.
+- Adding `anchor="…"` to a `confed:new` marker makes it an inline comment;
+  `occurrence=N` (1-based) picks one when the text appears more than once. A posted
+  draft, and a handled `confed:resolve`, leave the sidecar, so a retried push never
+  posts twice.
+- `confed:resolve id=…` asks the server to resolve a thread. On Data Center only inline
+  threads can be resolved; a footer comment exits 9.
 - Editing the body of an existing `confed:comment` does nothing — confed does not update
   comments in place. Reply instead.
 - Unpushed drafts survive a `confed pull`: the sidecar is rewritten from the server, and
@@ -360,8 +362,10 @@ checklist<!--/c 77120--> before Friday.
   The <!--c new Is this still the right team?-->platform team<!--/c new--> owns it.
   ```
 
-  `confed push` creates the comment (Cloud only; exit 9 on Data Center) and rewrites the
-  mark with its id. The draft is one line and may not contain `--`; a longer body, or a
+  `confed push` creates the comment and rewrites the mark with its id. On Data Center
+  creating it saves a new page version, which confed adopts so the page stays unchanged.
+  Confluence checks the text against its own copy of the page: a draft on a paragraph
+  with unpushed edits that cannot be pushed first stops the push with exit 7. The draft is one line and may not contain `--`; a longer body, or a
   span inside a code block, goes through the sidecar's `confed:new anchor="…"` form.
   A `new` mark that is not closed, wraps nothing, or has no text fails the push with
   exit 7 and the line number, before anything is uploaded.

@@ -188,6 +188,14 @@ impl From<ApiError> for ConfedError {
             ApiError::Unsupported { flavor, operation } => ConfedError::Unsupported(format!(
                 "{operation} is not available on Confluence {flavor}"
             )),
+            ApiError::Rejected(m) => ConfedError::State {
+                message: m,
+                hint: Some(
+                    "the server checks the selection against its own copy of the page; \
+                     run `confed pull`, then try again with the exact text it shows"
+                        .into(),
+                ),
+            },
             ApiError::Server { status, body } => {
                 ConfedError::Other(format!("server returned {status}: {body}"))
             }

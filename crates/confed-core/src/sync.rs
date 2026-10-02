@@ -1872,45 +1872,85 @@ impl SyncEngine {
                 .absolute(&paths::sidecar_for(&record.local_path))
                 .join(comments::COMMENTS_FILENAME);
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            let sidecar = comments::parse(&text)?;
+            let mut sidecar = comments::parse(&text)?;
+            if sidecar.drafts().next().is_none() && sidecar.resolve_requests.is_empty() {
+                continue;
+            }
+            let page_id = PageId::new(&record.page_id);
 
-            for draft in sidecar.comments.iter().filter(|c| c.is_draft()) {
+            while let Some(index) = sidecar.comments.iter().position(|c| c.is_draft()) {
+                let draft = sidecar.comments[index].clone();
                 let storage =
                     confed_convert::markdown_to_storage(&draft.body, &ConvertOptions::default())?;
                 let posted = match &draft.anchor {
                     Some(anchor) if draft.kind == comments::SidecarKind::Inline => {
-                        if !self.client.capabilities().inline_comment_create {
-                            return Err(ConfedError::Unsupported(format!(
-                                "creating inline comments is not available on Confluence {}",
-                                self.client.flavor()
-                            )));
-                        }
-                        self.client
-                            .add_inline_comment(&PageId::new(&record.page_id), anchor, &storage)
-                            .await?
+                        self.require_inline_create()?;
+                        let occurrence = anchor.match_index.map(|i| i + 1);
+                        let page = self.client.get_page(&page_id, BodyFormat::Storage).await?;
+                        let local = local_body(ws, &record.local_path);
+                        let selection = server_selection(
+                            &page.body_storage,
+                            &anchor.text,
+                            occurrence,
+                            local.as_deref(),
+                            &record.local_path,
+                        )?;
+                        let posted =
+                            self.client.add_inline_comment(&page_id, &selection, &storage).await?;
+                        ws.state().upsert_comment(&comment_record(&record.page_id, &posted))?;
+                        self.adopt_comment_version(ws, &record.page_id, &posted).await?;
+                        posted
                     }
                     _ => {
-                        self.client
-                            .add_footer_comment(
-                                &PageId::new(&record.page_id),
-                                &storage,
-                                draft.reply_to.as_deref().map(confed_api::CommentId::new).as_ref(),
-                            )
-                            .await?
+                        let parent = draft.reply_to.as_deref().map(confed_api::CommentId::new);
+                        let parent_is_inline = parent.as_ref().is_some_and(|p| {
+                            ws.state().page_comments(&record.page_id).is_ok_and(|all| {
+                                all.iter().any(|c| c.comment_id == p.0 && c.kind == "inline")
+                            })
+                        });
+                        let posted = match &parent {
+                            Some(parent) if parent_is_inline => {
+                                self.client.add_inline_reply(&page_id, parent, &storage).await?
+                            }
+                            _ => {
+                                self.client
+                                    .add_footer_comment(&page_id, &storage, parent.as_ref())
+                                    .await?
+                            }
+                        };
+                        ws.state().upsert_comment(&comment_record(&record.page_id, &posted))?;
+                        posted
                     }
                 };
                 added.push(posted.id.0.clone());
+                // Posted: out of the sidecar now, so a failure later in this
+                // push cannot post it twice on the retry.
+                sidecar.comments.remove(index);
+                self.rewrite_sidecar(ws, &record, &path, &sidecar)?;
             }
 
-            for id in &sidecar.resolve_requests {
+            while let Some(id) = sidecar.resolve_requests.first().cloned() {
                 if !self.client.capabilities().comment_resolve {
                     return Err(ConfedError::Unsupported(format!(
                         "resolving comments is not available on Confluence {}",
                         self.client.flavor()
                     )));
                 }
-                self.client.resolve_comment(&confed_api::CommentId::new(id)).await?;
+                self.client.resolve_comment(&confed_api::CommentId::new(&id)).await?;
+                if let Some(mut c) = ws
+                    .state()
+                    .page_comments(&record.page_id)?
+                    .into_iter()
+                    .find(|c| c.comment_id == id)
+                {
+                    c.resolved = true;
+                    ws.state().upsert_comment(&c)?;
+                }
+                sidecar.resolve_requests.remove(0);
+                self.rewrite_sidecar(ws, &record, &path, &sidecar)?;
             }
+            // The resolved threads' marks leave the body.
+            sync_marks(ws, &record.page_id, &record.local_path)?;
         }
 
         // Drafts written into page bodies as `new` marks.
@@ -1918,6 +1958,35 @@ impl SyncEngine {
             added.extend(self.push_body_drafts(ws, &record).await?);
         }
         Ok(added)
+    }
+
+    fn require_inline_create(&self) -> Result<()> {
+        if self.client.capabilities().inline_comment_create {
+            Ok(())
+        } else {
+            Err(ConfedError::Unsupported(format!(
+                "creating inline comments is not available on Confluence {}",
+                self.client.flavor()
+            )))
+        }
+    }
+
+    /// Write the sidecar back from the database plus the drafts and resolve
+    /// requests still waiting.
+    fn rewrite_sidecar(
+        &self,
+        ws: &Workspace,
+        record: &PageRecord,
+        path: &Path,
+        sidecar: &comments::Sidecar,
+    ) -> Result<()> {
+        let records = ws.state().page_comments(&record.page_id)?;
+        let drafts: Vec<comments::SidecarComment> = sidecar.drafts().cloned().collect();
+        let mut text = comments::render(&record.page_id, &record.title, &records, &drafts);
+        for id in &sidecar.resolve_requests {
+            text.push_str(&format!("\n<!-- confed:resolve id={id} -->\n"));
+        }
+        write_atomic(path, &text)
     }
 
     /// Post every `new` mark in a page file as an inline comment, rewriting
@@ -1931,27 +2000,61 @@ impl SyncEngine {
         let path = record.local_path.clone();
         let abs = ws.absolute(&path);
         let Ok(content) = std::fs::read_to_string(&abs) else { return Ok(Vec::new()) };
-        let Ok(mut file) = crate::frontmatter::parse(&content, &path) else {
+        let Ok(file) = crate::frontmatter::parse(&content, &path) else {
             return Ok(Vec::new());
         };
-        let drafts: Vec<Mark> = file.drafts().cloned().collect();
-        if drafts.is_empty() {
+        if file.drafts().next().is_none() {
             return Ok(Vec::new());
         }
         validate_drafts(&file, &path)?;
-        if !self.client.capabilities().inline_comment_create {
-            return Err(ConfedError::Unsupported(format!(
-                "creating inline comments is not available on Confluence {}",
-                self.client.flavor()
-            )));
-        }
+        self.require_inline_create()?;
 
-        let mode = marks_mode(ws);
         let mut added = Vec::new();
-        let mut content = content;
-        for draft in drafts {
-            let Some(end) = draft.end else { continue };
-            let anchor = draft_anchor(&file.body, draft.start, end);
+        loop {
+            // Re-read each round: adopting a new page version may re-render
+            // the file, which moves every later draft.
+            let content = std::fs::read_to_string(&abs)
+                .map_err(|e| ConfedError::io(format!("reading {path}"), e))?;
+            let mut file = crate::frontmatter::parse(&content, &path)?;
+            let Some(draft) = file.drafts().find(|d| d.end.is_some()).cloned() else { break };
+            let end = draft.end.unwrap_or(draft.start);
+            // A mark cannot open a line, so one meant for a paragraph's first
+            // word sits a character in; the comment is on the whole word.
+            let start = marks::intended_start(&file.body, draft.start);
+            let base = ws.state().get_page(&record.page_id)?.unwrap_or_else(|| record.clone());
+            refuse_unpushed_block(ws, &base, &file.body, start, end, &path)?;
+
+            let local = draft_anchor(&file.body, start, end);
+            let page =
+                self.client.get_page(&PageId::new(&record.page_id), BodyFormat::Storage).await?;
+            let anchor = server_selection(
+                &page.body_storage,
+                &local.text,
+                Some(local.match_index.unwrap_or(0) + 1),
+                Some(&file.body),
+                &path,
+            )
+            .and_then(|sel| {
+                let loose = local.match_count.unwrap_or(1);
+                let on_server = server_occurrences(&page.body_storage, &local.text);
+                if on_server != loose {
+                    return Err(ConfedError::state_with_hint(
+                        format!(
+                            "{path}: line {}: \"{}\" occurs {loose} time(s) in the file but \
+                             {on_server} on the server, so which one the mark means is unclear",
+                            draft.line, local.text
+                        ),
+                        "push the page first, or comment from comments.md with \
+                         `confed comment add --sidecar --occurrence N`",
+                    ));
+                }
+                Ok(confed_api::InlineAnchor {
+                    context_before: local.context_before.clone(),
+                    context_after: local.context_after.clone(),
+                    ..sel
+                })
+            })?;
+
             let body = draft.draft_body().unwrap_or_default();
             let storage = confed_convert::markdown_to_storage(body, &ConvertOptions::default())?;
             let posted = self
@@ -1967,40 +2070,89 @@ impl SyncEngine {
                 .find(|m| m.id.is_new() && m.start == draft.start && m.end == draft.end)
             {
                 m.id = MarkId::Comment(posted.id.0.clone());
-                m.note = mark_preview(&new_record, &[], mode);
+                m.note = mark_preview(&new_record, &[], marks_mode(ws));
             }
-            let marked = file.marked_body();
-            rewrite_body(&abs, &content, &marked)?;
-            if let Some((_, body)) = crate::frontmatter::split(&content) {
-                let head = content.len() - body.len();
-                content = format!("{}{}", &content[..head], marked);
-            }
+            rewrite_body(&abs, &content, &file.marked_body())?;
             added.push(posted.id.0.clone());
+            self.adopt_comment_version(ws, &record.page_id, &posted).await?;
         }
-
-        self.refresh_base_body(ws, &record.page_id, &path).await?;
         Ok(added)
     }
 
-    /// Creating an inline comment puts a marker into the server's body without
-    /// a version bump. Pull the body again so the base carries the marker;
-    /// otherwise the next push of an unrelated edit would copy stale bytes for
-    /// the untouched block and the server would orphan the thread.
-    async fn refresh_base_body(&self, ws: &mut Workspace, page_id: &str, path: &str) -> Result<()> {
+    /// Bring the base up to date with the marker a new inline comment put
+    /// into the server's body.
+    ///
+    /// Cloud adds the marker without a version bump; Data Center saves a new
+    /// page version. Either way the base must carry the marker, or the next
+    /// push of an unrelated edit would copy stale bytes for the untouched block
+    /// and the server would orphan the thread. A new version is adopted only
+    /// when, with the new comment's marker taken out, it reads the same as the
+    /// base — anything else is somebody else's edit, which `pull` merges.
+    async fn adopt_comment_version(
+        &self,
+        ws: &mut Workspace,
+        page_id: &str,
+        posted: &Comment,
+    ) -> Result<()> {
         let page = self.client.get_page(&PageId::new(page_id), BodyFormat::Storage).await?;
         let Some(base) = ws.state().get_page(page_id)? else { return Ok(()) };
-        if page.summary.version != base.version || page.body_storage == base.storage_body {
+        if page.body_storage == base.storage_body && page.summary.version == base.version {
             return Ok(());
         }
-        let opts = page_convert_options(ws, path);
+        let path = base.local_path.clone();
+        let opts = page_convert_options(ws, &path);
+        if page.summary.version != base.version {
+            let marker = posted.anchor.as_ref().and_then(|a| a.marker_ref.as_deref());
+            let unmarked = match marker {
+                Some(r) => confed_convert::selection::strip_marker(&page.body_storage, r)?,
+                None => page.body_storage.clone(),
+            };
+            let same = unmarked == base.storage_body
+                || comparable_markdown(&unmarked, &opts)?
+                    == comparable_markdown(&base.storage_body, &opts)?;
+            if !same || page.summary.version != base.version + 1 {
+                tracing::warn!(
+                    target: "confed::sync",
+                    page = %page_id, base = base.version, remote = page.summary.version,
+                    "the page changed on the server besides the new comment; run `confed pull`"
+                );
+                return Ok(());
+            }
+        }
+
         let converted = confed_convert::storage_to_markdown(&page.body_storage, &opts)?;
-        let mut updated = base;
+        let mut updated = base.clone();
         updated.storage_body = page.body_storage.clone();
         updated.storage_hash = hash_str(&page.body_storage);
+        updated.version = page.summary.version;
+        updated.updated_at = page.summary.updated_at.clone().or(updated.updated_at);
         updated.block_map = serde_json::to_string(&converted.block_map).ok();
         updated.render_key = render_key(&page.body_storage, &opts.users);
+
+        // The file follows: its frontmatter names the new version, and when it
+        // carries no local edits its body is re-rendered from the new storage
+        // so it and the base agree exactly.
+        let abs = ws.absolute(&path);
+        if let Ok(content) = std::fs::read_to_string(&abs) {
+            if let Ok(mut file) = crate::frontmatter::parse(&content, &path) {
+                let untouched = file.content_hash() == base.markdown_hash;
+                if let Some(managed) = file.frontmatter.managed.as_mut() {
+                    managed.version = page.summary.version;
+                    managed.updated = page.summary.updated_at.clone().or(managed.updated.take());
+                }
+                if untouched {
+                    // Comment marks come from the render; drafts still
+                    // waiting to be posted are carried over.
+                    file.marks.retain(|m| m.id.is_new());
+                    file.set_body(converted.markdown.clone());
+                    updated.markdown_hash = file.content_hash();
+                }
+                write_atomic(&abs, &file.render()?)?;
+            }
+        }
         ws.state().upsert_page(&updated)?;
         if let Some(mut remote) = ws.state().get_remote(page_id)? {
+            remote.version = page.summary.version;
             remote.storage_body = Some(page.body_storage.clone());
             remote.storage_hash = Some(hash_str(&page.body_storage));
             ws.state().upsert_remote(&remote)?;
@@ -2008,8 +2160,119 @@ impl SyncEngine {
         if let Ok(cache) = ws.page_store() {
             cache.put_body(page_id, page.summary.version, &page.body_storage)?;
         }
-        self.write_storage_copy(ws, path, &page.body_storage)
+        self.write_storage_copy(ws, &path, &page.body_storage)
     }
+}
+
+/// The page file's stripped body, if it can be read.
+fn local_body(ws: &Workspace, path: &str) -> Option<String> {
+    let content = std::fs::read_to_string(ws.absolute(path)).ok()?;
+    crate::frontmatter::parse(&content, path).ok().map(|f| f.body)
+}
+
+/// How many times `text` occurs in the server's page text.
+fn server_occurrences(storage: &str, text: &str) -> usize {
+    match confed_convert::selection::select(storage, text, Some(usize::MAX)) {
+        Ok(Err(confed_convert::selection::SelectionError::OutOfRange { count })) => count,
+        Ok(Ok(sel)) => sel.match_count,
+        _ => 0,
+    }
+}
+
+/// Where `text` sits in the server's copy of a page, as a create request must
+/// state it — or why it cannot be commented on.
+///
+/// `local` is the page file's body: text that is in the file but not on the
+/// server is an unpushed edit, which is the user's to push, not a typo.
+pub fn server_selection(
+    storage: &str,
+    text: &str,
+    occurrence: Option<usize>,
+    local: Option<&str>,
+    path: &str,
+) -> Result<confed_api::InlineAnchor> {
+    use confed_convert::selection::{select, SelectionError};
+    match select(storage, text, occurrence)? {
+        Ok(sel) => Ok(confed_api::InlineAnchor {
+            text: sel.text,
+            match_index: Some(sel.match_index),
+            match_count: Some(sel.match_count),
+            ..Default::default()
+        }),
+        Err(SelectionError::NotFound { .. })
+            if local.is_some_and(|body| marks::plain_text(body).contains(text.trim())) =>
+        {
+            Err(ConfedError::state_with_hint(
+                format!("\"{text}\" is in {path} but not in the page on the server"),
+                "push the page first (`confed push`); Confluence checks the selection \
+                 against its own copy of the page",
+            ))
+        }
+        Err(e) => Err(selection_error(e, text, path)),
+    }
+}
+
+/// The exit a selection problem deserves: 6 for text that is not there, 2 for
+/// a request that has to say more.
+pub fn selection_error(
+    e: confed_convert::selection::SelectionError,
+    text: &str,
+    path: &str,
+) -> ConfedError {
+    use confed_convert::selection::SelectionError;
+    match e {
+        SelectionError::NotFound { in_macro: true } => ConfedError::NotFound(format!(
+            "\"{text}\" in {path} is only inside a macro or code block, where Confluence \
+             cannot anchor a comment"
+        )),
+        SelectionError::NotFound { in_macro: false } => {
+            ConfedError::NotFound(format!("the text \"{text}\" does not appear in {path}"))
+        }
+        SelectionError::Ambiguous { contexts } => ConfedError::usage_with_hint(
+            format!(
+                "the text \"{text}\" appears {} times in {path}:\n  {}",
+                contexts.len(),
+                contexts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("{}: {c}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
+            ),
+            "pick one with --occurrence N, or include more surrounding words",
+        ),
+        SelectionError::OutOfRange { count } => ConfedError::usage(format!(
+            "--occurrence is out of range: \"{text}\" appears {count} time(s) in {path}"
+        )),
+        SelectionError::Invalid => ConfedError::usage(
+            "an inline comment's text must be non-empty and within one paragraph",
+        ),
+    }
+}
+
+/// Refuse to post a body draft whose paragraph has unpushed edits: Confluence
+/// checks the selection against its own copy, which does not have them.
+fn refuse_unpushed_block(
+    ws: &Workspace,
+    base: &PageRecord,
+    body: &str,
+    start: usize,
+    end: usize,
+    path: &str,
+) -> Result<()> {
+    let block_start = body[..start].rfind("\n\n").map_or(0, |i| i + 2);
+    let block_end = body[end..].find("\n\n").map_or(body.len(), |i| end + i);
+    let block = body[block_start..block_end].trim();
+    let base_md = comparable_markdown(&base.storage_body, &page_convert_options(ws, path))?;
+    if block.is_empty() || base_md.contains(block) {
+        return Ok(());
+    }
+    let line = body[..start].matches('\n').count() + 1;
+    Err(ConfedError::state_with_hint(
+        format!("{path}: line {line}: the paragraph with the new comment has unpushed edits"),
+        "push the page first (`confed push`), then the comment; Confluence checks the \
+         selection against its own copy of the page",
+    ))
 }
 
 fn status_of<'a>(statuses: &'a [PageStatus], page_id: &str) -> Option<&'a PageStatus> {

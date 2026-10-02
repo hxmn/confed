@@ -398,9 +398,9 @@ immediately.
 | Subcommand | Flags |
 |---|---|
 | `comment list <PAGE>` | `--unresolved`, `--inline` |
-| `comment add <PAGE>` | `-m`, `--body <TEXT>`, `--anchor <TEXT>` (Cloud only), `--occurrence <N>`, `--sidecar`, `--push` |
+| `comment add <PAGE>` | `-m`, `--body <TEXT>`, `--anchor <TEXT>`, `--occurrence <N>`, `--sidecar`, `--push` |
 | `comment reply <COMMENT_ID>` | `-m`, `--body <TEXT>` (required), `--push` |
-| `comment resolve <COMMENT_ID>` | `--push` (Cloud only) |
+| `comment resolve <COMMENT_ID>` | `--push` (on Data Center, inline threads only) |
 
 Creating an inline comment and resolving a comment do not exist in the Data Center API;
 both exit 9 there with a message saying so.
