@@ -60,6 +60,11 @@ impl ApiError {
         match status {
             401 | 403 => ApiError::Auth(format!("{context}: HTTP {status}: {}", truncate(&body))),
             404 => ApiError::NotFound(format!("{context}: {}", truncate(&body))),
+            // Confluence answers some writes to deleted content with a 400 that
+            // says so, rather than a 404.
+            400 if body.contains("content.doesnt.exist") => {
+                ApiError::NotFound(format!("{context}: {}", truncate(&body)))
+            }
             409 => ApiError::Conflict(format!("{context}: {}", truncate(&body))),
             429 => ApiError::RateLimited(format!("{context}: {}", truncate(&body))),
             _ => ApiError::Server { status, body: format!("{context}: {}", truncate(&body)) },

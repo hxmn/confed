@@ -1345,6 +1345,14 @@ async fn page_paths_resolve_from_the_current_directory() {
     let err = stderr(&output);
     assert!(err.contains("Team Handbook/Onbaording.md"), "says where it looked: {err}");
     assert!(err.contains("did you mean `Team Handbook/Onboarding.md`"), "suggests: {err}");
+    let output = run(confed_authed(&sub, &["comment", "list", "Onbaording.md"]));
+    assert!(stderr(&output).contains("did you mean"), "a swap: {}", stderr(&output));
+    let output = run(confed_authed(dir.path(), &["comment", "list", "Taem Handbook.md"]));
+    assert!(
+        stderr(&output).contains("did you mean `Team Handbook.md`"),
+        "a swap at the root: {}",
+        stderr(&output)
+    );
 
     // Scopes too: `diff Onboarding.md` from the subdirectory is that page.
     std::fs::write(

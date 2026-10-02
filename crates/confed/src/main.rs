@@ -67,8 +67,9 @@ fn stale_guide_warning(ctx: &Context, command: &Command) -> Option<String> {
     let (_, stale) = commands::agent_docs::audit(&root);
     let (name, written_by) = stale.first()?;
     Some(format!(
-        "{name} was written by confed {written_by} and describes that version, not {}; \
+        "{name} was written by {} and describes that version, not {}; \
          run `confed doctor --fix` to regenerate it",
+        commands::agent_docs::writer(written_by),
         commands::agent_docs::VERSION
     ))
 }

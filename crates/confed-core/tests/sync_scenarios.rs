@@ -2147,7 +2147,31 @@ async fn comments_are_edited_and_deleted_on_the_server() {
     assert!(h.read(".Onboarding/comments.md").contains("Link the **new** template?"));
     assert!(h.read("Onboarding.md").contains("Link the **new** template?"), "the preview follows");
 
-    h.engine.delete_comment(&mut h.ws, &id.0).await.unwrap();
+    // A reply, known locally, goes with its thread and is reported.
+    let reply = h
+        .engine
+        .client()
+        .add_inline_reply(&confed_api::PageId::new("1001"), &id, "<p>ok</p>")
+        .await
+        .unwrap();
+    h.ws.state()
+        .upsert_comment(&confed_core::state::CommentRecord {
+            comment_id: reply.id.0.clone(),
+            page_id: "1001".into(),
+            parent_comment_id: Some(id.0.clone()),
+            kind: "inline".into(),
+            author: None,
+            created_at: None,
+            body_storage: Some("<p>ok</p>".into()),
+            body_markdown: "ok".into(),
+            resolved: false,
+            anchor: None,
+            synced_at: None,
+        })
+        .unwrap();
+    let replies = h.engine.delete_comment(&mut h.ws, &id.0).await.unwrap();
+    assert_eq!(replies, vec![reply.id.0.clone()]);
+    assert!(h.ws.state().page_comments("1001").unwrap().is_empty());
     assert!(h.mock.calls().contains(&format!("delete_comment:{id}")));
     assert!(!h.read("Onboarding.md").contains("<!--c"), "its mark leaves the body");
     assert!(!h.read(".Onboarding/comments.md").contains("template"));
@@ -2158,4 +2182,26 @@ async fn comments_are_edited_and_deleted_on_the_server() {
 
     let err = h.engine.delete_comment(&mut h.ws, "999").await.unwrap_err();
     assert_eq!(err.exit_code(), confed_core::error::ExitCode::NotFound);
+}
+
+/// Comment work on a page that was deleted on the server fails for that page
+/// with a message that says so, keeps the drafts, and lets other pages through.
+#[tokio::test]
+async fn comment_work_on_a_page_deleted_on_the_server() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Gone", None, "<p>Gone soon.</p>");
+    h.mock.seed_page("1002", "Kept", None, "<p>Still here.</p>");
+    h.pull().await;
+    for page in ["Gone", "Kept"] {
+        let path = format!(".{page}/comments.md");
+        let existing = std::fs::read_to_string(h.path(&path)).unwrap_or_default();
+        h.write(&path, &format!("{existing}\n<!-- confed:new -->\nA note.\n"));
+    }
+    h.mock.delete_page_directly("1001");
+
+    let outcome = h.push().await;
+    assert_eq!(outcome.comments_added.len(), 1, "the live page's comment is posted");
+    let failure = outcome.failed.iter().find(|f| f.page_id == "1001").expect("reported");
+    assert!(failure.error.contains("no longer exists on the server"), "{}", failure.error);
+    assert!(h.read(".Gone/comments.md").contains("A note."), "the draft is kept");
 }

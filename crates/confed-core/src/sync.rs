@@ -287,6 +287,7 @@ struct CommentWork {
     added: Vec<String>,
     replies: Vec<String>,
     resolved: Vec<String>,
+    failed: Vec<FailedPage>,
 }
 
 // ------------------------------------------------------------ the engine ----
@@ -1215,7 +1216,9 @@ impl SyncEngine {
         let body = &marks::strip(body).body;
 
         let mut orphaned = 0;
-        for record in records.into_iter().filter(|c| c.kind == "inline") {
+        for record in
+            records.into_iter().filter(|c| c.kind == "inline" && c.parent_comment_id.is_none())
+        {
             let Some(stored) = record.anchor.as_deref() else { continue };
             let Ok(anchor) = serde_json::from_str::<confed_api::InlineAnchor>(stored) else {
                 continue;
@@ -1539,6 +1542,7 @@ impl SyncEngine {
             outcome.comments_added = work.added;
             outcome.replies_added = work.replies;
             outcome.comments_resolved = work.resolved;
+            outcome.failed.extend(work.failed);
         }
 
         self.progress.finish();
@@ -1894,6 +1898,10 @@ impl SyncEngine {
                 continue;
             }
             let page_id = PageId::new(&record.page_id);
+            if let Some(failure) = self.page_gone(&record).await? {
+                work.failed.push(failure);
+                continue;
+            }
 
             while let Some(index) = sidecar.comments.iter().position(|c| c.is_draft()) {
                 let draft = sidecar.comments[index].clone();
@@ -1977,9 +1985,36 @@ impl SyncEngine {
 
         // Drafts written into page bodies as `new` marks.
         for record in ws.state().all_pages()? {
-            work.added.extend(self.push_body_drafts(ws, &record).await?);
+            if work.failed.iter().any(|f| f.page_id == record.page_id) {
+                continue;
+            }
+            match self.push_body_drafts(ws, &record).await {
+                Ok(added) => work.added.extend(added),
+                Err(ConfedError::NotFound(_)) if self.page_gone(&record).await?.is_some() => {
+                    work.failed.extend(self.page_gone(&record).await?);
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(work)
+    }
+
+    /// A page that has comment work but no longer exists on the server: a
+    /// failure that says so, rather than whatever the comment endpoint answers.
+    async fn page_gone(&self, record: &PageRecord) -> Result<Option<FailedPage>> {
+        match self.client.get_page(&PageId::new(&record.page_id), BodyFormat::Storage).await {
+            Ok(_) => Ok(None),
+            Err(confed_api::ApiError::NotFound(_)) => Ok(Some(FailedPage {
+                page_id: record.page_id.clone(),
+                title: record.title.clone(),
+                error: format!(
+                    "{}: the page no longer exists on the server (deleted?); its comment drafts \
+                     are kept — run `confed pull` to update the workspace",
+                    record.local_path
+                ),
+            })),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Replace a posted comment's body on the server, then here.
@@ -2008,18 +2043,32 @@ impl SyncEngine {
     /// Delete a posted comment, with its replies, on the server, then here.
     /// An inline comment's marker may stay in the page on Data Center; `comment
     /// list` reports such markers as `orphan_markers`.
-    pub async fn delete_comment(&self, ws: &mut Workspace, comment_id: &str) -> Result<()> {
+    /// Returns the ids of the replies that went with it.
+    pub async fn delete_comment(
+        &self,
+        ws: &mut Workspace,
+        comment_id: &str,
+    ) -> Result<Vec<String>> {
         let (page, record) = find_comment(ws, comment_id)?;
         self.client
             .delete_comment(&confed_api::CommentId::new(comment_id), comment_kind(&record))
             .await?;
-        for reply in ws.state().page_comments(&page.page_id)? {
-            if reply.parent_comment_id.as_deref() == Some(comment_id) {
-                ws.state().delete_comment(&reply.comment_id)?;
-            }
+        // The whole thread below it, replies to replies included.
+        let all = ws.state().page_comments(&page.page_id)?;
+        let mut gone = vec![comment_id.to_string()];
+        let mut replies = Vec::new();
+        while let Some(reply) = all.iter().find(|c| {
+            c.parent_comment_id.as_ref().is_some_and(|p| gone.contains(p))
+                && !gone.contains(&c.comment_id)
+        }) {
+            gone.push(reply.comment_id.clone());
+            replies.push(reply.comment_id.clone());
         }
-        ws.state().delete_comment(comment_id)?;
-        self.refresh_comment_files(ws, &page)
+        for id in &gone {
+            ws.state().delete_comment(id)?;
+        }
+        self.refresh_comment_files(ws, &page)?;
+        Ok(replies)
     }
 
     /// Rewrite a page's sidecar and mark layer from the database, keeping

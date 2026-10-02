@@ -42,6 +42,18 @@ async fn push_now(ctx: &mut Context) -> Result<confed_core::sync::PushOutcome> {
     engine.push(ws, &PushOptions { with_comments: true, ..Default::default() }).await
 }
 
+/// A page whose comment work failed — deleted on the server, say — makes the
+/// command a partial success (exit 8) that names it.
+fn with_failures(mut output: Output, failed: &[confed_core::sync::FailedPage]) -> Output {
+    for failure in failed {
+        output = output.warn(failure.error.clone());
+    }
+    if !failed.is_empty() {
+        output.exit = confed_core::error::ExitCode::Partial;
+    }
+    output
+}
+
 fn comment_results(outcome: &confed_core::sync::PushOutcome) -> serde_json::Value {
     json!({
         "comments_added": outcome.comments_added,
@@ -79,8 +91,10 @@ async fn reply(ctx: &mut Context, ids: &[String], body: &str, push: bool) -> Res
         queued.push(json!({ "reply_to": id, "page_id": page_id }));
     }
     let mut result = json!({ "queued": queued, "draft": !push });
+    let mut failed = Vec::new();
     let human = if push {
         let outcome = push_now(ctx).await?;
+        failed = outcome.failed.clone();
         result["result"] = comment_results(&outcome);
         format!(
             "Posted {}.\n",
@@ -93,7 +107,7 @@ async fn reply(ctx: &mut Context, ids: &[String], body: &str, push: bool) -> Res
             ctx.style.dim("Run `confed push` to post.\n")
         )
     };
-    Ok(Output::new(result, human))
+    Ok(with_failures(Output::new(result, human), &failed))
 }
 
 /// Edit a posted comment on the server right away.
@@ -131,14 +145,21 @@ async fn remove(ctx: &mut Context, ids: &[String]) -> Result<Output> {
     let ws = ctx.workspace_mut()?;
     let _lock = ws.lock()?;
     let mut deleted = Vec::new();
+    let mut replies = Vec::new();
     for id in ids {
-        engine.delete_comment(ws, id).await?;
+        replies.extend(engine.delete_comment(ws, id).await?);
         deleted.push(id.clone());
     }
-    Ok(Output::new(
-        json!({ "deleted": deleted }),
-        format!("Deleted {}.\n", crate::output::plural(deleted.len(), "comment", "comments")),
-    ))
+    let mut human =
+        format!("Deleted {}", crate::output::plural(deleted.len(), "comment", "comments"));
+    if !replies.is_empty() {
+        human.push_str(&format!(
+            " and {}",
+            crate::output::plural(replies.len(), "reply", "replies")
+        ));
+    }
+    human.push_str(".\n");
+    Ok(Output::new(json!({ "deleted": deleted, "replies_deleted": replies }), human))
 }
 
 fn sidecar_path(ctx: &Context, page_id: &str) -> Result<std::path::PathBuf> {
@@ -198,8 +219,12 @@ fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Resul
         if inline_only && record.kind != "inline" {
             continue;
         }
-        let anchor: Option<confed_api::InlineAnchor> =
-            record.anchor.as_deref().and_then(|a| serde_json::from_str(a).ok());
+        // Only a thread's root is anchored; a reply sits on its thread.
+        let anchor: Option<confed_api::InlineAnchor> = record
+            .anchor
+            .as_deref()
+            .filter(|_| record.parent_comment_id.is_none())
+            .and_then(|a| serde_json::from_str(a).ok());
 
         let indent = if record.parent_comment_id.is_some() { "    " } else { "" };
         let _ = writeln!(
@@ -268,10 +293,21 @@ fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Resul
     let orphan_markers: Vec<serde_json::Value> =
         orphans.iter().map(|(r, text)| json!({ "ref": r, "text": text })).collect();
 
-    Ok(Output::new(
+    let output = Output::new(
         json!({ "page_id": page_id, "comments": entries, "orphan_markers": orphan_markers }),
         human,
-    ))
+    );
+    // Comments are read from the local copy; say so when the page itself is
+    // gone from the server.
+    let gone = ctx.workspace()?.state().get_remote(&page_id)?.is_some_and(|r| r.deleted);
+    Ok(if gone {
+        output.warn(format!(
+            "page {page_id} was deleted on the server (as of the last fetch); these are the \
+             comments confed last saw, not live ones — `confed pull` removes the page locally"
+        ))
+    } else {
+        output
+    })
 }
 
 async fn add(
@@ -337,10 +373,10 @@ async fn add(
                 human = format!("Posted {} comment(s).\n", outcome.comments_added.len());
                 result["posted"] = json!(outcome.comments_added);
                 result["comments"] = posted_details(ctx, &page_id, &outcome.comments_added)?;
-                result["draft"] = json!(false);
-            } else {
-                human.push_str(&ctx.style.dim("Run `confed push` to post it.\n"));
+                result["draft"] = json!(!outcome.failed.is_empty());
+                return Ok(with_failures(Output::new(result, human), &outcome.failed));
             }
+            human.push_str(&ctx.style.dim("Run `confed push` to post it.\n"));
             return Ok(Output::new(result, human));
         }
     }
@@ -385,7 +421,8 @@ async fn add(
         human = format!("Posted {} comment(s).\n", outcome.comments_added.len());
         result["posted"] = json!(outcome.comments_added);
         result["comments"] = posted_details(ctx, &page_id, &outcome.comments_added)?;
-        result["draft"] = json!(false);
+        result["draft"] = json!(!outcome.failed.is_empty());
+        return Ok(with_failures(Output::new(result, human), &outcome.failed));
     } else {
         human.push_str(&ctx.style.dim("Run `confed push` to post it.\n"));
     }
@@ -457,8 +494,10 @@ async fn resolve(
             s["reason"].as_str().unwrap_or("")
         );
     }
+    let mut failed = Vec::new();
     if push && !targets.is_empty() {
         let outcome = push_now(ctx).await?;
+        failed = outcome.failed.clone();
         result["result"] = comment_results(&outcome);
         for id in &outcome.comments_resolved {
             let _ = writeln!(human, "  resolved {id}");
@@ -478,7 +517,7 @@ async fn resolve(
             ctx.style.dim("Run `confed push` to apply.")
         );
     }
-    Ok(Output::new(result, human))
+    Ok(with_failures(Output::new(result, human), &failed))
 }
 
 fn write_sidecar(ctx: &Context, page_id: &str, sidecar: &comments::Sidecar) -> Result<()> {

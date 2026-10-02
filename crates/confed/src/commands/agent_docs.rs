@@ -33,6 +33,16 @@ pub fn generated_version(content: &str) -> Option<&str> {
     Some(stamp.strip_suffix("-->")?.trim())
 }
 
+/// Who wrote a contract, for a message: `confed 0.4.0`, or `an earlier confed`
+/// for a file from before versions were stamped.
+pub fn writer(stamped: &str) -> String {
+    if stamped.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("confed {stamped}")
+    } else {
+        stamped.to_string()
+    }
+}
+
 /// What is wrong with the contract files in `dir`: the ones that are missing,
 /// and the ones an older or newer confed wrote.
 pub fn audit(dir: &Path) -> (Vec<&'static str>, Vec<(&'static str, String)>) {
@@ -371,6 +381,12 @@ mod tests {
         let cloud = render("https://x.atlassian.net/wiki", Flavor::Cloud, "DOCS");
         assert!(cloud.contains("can be created and resolved"));
         assert!(!cloud.contains("undocumented"));
+    }
+
+    #[test]
+    fn the_writer_reads_naturally_either_way() {
+        assert_eq!(writer("0.4.0"), "confed 0.4.0");
+        assert_eq!(writer("an earlier confed"), "an earlier confed");
     }
 
     #[test]

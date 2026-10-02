@@ -358,6 +358,9 @@ impl Content {
             .and_then(|r| r.status.as_deref())
             .is_some_and(|s| s.eq_ignore_ascii_case("resolved"));
         let (kind, anchor) = match ext.inline_properties {
+            // A reply in an inline thread is inline too, but the anchor is the
+            // thread's: its own `inlineProperties` are empty.
+            Some(_) if parent_comment_id.is_some() => (CommentKind::Inline, None),
             Some(props) => {
                 let text = props.original_selection.or(props.original_text).unwrap_or_default();
                 let orphaned = text.is_empty()
@@ -479,6 +482,21 @@ mod tests {
             "metadata": { "labels": { "results": [ { "name": "guide", "prefix": "global" } ] } },
             "history": { "createdDate": "2026-01-01T00:00:00Z", "createdBy": { "displayName": "Bob" } }
         })
+    }
+
+    #[test]
+    fn a_reply_in_an_inline_thread_has_no_anchor_of_its_own() {
+        let c: Content = serde_json::from_value(serde_json::json!({
+            "id": "9", "type": "comment",
+            "container": { "id": "1001", "type": "page" },
+            "ancestors": [{ "id": "8", "type": "comment" }],
+            "extensions": { "location": "inline", "inlineProperties": {} }
+        }))
+        .unwrap();
+        let comment = c.into_comment(&PageId::new("0"));
+        assert_eq!(comment.kind, CommentKind::Inline);
+        assert_eq!(comment.parent_comment_id, Some(crate::types::CommentId::new("8")));
+        assert!(comment.anchor.is_none());
     }
 
     #[test]

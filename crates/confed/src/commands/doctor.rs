@@ -100,11 +100,19 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
                 "credentials",
                 format!("{} auth for {}", session.auth_method.as_str(), session.base_url),
             ));
-            if session.secret_backend == SecretBackend::Sqlite {
+            if session.secret_backend == SecretBackend::Sqlite && keyring_available() {
+                // A keyring is here now, so the file store was a choice (or the
+                // keyring appeared later) — not something to warn about.
+                checks.push(Check::pass(
+                    "credential store",
+                    "the token is in .session.db (mode 0600), as chosen; \
+                     `confed config --force-keychain` moves it to the OS keyring",
+                ));
+            } else if session.secret_backend == SecretBackend::Sqlite {
                 checks.push(Check::warn(
                     "credential store",
-                    "the token is in .session.db (mode 0600) because no OS keyring was available; \
-                     prefer CONFED_TOKEN in CI",
+                    "the token is in .session.db (mode 0600): there is no OS keyring on this \
+                     machine; prefer CONFED_TOKEN in CI",
                 ));
             } else {
                 checks.push(Check::pass("credential store", "OS keyring"));
@@ -184,7 +192,8 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
             // The contract describes a confed that is no longer the one in the
             // path, so an agent following it may be reading obsolete rules.
             problems.push(format!(
-                "{name} was written by {stamped}, this is confed {}",
+                "{name} was written by {}, this is confed {}",
+                agent_docs::writer(stamped),
                 agent_docs::VERSION
             ));
         }

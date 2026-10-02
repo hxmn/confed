@@ -20,6 +20,30 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-02
+
+### Fixed
+
+- Pushing comment work for a page that was deleted on the server failed with exit 1,
+  the server's raw `400 content.doesnt.exist` and `result: null`. confed now checks the
+  page first: that page is reported under `failed` — "the page no longer exists on the
+  server (deleted?); its comment drafts are kept — run `confed pull`" — the drafts
+  stay, comments on other pages still go out, and the push exits 8. `comment add/
+  reply/resolve --push` report it the same way. A `content.doesnt.exist` answer is
+  now a not-found (exit 6) wherever it comes from.
+- `comment list` on a page the last fetch found deleted warns that these are the
+  comments confed last saw, not live ones.
+- A mistyped page path got no suggestion when the typo was two swapped letters
+  (`Tset.md`); a swap now counts as one edit, so `did you mean` finds `Test.md`.
+- Replies in an inline thread were listed with an empty anchor marked `orphaned:
+  true`. A reply has no anchor of its own; it is now listed without one, and the
+  re-anchoring pass no longer touches replies.
+- `doctor` said the token was in `.session.db` "because no OS keyring was
+  available" while reporting a keyring as available. When a keyring is there, the
+  file store was a choice, and `doctor` says so (with how to move to the keyring).
+- The stale-guide warning read "written by confed an earlier confed".
+- `comment rm` reports the replies deleted with each thread, as `replies_deleted`.
+
 ## [0.6.0] - 2026-10-02
 
 ### Added
@@ -296,7 +320,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/hxmn/confed/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hxmn/confed/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/hxmn/confed/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/hxmn/confed/compare/v0.4.1...v0.5.0

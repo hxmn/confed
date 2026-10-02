@@ -390,19 +390,28 @@ fn closest_page(ws: &confed_core::workspace::Workspace, reference: &str) -> Opti
         })
 }
 
+/// Edits between two names, counting a swap of neighbours (`tset` → `test`)
+/// as one — the commonest typo.
 fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut prev = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cur = row[j + 1];
-            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
-            prev = cur;
+    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+            }
         }
     }
-    row[b.len()]
+    d[a.len()][b.len()]
 }
 
 #[cfg(test)]
@@ -419,7 +428,7 @@ mod path_tests {
     #[test]
     fn edit_distance_counts_edits() {
         assert_eq!(edit_distance("test", "test"), 0);
-        assert_eq!(edit_distance("tset", "test"), 2);
+        assert_eq!(edit_distance("tset", "test"), 1, "a swap is one edit");
         assert_eq!(edit_distance("фраза", "фразы"), 1);
     }
 }
