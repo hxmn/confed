@@ -2325,3 +2325,50 @@ async fn a_comment_push_sends_only_that_pages_comments() {
     assert_eq!(h.status("1001"), PageState::Modified, "the edit is still local");
     assert!(h.read(".Other/comments.md").contains("On Other."), "the other draft waits");
 }
+
+/// A page deleted on the server that still has unsent comment drafts: the dry
+/// run reports it as the push would, pull keeps it until told, `--force`
+/// drops it and says so, and the emptied folder goes with it.
+#[tokio::test]
+async fn unsent_drafts_on_a_page_deleted_on_the_server() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Parent", None, "<p>p</p>");
+    h.mock.seed_page("1002", "Probe", Some("1001"), "<p>Probe.</p>");
+    h.pull().await;
+    let sidecar = "Parent/.Probe/comments.md";
+    let existing = std::fs::read_to_string(h.path(sidecar)).unwrap_or_default();
+    h.write(sidecar, &format!("{existing}\n<!-- confed:new -->\nUnsent.\n"));
+    h.mock.delete_page_directly("1002");
+    h.engine.fetch(&mut h.ws, &Default::default()).await.unwrap();
+
+    // 1. The dry run says what the push will.
+    let dry = h
+        .engine
+        .push(&mut h.ws, &PushOptions { dry_run: true, with_comments: true, ..Default::default() })
+        .await
+        .unwrap();
+    let failure = dry.failed.iter().find(|f| f.page_id == "1002").expect("in the dry run");
+    assert!(failure.error.contains("no longer exists"), "{}", failure.error);
+    assert!(
+        dry.comments_pending.iter().all(|op| !op.starts_with("1002:")),
+        "{:?}",
+        dry.comments_pending
+    );
+
+    // 2. Pull keeps the page and its draft, and says why.
+    let err = h.engine.pull(&mut h.ws, &PullOptions::everything()).await.unwrap_err();
+    assert_eq!(err.exit_code(), confed_core::error::ExitCode::State, "{err}");
+    assert!(h.path("Parent/Probe.md").exists());
+    assert!(h.read(sidecar).contains("Unsent."));
+
+    // --force drops it, lists it as discarded, and the empty folder goes.
+    let outcome = h
+        .engine
+        .pull(&mut h.ws, &PullOptions { force: true, ..PullOptions::everything() })
+        .await
+        .unwrap();
+    assert!(outcome.discarded.iter().any(|d| d.page_id == "1002"), "{:?}", outcome.discarded);
+    assert!(!h.path("Parent/Probe.md").exists());
+    assert!(!h.path("Parent").exists(), "the emptied children folder is removed");
+    assert!(h.path("Parent.md").exists());
+}

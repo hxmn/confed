@@ -65,6 +65,10 @@ pub async fn run(ctx: &mut Context, args: &RmArgs) -> Result<Output> {
             if sidecar.is_dir() {
                 let _ = std::fs::remove_dir_all(sidecar);
             }
+            // A folder left empty — the parent's children folder, say — goes too.
+            if let Some(parent) = path.parent() {
+                confed_core::sync::prune_empty_dirs(ws.root(), parent);
+            }
         }
 
         // The base record stays: it is what tells push there is a deletion to send.

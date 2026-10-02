@@ -20,6 +20,22 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-10-02
+
+### Fixed
+
+- `push --dry-run` listed comment drafts on a page the last fetch found deleted as
+  ordinary pending work, exit 0. It now reports them under `failed` with the message
+  the real push gives, and exits 8.
+- `pull` deleted a page that was gone from the server together with its unsent
+  comment drafts, without a word — right after the push had pointed there. Unsent
+  comment work now counts as local work: pull keeps such a page and refuses, saying
+  how many drafts it has and that `confed pull --force` drops them. With `--force` (or
+  `--reset`) the page is listed under `discarded`, as a deleted page with local edits
+  now is too. The push's message says the same.
+- Removing a page's last child (by `pull` or `rm`) left its empty folder behind;
+  folders a removal empties are now removed too, up to the workspace root.
+
 ## [0.6.4] - 2026-10-02
 
 ### Fixed
@@ -374,7 +390,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.5...HEAD
+[0.6.5]: https://github.com/hxmn/confed/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/hxmn/confed/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/hxmn/confed/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/hxmn/confed/compare/v0.6.1...v0.6.2

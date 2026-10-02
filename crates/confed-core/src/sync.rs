@@ -257,6 +257,9 @@ pub struct PushPlan {
     pub skipped: Vec<BlockedPage>,
     pub attachment_ops: Vec<AttachmentOp>,
     pub comment_ops: Vec<String>,
+    /// Comment work that cannot be sent: its page is gone from the server, as
+    /// of the last fetch. The push would report the same under `failed`.
+    pub comment_failures: Vec<FailedPage>,
 }
 
 impl PushPlan {
@@ -613,7 +616,19 @@ impl SyncEngine {
                 (Some(base), Some(body)) => base.render_key != render_key(body, &known_users),
                 _ => false,
             };
-            let action = decide_pull(remote_page, status, base_record, opts, stale_rendering);
+            let mut action = decide_pull(remote_page, status, base_record, opts, stale_rendering);
+            // Unsent comment work is local work too: a page deleted on the server
+            // is not removed with its drafts unless told to.
+            if action == PullAction::Delete && !opts.force && !opts.reset {
+                let pending = base_record.map_or(0, |b| pending_comment_work(ws, &b.local_path));
+                if pending > 0 {
+                    action = PullAction::Blocked(format!(
+                        "deleted on the server, with {pending} unsent comment draft(s) that can \
+                         no longer be posted; copy what you need, then `confed pull --force` \
+                         removes the page and its drafts"
+                    ));
+                }
+            }
             if let PullAction::Blocked(reason) = &action {
                 outcome.skipped_dirty.push(BlockedPage {
                     page_id: remote_page.page_id.clone(),
@@ -650,10 +665,23 @@ impl SyncEngine {
             // Deletions are handled first: a page that is gone on the server has
             // no placement, because placements only cover pages that still exist.
             if action == PullAction::Delete {
+                let path = base_record.map(|b| b.local_path.clone()).unwrap_or_default();
+                // Say what --force threw away with it.
+                let dirty =
+                    status_of(&statuses, &remote_page.page_id).is_some_and(|s| s.local_dirty);
+                if (opts.force || opts.reset) && (dirty || pending_comment_work(ws, &path) > 0) {
+                    outcome.discarded.push(PageChange {
+                        page_id: remote_page.page_id.clone(),
+                        path: path.clone(),
+                        title: remote_page.title.clone(),
+                        from_version: base_record.map(|b| b.version),
+                        to_version: None,
+                        ops: Vec::new(),
+                    });
+                }
                 if !opts.dry_run {
                     self.delete_local(ws, base_record)?;
                 }
-                let path = base_record.map(|b| b.local_path.clone()).unwrap_or_default();
                 self.progress.item(&path);
                 outcome.deleted.push(PageChange {
                     page_id: remote_page.page_id.clone(),
@@ -1115,6 +1143,9 @@ impl SyncEngine {
         if children.is_dir() && std::fs::read_dir(&children).map(|d| d.count()).unwrap_or(1) == 0 {
             let _ = std::fs::remove_dir(&children);
         }
+        if let Some(parent) = path.parent() {
+            prune_empty_dirs(ws.root(), parent);
+        }
         ws.state().delete_page(&base.page_id)?;
         Ok(())
     }
@@ -1432,9 +1463,21 @@ impl SyncEngine {
             plan.skipped.clear();
         }
         if opts.with_comments {
+            let gone: Vec<&str> =
+                remote.iter().filter(|r| r.deleted).map(|r| r.page_id.as_str()).collect();
             for status in &statuses {
                 let Some(page_id) = &status.page_id else { continue };
                 if !opts.covers(page_id, &status.path) {
+                    continue;
+                }
+                if gone.contains(&page_id.as_str()) || status.state == PageState::RemoteDeleted {
+                    if pending_comment_work(ws, &status.path) > 0 {
+                        plan.comment_failures.push(FailedPage {
+                            page_id: page_id.clone(),
+                            title: status.title.clone(),
+                            error: deleted_page_message(&status.path),
+                        });
+                    }
                     continue;
                 }
                 let path = ws
@@ -1467,7 +1510,9 @@ impl SyncEngine {
             }
             for local in &files {
                 let Some(page_id) = local.file.frontmatter.page_id() else { continue };
-                if !opts.covers(page_id, &local.path) {
+                if !opts.covers(page_id, &local.path)
+                    || plan.comment_failures.iter().any(|f| f.page_id == page_id)
+                {
                     continue;
                 }
                 if local.file.drafts().next().is_some() {
@@ -1526,6 +1571,7 @@ impl SyncEngine {
                 }
             }
             outcome.comments_pending = plan.comment_ops.clone();
+            outcome.failed.extend(plan.comment_failures.clone());
             return Ok(outcome);
         }
 
@@ -2079,11 +2125,7 @@ impl SyncEngine {
             Err(confed_api::ApiError::NotFound(_)) => Ok(Some(FailedPage {
                 page_id: record.page_id.clone(),
                 title: record.title.clone(),
-                error: format!(
-                    "{}: the page no longer exists on the server (deleted?); its comment drafts \
-                     are kept — run `confed pull` to update the workspace",
-                    record.local_path
-                ),
+                error: deleted_page_message(&record.local_path),
             })),
             Err(e) => Err(e.into()),
         }
@@ -2419,6 +2461,38 @@ fn comment_kind(record: &CommentRecord) -> confed_api::CommentKind {
     }
 }
 
+/// Remove `dir` and each parent above it while they are empty, stopping at the
+/// workspace root: a page's children folder goes with its last child.
+pub fn prune_empty_dirs(root: &Path, dir: &Path) {
+    let mut current = dir.to_path_buf();
+    while current.starts_with(root) && current != root {
+        let empty = std::fs::read_dir(&current).map(|mut d| d.next().is_none()).unwrap_or(false);
+        if !empty || std::fs::remove_dir(&current).is_err() {
+            break;
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => break,
+        }
+    }
+}
+
+/// Comment work a page has not sent yet: `new` marks in its file, drafts and
+/// resolve requests in its sidecar.
+pub fn pending_comment_work(ws: &Workspace, page_path: &str) -> usize {
+    let body = std::fs::read_to_string(ws.absolute(page_path))
+        .ok()
+        .and_then(|c| crate::frontmatter::parse(&c, page_path).ok())
+        .map_or(0, |f| f.drafts().count());
+    let sidecar = std::fs::read_to_string(
+        ws.absolute(&paths::sidecar_for(page_path)).join(comments::COMMENTS_FILENAME),
+    )
+    .ok()
+    .and_then(|t| comments::parse(&t).ok())
+    .map_or(0, |s| s.drafts().count() + s.resolve_requests.len());
+    body + sidecar
+}
+
 /// The page file's stripped body, if it can be read.
 fn local_body(ws: &Workspace, path: &str) -> Option<String> {
     let content = std::fs::read_to_string(ws.absolute(path)).ok()?;
@@ -2528,6 +2602,15 @@ fn refuse_unpushed_block(
         "push the page first (`confed push`), then the comment; Confluence checks the \
          selection against its own copy of the page",
     ))
+}
+
+/// What to say about comment work whose page is gone from the server.
+fn deleted_page_message(path: &str) -> String {
+    format!(
+        "{path}: the page no longer exists on the server (deleted?), so its comment drafts \
+         cannot be posted; they are kept — copy what you need, then `confed pull --force` \
+         removes the page and its drafts"
+    )
 }
 
 fn status_of<'a>(statuses: &'a [PageStatus], page_id: &str) -> Option<&'a PageStatus> {
