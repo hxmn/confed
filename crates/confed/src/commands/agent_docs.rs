@@ -255,7 +255,9 @@ confed comment rm <id> [<id>…] --yes                      # immediate; replies
 ```
 
 `add`, `reply` and `resolve` queue the work locally; add `--push` to send it now, or
-run `confed push`. `edit` and `rm` act on the server at once. A push reports
+run `confed push`. `reply --push` reports each reply's `id` and the `parent` it was
+posted under: inline threads are one level deep, so a reply to a reply in one goes to
+the thread's root (page-comment threads nest). `edit` and `rm` act on the server at once. A push reports
 `comments_added` (new threads), `replies_added` and `comments_resolved`; `push
 --dry-run` lists the same work in `comments_pending` without sending anything.
 

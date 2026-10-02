@@ -96,10 +96,57 @@ async fn reply(ctx: &mut Context, ids: &[String], body: &str, push: bool) -> Res
         let outcome = push_now(ctx).await?;
         failed = outcome.failed.clone();
         result["result"] = comment_results(&outcome);
-        format!(
-            "Posted {}.\n",
+        result["draft"] = json!(!outcome.failed.is_empty());
+        // What was posted, under the parent the server keeps: an inline thread
+        // is one level deep, so a reply to a reply sits under the thread root.
+        let mut asked: Vec<(String, String)> = queued
+            .iter()
+            .filter_map(|q| {
+                Some((q["page_id"].as_str()?.to_string(), q["reply_to"].as_str()?.to_string()))
+            })
+            .collect();
+        let mut posted = Vec::new();
+        let mut human = String::new();
+        for reply in &outcome.replies_added {
+            let Some(page_id) = asked.first().map(|(p, _)| p.clone()) else { break };
+            let records = ctx.workspace()?.state().page_comments(&page_id)?;
+            let Some(r) = records.iter().find(|r| &r.comment_id == reply) else { continue };
+            let parent = r.parent_comment_id.clone().unwrap_or_default();
+            let root_of = |id: &str| {
+                let mut current = id.to_string();
+                while let Some(p) = records
+                    .iter()
+                    .find(|c| c.comment_id == current)
+                    .and_then(|c| c.parent_comment_id.clone())
+                {
+                    current = p;
+                }
+                current
+            };
+            let index =
+                asked.iter().position(|(_, a)| *a == parent || root_of(a) == parent).unwrap_or(0);
+            let (_, requested) = asked.remove(index);
+            let _ = write!(human, "  reply    {} on {parent}", r.comment_id);
+            if requested != parent {
+                let _ =
+                    write!(human, " (asked for {requested}; an inline thread is one level deep)");
+            }
+            human.push('\n');
+            posted.push(json!({
+                "id": r.comment_id,
+                "reply_to": requested,
+                "parent": parent,
+                "kind": r.kind,
+            }));
+        }
+        result["posted"] = json!(outcome.replies_added);
+        result["replies"] = json!(posted);
+        let _ = writeln!(
+            human,
+            "Posted {}.",
             crate::output::plural(outcome.replies_added.len(), "reply", "replies")
-        )
+        );
+        human
     } else {
         format!(
             "Queued {}. {}",

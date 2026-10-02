@@ -2205,3 +2205,58 @@ async fn comment_work_on_a_page_deleted_on_the_server() {
     assert!(failure.error.contains("no longer exists on the server"), "{}", failure.error);
     assert!(h.read(".Gone/comments.md").contains("A note."), "the draft is kept");
 }
+
+/// Inline threads are one level deep on Data Center, as in its web UI: a reply
+/// to a reply is posted to the thread's root. Page-comment threads nest.
+#[tokio::test]
+async fn a_reply_to_a_reply_goes_where_the_thread_allows() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    let inline = h.mock.seed_comment("1001", "<p>Root.</p>", confed_api::CommentKind::Inline);
+    let footer = h.mock.seed_comment("1001", "<p>Page root.</p>", confed_api::CommentKind::Footer);
+    use confed_api::ConfluenceClient;
+    let client = h.mock.clone();
+    let page = confed_api::PageId::new("1001");
+    let inline_reply = client.add_inline_reply(&page, &inline, "<p>r1</p>").await.unwrap();
+    let footer_reply = client.add_footer_comment(&page, "<p>f1</p>", Some(&footer)).await.unwrap();
+    h.pull().await;
+    // Pull refreshes comments of pages it writes; record the replies directly.
+    for (reply, parent, kind) in
+        [(&inline_reply, &inline, "inline"), (&footer_reply, &footer, "footer")]
+    {
+        h.ws.state()
+            .upsert_comment(&confed_core::state::CommentRecord {
+                comment_id: reply.id.0.clone(),
+                page_id: "1001".into(),
+                parent_comment_id: Some(parent.0.clone()),
+                kind: kind.into(),
+                author: None,
+                created_at: None,
+                body_storage: None,
+                body_markdown: "r".into(),
+                resolved: false,
+                anchor: None,
+                synced_at: None,
+            })
+            .unwrap();
+    }
+
+    let sidecar = h.read(".Onboarding/comments.md");
+    h.write(
+        ".Onboarding/comments.md",
+        &format!(
+            "{sidecar}\n<!-- confed:new reply-to={} -->\nOn the inline reply.\n\
+             \n<!-- confed:new reply-to={} -->\nOn the page reply.\n",
+            inline_reply.id, footer_reply.id
+        ),
+    );
+    let outcome = h.push().await;
+    assert_eq!(outcome.replies_added.len(), 2, "{outcome:?}");
+
+    let all = client.list_comments(&page).await.unwrap();
+    let parent_of = |id: &str| {
+        all.iter().find(|c| c.id.0 == id).and_then(|c| c.parent_comment_id.clone()).unwrap()
+    };
+    assert_eq!(parent_of(&outcome.replies_added[0]), inline, "inline: to the thread root");
+    assert_eq!(parent_of(&outcome.replies_added[1]), footer_reply.id, "page thread: nested");
+}

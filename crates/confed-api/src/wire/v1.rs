@@ -485,6 +485,22 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_to_a_reply_names_its_nearest_parent() {
+        let c: Content = serde_json::from_value(serde_json::json!({
+            "id": "263", "type": "comment",
+            "container": { "id": "1001", "type": "page" },
+            "ancestors": [
+                { "id": "1001", "type": "page" },
+                { "id": "261", "type": "comment" },
+                { "id": "262", "type": "comment" }
+            ]
+        }))
+        .unwrap();
+        let comment = c.into_comment(&PageId::new("0"));
+        assert_eq!(comment.parent_comment_id, Some(crate::types::CommentId::new("262")));
+    }
+
+    #[test]
     fn a_reply_in_an_inline_thread_has_no_anchor_of_its_own() {
         let c: Content = serde_json::from_value(serde_json::json!({
             "id": "9", "type": "comment",

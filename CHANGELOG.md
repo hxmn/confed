@@ -20,6 +20,18 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-02
+
+### Fixed
+
+- A reply to a reply in an inline thread showed up under the thread's first comment,
+  with nothing saying why. Inline threads are one level deep — Data Center's web UI
+  does the same — so confed now posts such a reply to the thread's root on purpose,
+  and says so. Page-comment threads keep nesting.
+- `comment reply --push` reported nothing about what it posted. It now returns
+  `posted` (the ids), `replies` (`id`, `reply_to` as asked, `parent` as posted,
+  `kind`) and the push's comment results, and prints each reply with its parent.
+
 ## [0.6.1] - 2026-10-02
 
 ### Fixed
@@ -320,7 +332,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/hxmn/confed/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/hxmn/confed/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hxmn/confed/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/hxmn/confed/compare/v0.5.0...v0.5.1

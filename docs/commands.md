@@ -406,7 +406,9 @@ immediately.
 
 `list --json` gives each comment `resolved` and `thread_resolved` (a reply carries its
 thread's status) and the page's `orphan_markers`: inline markers no comment claims.
-A push reports `comments_added`, `replies_added` and `comments_resolved` separately.
+A push reports `comments_added`, `replies_added` and `comments_resolved` separately;
+`reply --push` lists each reply with the `parent` it was posted under — an inline thread
+is one level deep, so a reply to a reply there goes to the thread's root.
 
 On Data Center inline comments go through the server's undocumented inline-comment API;
 page comments cannot be resolved there (exit 9; `resolve --all` lists them as skipped).

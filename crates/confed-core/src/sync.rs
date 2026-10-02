@@ -1934,8 +1934,11 @@ impl SyncEngine {
                             })
                         });
                         let posted = match &parent {
+                            // Inline threads are one level deep: a reply to a
+                            // reply goes to the thread, as the web UI does it.
                             Some(parent) if parent_is_inline => {
-                                self.client.add_inline_reply(&page_id, parent, &storage).await?
+                                let root = thread_root(ws, &record.page_id, parent)?;
+                                self.client.add_inline_reply(&page_id, &root, &storage).await?
                             }
                             _ => {
                                 self.client
@@ -2302,6 +2305,24 @@ pub fn orphan_markers(ws: &Workspace, page_id: &str) -> Result<Vec<(String, Stri
         .into_iter()
         .filter(|(r, _)| !known.contains(r))
         .collect())
+}
+
+/// The root of the thread `comment` is in.
+fn thread_root(
+    ws: &Workspace,
+    page_id: &str,
+    comment: &confed_api::CommentId,
+) -> Result<confed_api::CommentId> {
+    let all = ws.state().page_comments(page_id)?;
+    let mut current = comment.0.clone();
+    for _ in 0..all.len() {
+        match all.iter().find(|c| c.comment_id == current).and_then(|c| c.parent_comment_id.clone())
+        {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+    Ok(confed_api::CommentId::new(current))
 }
 
 /// A comment confed knows, and the page it is on.
