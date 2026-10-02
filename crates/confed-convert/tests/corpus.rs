@@ -61,5 +61,7 @@ pub fn options() -> ConvertOptions {
         space_key: "TEAM".to_string(),
         users,
         inline_marks: Default::default(),
+        page_titles: Default::default(),
+        links_by_title: false,
     }
 }

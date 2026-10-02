@@ -14,7 +14,7 @@
 /// converted Markdown out of date. It feeds the render fingerprint confed keeps
 /// per page, so an improvement reaches a workspace on the next pull without
 /// waiting for each page to change on the server.
-pub const CONVERTER_VERSION: u32 = 5;
+pub const CONVERTER_VERSION: u32 = 6;
 
 pub mod blockmap;
 pub mod dom;
@@ -63,6 +63,11 @@ pub struct ConvertOptions {
     pub page_links: HashMap<String, String>,
     /// Reverse of `page_links`, for turning Markdown links back into `ac:link`.
     pub link_targets: HashMap<String, String>,
+    /// page id → the page's title on the server, for page links written by title.
+    pub page_titles: HashMap<String, String>,
+    /// Write page links by title (`ri:content-title`), which is all Data Center
+    /// resolves; Cloud takes `ri:content-id`.
+    pub links_by_title: bool,
     /// Site base URL, for links confed cannot express locally.
     pub base_url: String,
     pub space_key: String,

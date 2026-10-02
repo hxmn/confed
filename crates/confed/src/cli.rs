@@ -301,6 +301,11 @@ pub struct PushArgs {
     #[arg(long, visible_alias = "preview")]
     pub dry_run: bool,
 
+    /// With --dry-run: show the storage each page body and comment would be
+    /// sent as.
+    #[arg(long, requires = "dry_run")]
+    pub show_storage: bool,
+
     /// Confirm each page before uploading it.
     #[arg(long)]
     pub interactive: bool,

@@ -163,6 +163,7 @@ confed diff --remote --exit-code      # exit 10 if the server has moved
 confed fetch --json                   # refresh remote state, touch no files
 confed pull --json                    # write remote changes into files (merges)
 confed push --dry-run --json          # exactly what would be uploaded
+confed push --dry-run --show-storage  # …and the Confluence markup it would send
 confed push -m "reason" --json        # upload
 confed comment list <page> --json     # read discussion
 confed user search "name" --json      # people, with the mention to paste
@@ -325,6 +326,13 @@ Write them in Markdown, in comment bodies (`-m`, `comments.md`) as in pages:
 [CH-200.1](../CH-200.1.md)                a link to another page, by its file
 ```
 
+Link a page by its file path, relative to the file you are writing in (a comment
+counts as written in its page's file). confed sends it as Confluence links pages on
+this server — by the page's current title on Data Center, by id on Cloud — so a
+truncated or sanitized file name does not matter. A page in another space:
+`[Title](<base url>/display/KEY/Title)`. To see the markup before it is sent:
+`confed push --dry-run --show-storage`.
+
 `confed user search "Danny" --json` gives each person's `userkey`/`account_id` and the
 `mention` to paste. Mentions of people already on pages appear as `[@Name](<profile
 url>)`; that form works too. Do not hand-write `<ac:link>` storage unless there is no
@@ -458,6 +466,8 @@ mod tests {
             "user search",
             "(user:8a8b8181…)",
             "user:account-id=",
+            "--show-storage",
+            "by the page's current title on Data Center",
         ] {
             assert!(doc.contains(required), "the contract should mention {required:?}");
         }

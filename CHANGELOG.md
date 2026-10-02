@@ -20,6 +20,29 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-02
+
+### Fixed
+
+- **Page links were written as `ri:content-id`, which Data Center does not resolve**
+  — every Markdown link to a workspace page posted from a comment showed as "Broken
+  link", and any regenerated paragraph of a page would have done the same. On Data
+  Center confed now writes `<ri:page ri:content-title="…"/>` with the page's current
+  title on the server (not its file name, which can be truncated or sanitized), adds
+  the link text only when it differs from the title, and adds `ri:space-key` only for
+  another space. Cloud keeps `ri:content-id`.
+- Data Center page links read from storage are now relative `.md` links to the local
+  file; they used to be absolute `…/display/KEY/Title` URLs. Such a URL — another
+  space's page, say — is written back as a page link (`ri:space-key` +
+  `ri:content-title`) rather than a hard-coded `<a href>`. The converter version is
+  bumped, so untouched pages re-render on the next pull.
+
+### Added
+
+- `confed push --dry-run --show-storage` shows the storage each page body and each
+  queued comment would be sent as (`storage[]` in `--json`), built exactly as the push
+  builds it.
+
 ## [0.7.0] - 2026-10-02
 
 ### Fixed
@@ -424,7 +447,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/hxmn/confed/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/hxmn/confed/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/hxmn/confed/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/hxmn/confed/compare/v0.6.3...v0.6.4

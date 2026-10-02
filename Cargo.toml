@@ -8,16 +8,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hxmn/confed"
 
 [workspace.dependencies]
-confed-api = { path = "crates/confed-api", version = "0.7.0" }
-confed-convert = { path = "crates/confed-convert", version = "0.7.0" }
-confed-core = { path = "crates/confed-core", version = "0.7.0" }
+confed-api = { path = "crates/confed-api", version = "0.7.1" }
+confed-convert = { path = "crates/confed-convert", version = "0.7.1" }
+confed-core = { path = "crates/confed-core", version = "0.7.1" }
 
 anyhow = "1"
 async-trait = "0.1"

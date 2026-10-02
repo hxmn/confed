@@ -193,6 +193,7 @@ pub mod push {
             message: args.message.clone(),
             with_attachments: !args.no_attachments,
             comments_only: false,
+            show_storage: args.show_storage,
             with_comments: !args.no_comments,
         };
 
@@ -280,6 +281,15 @@ pub mod push {
         }
         for op in &outcome.comments_pending {
             let _ = writeln!(human, "  {:<8} {op}", "would");
+        }
+        for preview in &outcome.storage {
+            let _ = writeln!(
+                human,
+                "\n{}",
+                style
+                    .bold(&format!("--- {} ({}): {}", preview.path, preview.page_id, preview.what))
+            );
+            let _ = writeln!(human, "{}", preview.storage);
         }
 
         let total = outcome.created.len() + outcome.pushed.len() + outcome.deleted.len();

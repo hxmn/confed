@@ -2402,3 +2402,107 @@ async fn comment_bodies_carry_mentions_and_page_links() {
         "{body}"
     );
 }
+
+/// Page links: Data Center resolves them by title only, Cloud by id. A link
+/// read from storage becomes a relative `.md` link; written back — from an
+/// edited paragraph or a comment — it carries the server's title on Data
+/// Center (not the file name, which is sanitized) and the id on Cloud.
+#[tokio::test]
+async fn page_links_are_written_the_way_each_server_reads_them() {
+    let target_title = "Модель: Разделы (с учетом всех примечаний)";
+    for flavor in [Flavor::DataCenter, Flavor::Cloud] {
+        let mut h = Harness::new(flavor);
+        h.mock.seed_page("1002", target_title, None, "<p>Target.</p>");
+        h.mock.seed_page(
+            "1001",
+            "Source",
+            None,
+            &format!(
+                "<p>See <ac:link><ri:page ri:content-title=\"{target_title}\" /></ac:link> first.</p>\
+                 <p>Other paragraph.</p>"
+            ),
+        );
+        h.pull().await;
+        let target_file = h.ws.state().get_page("1002").unwrap().unwrap().local_path;
+        assert_ne!(target_file, format!("{target_title}.md"), "the file name is sanitized");
+        let source = h.read("Source.md");
+        assert!(
+            source.contains(&format!("({target_file})"))
+                || source.contains(&format!("(<{target_file}>)")),
+            "{flavor}: a relative link to the local file: {source}"
+        );
+        assert_eq!(h.status("1001"), PageState::Unchanged, "{flavor}: no phantom change");
+
+        // Edit the paragraph with the link; it is regenerated on push.
+        h.write("Source.md", &source.replace(" first.", " before anything."));
+        let sidecar = ".Source/comments.md";
+        let existing = std::fs::read_to_string(h.path(sidecar)).unwrap_or_default();
+        h.write(
+            sidecar,
+            &format!("{existing}\n<!-- confed:new -->\nAlso [the model](<{target_file}>).\n"),
+        );
+        h.push().await;
+
+        let body = h.mock.page_body("1001").unwrap();
+        use confed_api::ConfluenceClient;
+        let comment = h.mock.list_comments(&confed_api::PageId::new("1001")).await.unwrap();
+        let comment = &comment.last().unwrap().body_storage;
+        match flavor {
+            Flavor::DataCenter => {
+                for stored in [&body, comment] {
+                    assert!(
+                        stored.contains(&format!("ri:content-title=\"{target_title}\"")),
+                        "{stored}"
+                    );
+                    assert!(!stored.contains("content-id"), "{stored}");
+                }
+            }
+            Flavor::Cloud => {
+                for stored in [&body, comment] {
+                    assert!(stored.contains("ri:content-id=\"1002\""), "{stored}");
+                }
+            }
+        }
+    }
+}
+
+/// `--dry-run --show-storage` shows what each page body and comment would be
+/// sent as, built as the push builds it, and sends nothing.
+#[tokio::test]
+async fn a_dry_run_can_show_the_storage_it_would_send() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1002", "Glossary", None, "<p>g</p>");
+    h.mock.seed_page("1001", "Source", None, "<p>Text.</p>");
+    h.pull().await;
+    h.edit_body("Source.md", "\nSee [Glossary](Glossary.md).\n");
+    let sidecar = ".Source/comments.md";
+    let existing = std::fs::read_to_string(h.path(sidecar)).unwrap_or_default();
+    h.write(
+        sidecar,
+        &format!("{existing}\n<!-- confed:new anchor=\"Text.\" -->\nOn [Glossary](Glossary.md).\n"),
+    );
+
+    let outcome = h
+        .engine
+        .push(
+            &mut h.ws,
+            &PushOptions {
+                dry_run: true,
+                show_storage: true,
+                with_comments: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let page = outcome.storage.iter().find(|p| p.what == "page").expect("the page body");
+    assert!(
+        page.storage.contains(r#"<ri:page ri:content-title="Glossary" />"#),
+        "{}",
+        page.storage
+    );
+    let comment =
+        outcome.storage.iter().find(|p| p.what.starts_with("inline comment")).expect("the comment");
+    assert!(comment.storage.contains(r#"ri:content-title="Glossary""#), "{}", comment.storage);
+    assert!(h.mock.mutating_calls().is_empty(), "{:?}", h.mock.mutating_calls());
+}

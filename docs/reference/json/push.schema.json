@@ -53,6 +53,20 @@
           "description": "Ids of threads resolved (`confed:resolve`, `confed comment resolve`).",
           "items": { "type": "string" }
         },
+        "storage": {
+          "type": "array",
+          "description": "Only with --dry-run --show-storage: the storage each page body and comment would be sent as.",
+          "items": {
+            "type": "object",
+            "required": ["page_id", "path", "what", "storage"],
+            "properties": {
+              "page_id": { "type": "string" },
+              "path": { "type": "string" },
+              "what": { "type": "string", "description": "page, comment, inline comment on \"…\", or reply to <id>" },
+              "storage": { "type": "string" }
+            }
+          }
+        },
         "comments_pending": {
           "type": "array",
           "description": "Comment work a --dry-run found. Absent on a real push, which reports ids in `comments_added`, `replies_added` and `comments_resolved`.",

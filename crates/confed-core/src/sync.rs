@@ -175,6 +175,9 @@ pub struct PushOptions {
     /// Only comment work — no page bodies, no attachments — and, with a
     /// scope, only for those pages. What the `comment … --push` shortcuts use.
     pub comments_only: bool,
+    /// With `dry_run`: report the storage each page body and comment would be
+    /// sent as, so a conversion can be checked before it reaches the server.
+    pub show_storage: bool,
 }
 
 impl PushOptions {
@@ -283,6 +286,10 @@ pub struct PushOutcome {
     /// Threads resolved.
     #[serde(default)]
     pub comments_resolved: Vec<String>,
+    /// With `--dry-run --show-storage`: what each page body and comment would be
+    /// sent as.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub storage: Vec<StoragePreview>,
     /// Comment work a dry run found; a real push reports ids in `comments_added`,
     /// `replies_added` and `comments_resolved`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -290,6 +297,16 @@ pub struct PushOutcome {
     pub skipped: Vec<BlockedPage>,
     pub failed: Vec<FailedPage>,
     pub dry_run: bool,
+}
+
+/// The storage a push would send for one page body or comment.
+#[derive(Clone, Debug, Serialize)]
+pub struct StoragePreview {
+    pub page_id: String,
+    pub path: String,
+    /// `page`, `comment`, `inline comment on "…"` or `reply to <id>`.
+    pub what: String,
+    pub storage: String,
 }
 
 /// What a push did with comments.
@@ -1572,6 +1589,9 @@ impl SyncEngine {
             }
             outcome.comments_pending = plan.comment_ops.clone();
             outcome.failed.extend(plan.comment_failures.clone());
+            if opts.show_storage {
+                outcome.storage = self.storage_previews(ws, opts, &plan)?;
+            }
             return Ok(outcome);
         }
 
@@ -2117,6 +2137,86 @@ impl SyncEngine {
             }
         }
         Ok(work)
+    }
+
+    /// What `--show-storage` reports: the storage each planned page body and
+    /// each queued comment would be sent as, built exactly as push builds it.
+    fn storage_previews(
+        &self,
+        ws: &Workspace,
+        opts: &PushOptions,
+        plan: &PushPlan,
+    ) -> Result<Vec<StoragePreview>> {
+        let mut out = Vec::new();
+        for op in &plan.ops {
+            let body_changes = op.kind == PushKind::Create || op.ops.iter().any(|o| o == "body");
+            if op.kind == PushKind::Delete || !body_changes {
+                continue;
+            }
+            let content = std::fs::read_to_string(ws.absolute(&op.path))
+                .map_err(|e| ConfedError::io(format!("reading {}", op.path), e))?;
+            let file = crate::frontmatter::parse(&content, &op.path)?;
+            let convert_opts = page_convert_options(ws, &op.path);
+            let base =
+                op.page_id.as_deref().map(|id| ws.state().get_page(id)).transpose()?.flatten();
+            let storage = match base {
+                Some(base) => self.build_storage(&base, &file.marked_body(), &convert_opts)?,
+                None => confed_convert::markdown_to_storage(&file.body, &convert_opts)?,
+            };
+            out.push(StoragePreview {
+                page_id: op.page_id.clone().unwrap_or_default(),
+                path: op.path.clone(),
+                what: "page".into(),
+                storage,
+            });
+        }
+        if !opts.with_comments {
+            return Ok(out);
+        }
+        for record in ws.state().all_pages()? {
+            if !opts.covers(&record.page_id, &record.local_path)
+                || plan.comment_failures.iter().any(|f| f.page_id == record.page_id)
+            {
+                continue;
+            }
+            let convert_opts = comment_convert_options(ws, &record.local_path);
+            let mut preview = |what: String, markdown: &str| -> Result<()> {
+                out.push(StoragePreview {
+                    page_id: record.page_id.clone(),
+                    path: record.local_path.clone(),
+                    what,
+                    storage: confed_convert::markdown_to_storage(markdown, &convert_opts)?,
+                });
+                Ok(())
+            };
+            let sidecar = std::fs::read_to_string(
+                ws.absolute(&paths::sidecar_for(&record.local_path))
+                    .join(comments::COMMENTS_FILENAME),
+            )
+            .ok()
+            .and_then(|t| comments::parse(&t).ok());
+            for draft in sidecar.iter().flat_map(|s| s.drafts()) {
+                let what = match (&draft.anchor, &draft.reply_to) {
+                    (Some(a), _) => format!("inline comment on \"{}\"", a.text),
+                    (_, Some(parent)) => format!("reply to {parent}"),
+                    _ => "comment".into(),
+                };
+                preview(what, &draft.body)?;
+            }
+            if let Ok(content) = std::fs::read_to_string(ws.absolute(&record.local_path)) {
+                if let Ok(file) = crate::frontmatter::parse(&content, &record.local_path) {
+                    for draft in file.drafts() {
+                        let Some((start, end)) = draft_span(&file.body, draft) else { continue };
+                        let what = format!(
+                            "inline comment on \"{}\"",
+                            marks::plain_text(&file.body[start..end]).trim()
+                        );
+                        preview(what, draft.draft_body().unwrap_or_default())?;
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// A page that has comment work but no longer exists on the server: a
@@ -2834,9 +2934,32 @@ pub fn comparable_markdown(storage: &str, opts: &ConvertOptions) -> Result<Strin
 }
 
 fn convert_options(ws: &Workspace, path: &str, links: &HashMap<String, String>) -> ConvertOptions {
-    let page_links: HashMap<String, String> =
+    let mut page_links: HashMap<String, String> =
         links.iter().map(|(id, target)| (id.clone(), paths::relative_link(path, target))).collect();
     let link_targets = page_links.iter().map(|(id, link)| (link.clone(), id.clone())).collect();
+
+    // Titles as the server has them — not file names, which may be truncated
+    // or sanitized. Data Center links pages by title, so the same titles also
+    // find the local file for a link read from storage.
+    let space_key = ws.space_key().unwrap_or_default();
+    let mut page_titles: HashMap<String, String> = ws
+        .state()
+        .all_remote()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| !r.deleted)
+        .map(|r| (r.page_id, r.title))
+        .collect();
+    for page in ws.state().all_pages().unwrap_or_default() {
+        page_titles.insert(page.page_id, page.title);
+    }
+    for (id, title) in &page_titles {
+        if let Some(link) = page_links.get(id).cloned() {
+            page_links.entry(format!("{space_key}:{title}")).or_insert_with(|| link.clone());
+            page_links.entry(title.clone()).or_insert(link);
+        }
+    }
+    let links_by_title = ws.flavor().ok().flatten() == Some(confed_api::Flavor::DataCenter);
 
     // People this workspace has already resolved. A mention of anyone else keeps
     // its block verbatim rather than linking to the wrong profile.
@@ -2862,8 +2985,10 @@ fn convert_options(ws: &Workspace, path: &str, links: &HashMap<String, String>) 
         attachment_dir: paths::sidecar_ref(path),
         page_links,
         link_targets,
+        page_titles,
+        links_by_title,
         base_url: ws.base_url().ok().flatten().unwrap_or_default(),
-        space_key: ws.space_key().unwrap_or_default(),
+        space_key,
         users,
         inline_marks: HashMap::new(),
     }

@@ -465,19 +465,28 @@ impl<'a> Generator<'a> {
         }
 
         if let Some(target) = self.opts.link_targets.get(url.as_str()) {
-            let attr = if target.chars().all(|c| c.is_ascii_digit()) {
-                format!(r#"ri:content-id="{}""#, dom::escape_attr(target))
-            } else {
-                format!(r#"ri:content-title="{}""#, dom::escape_attr(target))
+            let by_id = target.chars().all(|c| c.is_ascii_digit());
+            let title = match (by_id, self.opts.links_by_title) {
+                (true, true) => self.opts.page_titles.get(target).cloned(),
+                (false, _) => Some(target.clone()),
+                (true, false) => None,
             };
-            // A label carrying inline markup needs the rich body; CDATA would
-            // flatten it to plain text.
-            let body = if label.contains('<') {
-                format!("<ac:link-body>{label}</ac:link-body>")
-            } else {
-                format!("<ac:plain-text-link-body>{}</ac:plain-text-link-body>", cdata_text(label))
+            return match title {
+                Some(title) => page_link_by_title(&title, None, label),
+                None => format!(
+                    r#"<ac:link><ri:page ri:content-id="{}" />{}</ac:link>"#,
+                    dom::escape_attr(target),
+                    link_body(label)
+                ),
             };
-            return format!("<ac:link><ri:page {attr} />{body}</ac:link>");
+        }
+
+        // `…/display/KEY/Title` is a page by title — another space's, or one of
+        // this space's that is not in the workspace. It goes back as a page
+        // link, which is what the reader saw, not a hard-coded URL.
+        if let Some((space, title)) = display_url(&self.opts.base_url, &url) {
+            let other = (space != self.opts.space_key).then_some(space.as_str());
+            return page_link_by_title(&title, other, label);
         }
 
         // A link into this page's sidecar is a link to an attachment. Left as a
@@ -962,6 +971,110 @@ mod tests {
     #[test]
     fn thematic_break() {
         assert_eq!(gen("---\n"), "<hr />");
+    }
+}
+
+/// A page link by title, as Data Center stores them: the space key only for
+/// another space, the link text only when it is not just the title.
+fn page_link_by_title(title: &str, space: Option<&str>, label: &str) -> String {
+    let space =
+        space.map(|s| format!(r#" ri:space-key="{}""#, dom::escape_attr(s))).unwrap_or_default();
+    let body = if label == dom::escape_text(title) || label.trim().is_empty() {
+        String::new()
+    } else {
+        link_body(label)
+    };
+    format!(
+        r#"<ac:link><ri:page{space} ri:content-title="{}" />{body}</ac:link>"#,
+        dom::escape_attr(title)
+    )
+}
+
+/// The body of an `ac:link`: rich when the label carries inline markup, which
+/// CDATA would flatten, plain otherwise.
+fn link_body(label: &str) -> String {
+    if label.contains('<') {
+        format!("<ac:link-body>{label}</ac:link-body>")
+    } else {
+        format!("<ac:plain-text-link-body>{}</ac:plain-text-link-body>", cdata_text(label))
+    }
+}
+
+/// `(space key, title)` of a `<base>/display/KEY/Title` page URL.
+fn display_url(base: &str, url: &str) -> Option<(String, String)> {
+    let base = base.trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    let rest = url.strip_prefix(base)?.strip_prefix("/display/")?;
+    let (space, title) = rest.split_once('/')?;
+    if space.is_empty() || title.is_empty() || space.starts_with('~') || title.contains('/') {
+        return None;
+    }
+    let title = title.split(['?', '#']).next()?.replace('+', " ");
+    let title = percent_encoding::percent_decode_str(&title).decode_utf8().ok()?.to_string();
+    Some((space.to_string(), title))
+}
+
+#[cfg(test)]
+mod page_link_tests {
+    use crate::ConvertOptions;
+
+    fn dc() -> ConvertOptions {
+        let mut o = ConvertOptions {
+            base_url: "https://wiki.corp".into(),
+            space_key: "ENG".into(),
+            links_by_title: true,
+            ..Default::default()
+        };
+        o.link_targets.insert("CH-200.5.md".into(), "900000098561".into());
+        o.link_targets.insert("WALL.md".into(), "42".into());
+        o.page_titles.insert("900000098561".into(), "CH-200.5. Подготовить план (v.1.1)".into());
+        o.page_titles.insert("42".into(), "Разделы (с учетом всех примечаний)".into());
+        o
+    }
+
+    #[test]
+    fn data_center_links_by_server_title() {
+        let out = crate::markdown_to_storage(
+            "[CH-200.5. Подготовить план (v.1.1)](CH-200.5.md)\n",
+            &dc(),
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            r#"<p><ac:link><ri:page ri:content-title="CH-200.5. Подготовить план (v.1.1)" /></ac:link></p>"#
+        );
+        // The file name is truncated; the title is the server's.
+        let out = crate::markdown_to_storage("see [the model](WALL.md)\n", &dc()).unwrap();
+        assert!(out.contains(r#"ri:content-title="Разделы (с учетом всех примечаний)""#), "{out}");
+        assert!(out.contains("<![CDATA[the model]]>"), "a different label is kept: {out}");
+        assert!(!out.contains("content-id"), "{out}");
+    }
+
+    #[test]
+    fn another_spaces_page_carries_its_space_key() {
+        let out =
+            crate::markdown_to_storage("[Spec](https://wiki.corp/display/DEV/Other+Page)\n", &dc())
+                .unwrap();
+        assert_eq!(
+            out,
+            r#"<p><ac:link><ri:page ri:space-key="DEV" ri:content-title="Other Page" /><ac:plain-text-link-body><![CDATA[Spec]]></ac:plain-text-link-body></ac:link></p>"#
+        );
+        let out = crate::markdown_to_storage(
+            "[Mine](https://wiki.corp/display/ENG/Not%20Pulled)\n",
+            &dc(),
+        )
+        .unwrap();
+        assert!(out.contains(r#"<ri:page ri:content-title="Not Pulled" />"#), "{out}");
+    }
+
+    #[test]
+    fn cloud_still_links_by_id() {
+        let mut o = dc();
+        o.links_by_title = false;
+        let out = crate::markdown_to_storage("[x](CH-200.5.md)\n", &o).unwrap();
+        assert!(out.contains(r#"<ri:page ri:content-id="900000098561" />"#), "{out}");
     }
 }
 
