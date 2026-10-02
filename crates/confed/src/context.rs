@@ -305,6 +305,19 @@ impl Context {
         args.iter().map(|a| self.workspace_path(a)).collect()
     }
 
+    /// A page reference for a command the server (or the history) can answer
+    /// without the page being in the workspace: a known page as usual, or any
+    /// numeric id as is — a page deleted with `confed rm`, or never pulled.
+    pub fn page_id_arg(&self, reference: &str) -> Result<String> {
+        match self.resolve_page(reference) {
+            Ok(id) => Ok(id),
+            Err(_) if !reference.is_empty() && reference.chars().all(|c| c.is_ascii_digit()) => {
+                Ok(reference.to_string())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn resolve_page(&self, reference: &str) -> Result<String> {
         let ws = self.workspace()?;
         let normalized = self.workspace_path(reference);

@@ -1410,3 +1410,47 @@ async fn markers_without_a_comment_are_reported() {
     );
     assert_eq!(value["result"]["orphan_markers"], json!([{ "ref": "gone-1", "text": "week" }]));
 }
+
+/// `rm --dry-run` changes nothing; `rm --push` deletes the pages named and
+/// nothing else — another page's edit stays unpushed — and says it did.
+#[tokio::test]
+async fn rm_previews_and_deletes_only_what_it_names() {
+    let server = dc_server().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!("/rest/api/content/{CHILD_PAGE}")))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let root = read(dir.path(), ROOT_FILE);
+    std::fs::write(dir.path().join(ROOT_FILE), root.replace("Welcome", "Unpushed")).unwrap();
+
+    let dry = envelope(
+        &run(confed_authed(dir.path(), &["rm", CHILD_FILE, "--push", "--dry-run", "--json"])),
+        "rm",
+    );
+    assert_eq!(dry["result"]["dry_run"], json!(true), "{dry}");
+    assert!(dir.path().join(CHILD_FILE).exists(), "a dry run removes nothing");
+    assert!(mutations(&server).await.is_empty());
+
+    let output = run(confed_authed(dir.path(), &["rm", CHILD_FILE, "--push", "--yes", "--json"]));
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    let value = envelope(&output, "rm");
+    assert_eq!(value["result"]["removed"][0]["server_deleted"], json!(true), "{value}");
+    assert_eq!(
+        mutations(&server).await,
+        vec![format!("DELETE /rest/api/content/{CHILD_PAGE}")],
+        "only the named page; the edited root was not pushed"
+    );
+
+    // The id still works where the server or the history can answer.
+    let local = run(confed_authed(dir.path(), &["log", "--local", CHILD_PAGE, "--json"]));
+    assert_eq!(exit_code(&local), 0, "{}", stderr(&local));
+    let live = run(confed_authed(dir.path(), &["comment", "list", CHILD_PAGE, "--json"]));
+    assert_eq!(exit_code(&live), 0, "{}", stderr(&live));
+    let live = envelope(&live, "comment");
+    assert_eq!(live["result"]["source"], json!("server"), "{live}");
+}

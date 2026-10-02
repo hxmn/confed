@@ -2260,3 +2260,34 @@ async fn a_reply_to_a_reply_goes_where_the_thread_allows() {
     assert_eq!(parent_of(&outcome.replies_added[0]), inline, "inline: to the thread root");
     assert_eq!(parent_of(&outcome.replies_added[1]), footer_reply.id, "page thread: nested");
 }
+
+/// A page file confed no longer tracks, whose page is gone from the server,
+/// still has its comment drafts reported — not silently dropped.
+#[tokio::test]
+async fn comment_work_on_an_untracked_page_is_reported() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Probe", None, "<p>Probe.</p>");
+    h.mock.seed_page("1002", "Kept", None, "<p>Kept.</p>");
+    h.pull().await;
+    for page in ["Probe", "Kept"] {
+        let path = format!(".{page}/comments.md");
+        let existing = std::fs::read_to_string(h.path(&path)).unwrap_or_default();
+        h.write(&path, &format!("{existing}\n<!-- confed:new -->\nA note.\n"));
+    }
+    // As after `confed rm --push` with the file put back: no base record, and
+    // no page on the server.
+    h.ws.state().delete_page("1001").unwrap();
+    h.mock.delete_page_directly("1001");
+
+    let plan = h
+        .engine
+        .plan_push(&h.ws, &PushOptions { with_comments: true, ..Default::default() })
+        .unwrap();
+    assert!(plan.comment_ops.iter().any(|op| op.starts_with("1001:")), "the dry run lists it");
+    let outcome = h.push().await;
+    assert_eq!(outcome.comments_added.len(), 1, "the tracked page's comment goes out");
+    let failure =
+        outcome.failed.iter().find(|f| f.page_id == "1001").expect("reported, not dropped");
+    assert!(failure.error.contains("no longer exists"), "{}", failure.error);
+    assert!(h.read(".Probe/comments.md").contains("A note."), "kept");
+}

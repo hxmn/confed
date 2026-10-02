@@ -19,7 +19,7 @@ pub async fn run(ctx: &mut Context, args: &LogArgs) -> Result<Output> {
     }
     match &args.page {
         Some(page) => {
-            let page_id = ctx.resolve_page(page)?;
+            let page_id = ctx.page_id_arg(page)?;
             page_history(ctx, args, &page_id).await
         }
         None => space_history(ctx, args).await,
@@ -28,7 +28,7 @@ pub async fn run(ctx: &mut Context, args: &LogArgs) -> Result<Output> {
 
 /// The offline half, so `--local` never wakes the OS keyring.
 pub fn run_local(ctx: &mut Context, args: &LogArgs) -> Result<Output> {
-    let page_id = args.page.as_deref().map(|p| ctx.resolve_page(p)).transpose()?;
+    let page_id = args.page.as_deref().map(|p| ctx.page_id_arg(p)).transpose()?;
     let ws = ctx.workspace()?;
     let entries = ws.state().recent_log(args.limit, page_id.as_deref())?;
     let paths = local_paths(ctx)?;

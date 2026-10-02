@@ -440,9 +440,14 @@ pub struct RmArgs {
     #[arg(long)]
     pub keep_local: bool,
 
-    /// Delete on the server immediately.
+    /// Delete on the server immediately (only the pages named).
     #[arg(long)]
     pub push: bool,
+
+    /// Report what would be removed, and deleted on the server with --push,
+    /// without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Args, Debug)]

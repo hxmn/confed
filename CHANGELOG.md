@@ -20,6 +20,30 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-10-02
+
+### Fixed
+
+- **`rm --push` pushed the whole workspace.** It ran an unscoped push with deletions
+  allowed: besides deleting the pages named, it uploaded every other edited page and
+  deleted on the server any other page whose file was missing locally. It now pushes
+  the pages named and nothing else.
+- `rm --push` reported `server_deleted: false` for a page it had just deleted; it now
+  says what the push did.
+- Comment drafts on a page file the workspace no longer tracks (removed with
+  `confed rm`, then the file put back) were left out of the push without a word,
+  though the dry run listed them. They are now reported under `failed` — "the page
+  no longer exists on the server", or "not tracked … `confed pull` picks the page up
+  again" — the drafts stay, and the push exits 8.
+
+### Added
+
+- `confed rm --dry-run`: what would be removed, and deleted on the server with
+  `--push`, without changing anything.
+- A page id the workspace does not track still works where the server or the
+  history can answer: `confed log <id>`, `confed log --local <id>`, and `confed
+  comment list <id>`, which then reads the comments from the server and says so.
+
 ## [0.6.2] - 2026-10-02
 
 ### Fixed
@@ -332,7 +356,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/hxmn/confed/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/hxmn/confed/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/hxmn/confed/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/hxmn/confed/compare/v0.5.1...v0.6.0

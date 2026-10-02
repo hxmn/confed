@@ -1986,6 +1986,51 @@ impl SyncEngine {
             sync_marks(ws, &record.page_id, &record.local_path)?;
         }
 
+        // Page files confed does not track (a page removed with `confed rm`
+        // and the file put back, say) are not posted to — but their comment
+        // work is reported, not dropped: the dry run lists it too.
+        let (files, _) = worktree::read_working_files(ws)?;
+        for local in &files {
+            let Some(page_id) = local.file.frontmatter.page_id() else { continue };
+            if ws.state().get_page(page_id)?.is_some() {
+                continue;
+            }
+            let sidecar = std::fs::read_to_string(
+                ws.absolute(&paths::sidecar_for(&local.path)).join(comments::COMMENTS_FILENAME),
+            )
+            .ok()
+            .and_then(|t| comments::parse(&t).ok());
+            let has_work = local.file.drafts().next().is_some()
+                || sidecar
+                    .is_some_and(|s| s.drafts().next().is_some() || !s.resolve_requests.is_empty());
+            if !has_work {
+                continue;
+            }
+            let exists =
+                match self.client.get_page(&PageId::new(page_id), BodyFormat::Storage).await {
+                    Ok(_) => true,
+                    Err(confed_api::ApiError::NotFound(_)) => false,
+                    Err(e) => return Err(e.into()),
+                };
+            work.failed.push(FailedPage {
+                page_id: page_id.to_string(),
+                title: local.file.frontmatter.title.clone(),
+                error: if exists {
+                    format!(
+                        "{}: this file is not tracked by the workspace, so its comment drafts \
+                         were not posted; `confed pull` picks the page up again",
+                        local.path
+                    )
+                } else {
+                    format!(
+                        "{}: the page no longer exists on the server (deleted?); its comment \
+                         drafts are kept",
+                        local.path
+                    )
+                },
+            });
+        }
+
         // Drafts written into page bodies as `new` marks.
         for record in ws.state().all_pages()? {
             if work.failed.iter().any(|f| f.page_id == record.page_id) {

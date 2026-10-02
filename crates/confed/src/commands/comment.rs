@@ -17,7 +17,16 @@ use std::fmt::Write;
 
 pub async fn run(ctx: &mut Context, command: &CommentCommand) -> Result<Output> {
     match command {
-        CommentCommand::List { page, unresolved, inline } => list(ctx, page, *unresolved, *inline),
+        CommentCommand::List { page, unresolved, inline } => match ctx.resolve_page(page) {
+            Ok(_) => list(ctx, page, *unresolved, *inline),
+            // Not in the workspace — removed with `confed rm`, or never
+            // pulled: an id can still be asked of the server.
+            Err(_) if ctx.page_id_arg(page).is_ok() => {
+                let id = ctx.page_id_arg(page)?;
+                list_live(ctx, &id, *unresolved, *inline).await
+            }
+            Err(e) => Err(e),
+        },
         CommentCommand::Add { page, body, anchor, occurrence, sidecar, push } => {
             let placement = AnchorPlacement { occurrence: *occurrence, sidecar: *sidecar };
             add(ctx, page, body.as_deref(), anchor.as_deref(), placement, None, *push).await
@@ -236,6 +245,77 @@ fn page_file(ctx: &Context, page_id: &str) -> Result<(std::path::PathBuf, String
         .map_err(|e| ConfedError::io(format!("reading {}", record.local_path), e))?;
     let file = confed_core::frontmatter::parse(&content, &record.local_path)?;
     Ok((path, content, file))
+}
+
+/// Comments of a page the workspace does not track, read from the server.
+async fn list_live(
+    ctx: &Context,
+    page_id: &str,
+    unresolved: bool,
+    inline_only: bool,
+) -> Result<Output> {
+    let client = ctx.build_client()?;
+    let comments = match client.list_comments(&confed_api::PageId::new(page_id)).await {
+        Ok(c) => c,
+        Err(confed_api::ApiError::NotFound(_)) => {
+            return Err(ConfedError::NotFound(format!(
+                "page {page_id} is not in this workspace and does not exist on the server"
+            )))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let root_resolved = |c: &confed_api::Comment| {
+        let mut current = c;
+        while let Some(parent) = current.parent_comment_id.as_ref() {
+            match comments.iter().find(|p| &p.id == parent) {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+        current.resolved
+    };
+    let mut entries = Vec::new();
+    let mut human = String::new();
+    for c in &comments {
+        let resolved = root_resolved(c);
+        let inline = c.kind == confed_api::CommentKind::Inline;
+        if (unresolved && resolved) || (inline_only && !inline) {
+            continue;
+        }
+        let body = confed_convert::storage_fragment_to_markdown(&c.body_storage)
+            .unwrap_or_else(|_| c.body_storage.clone());
+        let indent = if c.parent_comment_id.is_some() { "    " } else { "" };
+        let _ = writeln!(
+            human,
+            "{indent}{} {} {}",
+            ctx.style.bold(c.author.as_deref().unwrap_or("unknown")),
+            ctx.style.dim(c.created_at.as_deref().unwrap_or_default()),
+            if resolved { ctx.style.green("(resolved)") } else { String::new() }
+        );
+        for line in body.trim().lines() {
+            let _ = writeln!(human, "{indent}  {line}");
+        }
+        human.push('\n');
+        let anchor = c.anchor.as_ref().filter(|_| c.parent_comment_id.is_none());
+        entries.push(json!({
+            "id": c.id.0,
+            "kind": if inline { "inline" } else { "footer" },
+            "author": c.author,
+            "created": c.created_at,
+            "resolved": resolved,
+            "thread_resolved": resolved,
+            "reply_to": c.parent_comment_id.as_ref().map(|p| p.0.clone()),
+            "anchor": anchor.map(|a| json!({ "text": a.text, "orphaned": a.orphaned })),
+            "body_markdown": body.trim(),
+        }));
+    }
+    if entries.is_empty() {
+        human.push_str("No comments.\n");
+    }
+    Ok(Output::new(json!({ "page_id": page_id, "source": "server", "comments": entries }), human)
+        .warn(format!(
+            "page {page_id} is not in this workspace; these comments were read from the server"
+        )))
 }
 
 fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Result<Output> {
