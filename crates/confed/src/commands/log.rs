@@ -8,7 +8,7 @@ use crate::cli::LogArgs;
 use crate::context::Context;
 use crate::output::Output;
 use confed_api::PageId;
-use confed_core::error::Result;
+use confed_core::error::{ConfedError, Result};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -72,7 +72,15 @@ pub fn run_local(ctx: &mut Context, args: &LogArgs) -> Result<Output> {
 async fn page_history(ctx: &mut Context, args: &LogArgs, page_id: &str) -> Result<Output> {
     let base_version = ctx.workspace()?.state().get_page(page_id)?.map(|p| p.version);
     let client = ctx.build_client()?;
-    let versions = client.get_page_versions(&PageId::new(page_id), args.limit).await?;
+    let versions = match client.get_page_versions(&PageId::new(page_id), args.limit).await {
+        Ok(v) => v,
+        Err(confed_api::ApiError::NotFound(_)) => {
+            return Err(ConfedError::NotFound(format!(
+                "page {page_id} does not exist on the server (deleted, or never there)"
+            )))
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     let mut human = String::new();
     for version in &versions {

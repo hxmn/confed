@@ -192,6 +192,7 @@ pub mod push {
             allow_attachment_delete: args.allow_delete,
             message: args.message.clone(),
             with_attachments: !args.no_attachments,
+            comments_only: false,
             with_comments: !args.no_comments,
         };
 

@@ -999,3 +999,63 @@ async fn a_comment_is_edited_and_deleted_through_rest_v1() {
     c.update_comment(&CommentId::new("77"), CommentKind::Inline, "<p>new</p>").await.unwrap();
     c.delete_comment(&CommentId::new("77"), CommentKind::Inline).await.unwrap();
 }
+
+/// Data Center 9.5.4 has no `rest/api/content/{id}/version`. History comes from
+/// the experimental endpoint when there is one, else version by version.
+#[tokio::test]
+async fn version_history_without_the_version_endpoint() {
+    let server = MockServer::start().await;
+    // Unmatched requests answer 404, as the missing endpoint does.
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/1001"))
+        .and(query_param("expand", "version"))
+        .and(|req: &Request| !req.url.query().unwrap_or("").contains("historical"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1001", "type": "page",
+            "version": { "number": 3, "when": "2026-03-03T00:00:00Z", "by": { "displayName": "Alice Ng" } }
+        })))
+        .mount(&server)
+        .await;
+    for (n, who) in [(2, "Bob Lee"), (1, "Carol")] {
+        Mock::given(method("GET"))
+            .and(path("/confluence/rest/api/content/1001"))
+            .and(query_param("status", "historical"))
+            .and(query_param("version", n.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "1001", "type": "page",
+                "version": { "number": n, "by": { "displayName": who }, "message": "m" }
+            })))
+            .mount(&server)
+            .await;
+    }
+
+    let versions = client(&server).get_page_versions(&PageId::new("1001"), 10).await.unwrap();
+    let numbers: Vec<u32> = versions.iter().map(|v| v.number).collect();
+    assert_eq!(numbers, [3, 2, 1]);
+    assert_eq!(versions[1].author.as_deref(), Some("Bob Lee"));
+
+    let two = client(&server).get_page_versions(&PageId::new("1001"), 2).await.unwrap();
+    assert_eq!(two.len(), 2, "the limit holds");
+}
+
+#[tokio::test]
+async fn version_history_from_the_experimental_endpoint() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/experimental/content/1001/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{ "number": 2, "by": { "displayName": "Bob Lee" } }, { "number": 1 }],
+            "size": 2, "_links": {}
+        })))
+        .mount(&server)
+        .await;
+    let versions = client(&server).get_page_versions(&PageId::new("1001"), 10).await.unwrap();
+    assert_eq!(versions.iter().map(|v| v.number).collect::<Vec<_>>(), [2, 1]);
+}
+
+#[tokio::test]
+async fn version_history_of_a_missing_page_is_not_found() {
+    let server = MockServer::start().await;
+    let err = client(&server).get_page_versions(&PageId::new("404"), 10).await.unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "{err:?}");
+}

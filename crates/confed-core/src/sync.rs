@@ -172,11 +172,19 @@ pub struct PushOptions {
     pub message: Option<String>,
     pub with_attachments: bool,
     pub with_comments: bool,
+    /// Only comment work — no page bodies, no attachments — and, with a
+    /// scope, only for those pages. What the `comment … --push` shortcuts use.
+    pub comments_only: bool,
 }
 
 impl PushOptions {
     fn deletes_attachments(&self) -> bool {
         self.allow_delete || self.allow_attachment_delete
+    }
+
+    /// Whether a page is in this push's scope (an empty scope is everything).
+    fn covers(&self, page_id: &str, path: &str) -> bool {
+        self.scope.is_empty() || self.scope.iter().any(|s| s == page_id || path_matches(s, path))
     }
 }
 
@@ -1418,9 +1426,17 @@ impl SyncEngine {
                 }
             }
         }
+        if opts.comments_only {
+            plan.ops.clear();
+            plan.attachment_ops.clear();
+            plan.skipped.clear();
+        }
         if opts.with_comments {
             for status in &statuses {
                 let Some(page_id) = &status.page_id else { continue };
+                if !opts.covers(page_id, &status.path) {
+                    continue;
+                }
                 let path = ws
                     .absolute(&paths::sidecar_for(&status.path))
                     .join(comments::COMMENTS_FILENAME);
@@ -1451,6 +1467,9 @@ impl SyncEngine {
             }
             for local in &files {
                 let Some(page_id) = local.file.frontmatter.page_id() else { continue };
+                if !opts.covers(page_id, &local.path) {
+                    continue;
+                }
                 if local.file.drafts().next().is_some() {
                     validate_drafts(&local.file, &local.path)?;
                 }
@@ -1538,7 +1557,7 @@ impl SyncEngine {
             self.push_attachments(ws, opts, &plan.attachment_ops, &mut outcome).await?;
         }
         if opts.with_comments {
-            let work = self.push_comments(ws).await?;
+            let work = self.push_comments(ws, opts).await?;
             outcome.comments_added = work.added;
             outcome.replies_added = work.replies;
             outcome.comments_resolved = work.resolved;
@@ -1886,9 +1905,12 @@ impl SyncEngine {
         })
     }
 
-    async fn push_comments(&self, ws: &mut Workspace) -> Result<CommentWork> {
+    async fn push_comments(&self, ws: &mut Workspace, opts: &PushOptions) -> Result<CommentWork> {
         let mut work = CommentWork::default();
         for record in ws.state().all_pages()? {
+            if !opts.covers(&record.page_id, &record.local_path) {
+                continue;
+            }
             let path = ws
                 .absolute(&paths::sidecar_for(&record.local_path))
                 .join(comments::COMMENTS_FILENAME);
@@ -1992,7 +2014,7 @@ impl SyncEngine {
         let (files, _) = worktree::read_working_files(ws)?;
         for local in &files {
             let Some(page_id) = local.file.frontmatter.page_id() else { continue };
-            if ws.state().get_page(page_id)?.is_some() {
+            if ws.state().get_page(page_id)?.is_some() || !opts.covers(page_id, &local.path) {
                 continue;
             }
             let sidecar = std::fs::read_to_string(
@@ -2033,7 +2055,9 @@ impl SyncEngine {
 
         // Drafts written into page bodies as `new` marks.
         for record in ws.state().all_pages()? {
-            if work.failed.iter().any(|f| f.page_id == record.page_id) {
+            if work.failed.iter().any(|f| f.page_id == record.page_id)
+                || !opts.covers(&record.page_id, &record.local_path)
+            {
                 continue;
             }
             match self.push_body_drafts(ws, &record).await {

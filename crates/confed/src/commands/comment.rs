@@ -42,13 +42,18 @@ pub async fn run(ctx: &mut Context, command: &CommentCommand) -> Result<Output> 
     }
 }
 
-/// Push comment work now, reporting what the server got.
-async fn push_now(ctx: &mut Context) -> Result<confed_core::sync::PushOutcome> {
+/// Push the comment work of `pages` now — nothing else: no page edits, no
+/// attachments, no other page's drafts.
+async fn push_now(ctx: &mut Context, pages: Vec<String>) -> Result<confed_core::sync::PushOutcome> {
     let client = ctx.build_client()?;
     let engine = ctx.engine(client)?;
     let ws = ctx.workspace_mut()?;
     let _lock = ws.lock()?;
-    engine.push(ws, &PushOptions { with_comments: true, ..Default::default() }).await
+    engine.push(ws, &comment_push(pages)).await
+}
+
+fn comment_push(pages: Vec<String>) -> PushOptions {
+    PushOptions { scope: pages, with_comments: true, comments_only: true, ..Default::default() }
 }
 
 /// A page whose comment work failed — deleted on the server, say — makes the
@@ -102,7 +107,9 @@ async fn reply(ctx: &mut Context, ids: &[String], body: &str, push: bool) -> Res
     let mut result = json!({ "queued": queued, "draft": !push });
     let mut failed = Vec::new();
     let human = if push {
-        let outcome = push_now(ctx).await?;
+        let pages: Vec<String> =
+            queued.iter().filter_map(|q| q["page_id"].as_str().map(str::to_string)).collect();
+        let outcome = push_now(ctx, pages).await?;
         failed = outcome.failed.clone();
         result["result"] = comment_results(&outcome);
         result["draft"] = json!(!outcome.failed.is_empty());
@@ -494,9 +501,7 @@ async fn add(
                 let engine = ctx.engine(client)?;
                 let ws = ctx.workspace_mut()?;
                 let _lock = ws.lock()?;
-                let outcome = engine
-                    .push(ws, &PushOptions { with_comments: true, ..Default::default() })
-                    .await?;
+                let outcome = engine.push(ws, &comment_push(vec![page_id.clone()])).await?;
                 human = format!("Posted {} comment(s).\n", outcome.comments_added.len());
                 result["posted"] = json!(outcome.comments_added);
                 result["comments"] = posted_details(ctx, &page_id, &outcome.comments_added)?;
@@ -543,8 +548,7 @@ async fn add(
         let engine = ctx.engine(client)?;
         let ws = ctx.workspace_mut()?;
         let _lock = ws.lock()?;
-        let outcome =
-            engine.push(ws, &PushOptions { with_comments: true, ..Default::default() }).await?;
+        let outcome = engine.push(ws, &comment_push(vec![page_id.clone()])).await?;
         human = format!("Posted {} comment(s).\n", outcome.comments_added.len());
         result["posted"] = json!(outcome.comments_added);
         result["comments"] = posted_details(ctx, &page_id, &outcome.comments_added)?;
@@ -623,7 +627,8 @@ async fn resolve(
     }
     let mut failed = Vec::new();
     if push && !targets.is_empty() {
-        let outcome = push_now(ctx).await?;
+        let pages: Vec<String> = targets.iter().map(|(page, _)| page.clone()).collect();
+        let outcome = push_now(ctx, pages).await?;
         failed = outcome.failed.clone();
         result["result"] = comment_results(&outcome);
         for id in &outcome.comments_resolved {
@@ -733,7 +738,15 @@ fn check_anchor(
 /// What a push created, as the server reported it: id, kind, and for an
 /// inline comment the text it is anchored to and Confluence's marker ref.
 fn posted_details(ctx: &Context, page_id: &str, ids: &[String]) -> Result<serde_json::Value> {
-    let records = ctx.workspace()?.state().page_comments(page_id)?;
+    // The comment may sit on another page than the one asked about; look
+    // everywhere rather than report it with no kind.
+    let ws = ctx.workspace()?;
+    let mut records = ws.state().page_comments(page_id)?;
+    for page in ws.state().all_pages()? {
+        if page.page_id != page_id {
+            records.extend(ws.state().page_comments(&page.page_id)?);
+        }
+    }
     Ok(ids
         .iter()
         .map(|id| {
@@ -742,6 +755,7 @@ fn posted_details(ctx: &Context, page_id: &str, ids: &[String]) -> Result<serde_
                 record.and_then(|r| r.anchor.as_deref()).and_then(|a| serde_json::from_str(a).ok());
             json!({
                 "id": id,
+                "page_id": record.map(|r| r.page_id.as_str()),
                 "kind": record.map(|r| r.kind.as_str()),
                 "reply_to": record.and_then(|r| r.parent_comment_id.as_deref()),
                 "anchor": anchor.as_ref().map(|a| a.text.as_str()),

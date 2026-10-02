@@ -2291,3 +2291,37 @@ async fn comment_work_on_an_untracked_page_is_reported() {
     assert!(failure.error.contains("no longer exists"), "{}", failure.error);
     assert!(h.read(".Probe/comments.md").contains("A note."), "kept");
 }
+
+/// What the `comment … --push` shortcuts send: that page's comment work, and
+/// nothing else — not its body edit, not another page's drafts.
+#[tokio::test]
+async fn a_comment_push_sends_only_that_pages_comments() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Mine", None, "<p>Mine.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Other.</p>");
+    h.pull().await;
+    h.edit_body("Mine.md", "\nAn unpushed edit.\n");
+    h.edit_body("Other.md", "\nAnother unpushed edit.\n");
+    for page in ["Mine", "Other"] {
+        let path = format!(".{page}/comments.md");
+        let existing = std::fs::read_to_string(h.path(&path)).unwrap_or_default();
+        h.write(&path, &format!("{existing}\n<!-- confed:new -->\nOn {page}.\n"));
+    }
+
+    let opts = PushOptions {
+        scope: vec!["1001".into()],
+        with_comments: true,
+        comments_only: true,
+        ..Default::default()
+    };
+    let plan = h.engine.plan_push(&h.ws, &opts).unwrap();
+    assert!(plan.ops.is_empty(), "no page work: {:?}", plan.ops);
+    assert!(plan.comment_ops.iter().all(|op| op.starts_with("1001:")), "{:?}", plan.comment_ops);
+
+    let outcome = h.engine.push(&mut h.ws, &opts).await.unwrap();
+    assert_eq!(outcome.comments_added.len(), 1);
+    assert!(outcome.pushed.is_empty(), "no page body was uploaded: {:?}", outcome.pushed);
+    assert!(h.mock.calls().iter().all(|c| !c.starts_with("update_page")), "{:?}", h.mock.calls());
+    assert_eq!(h.status("1001"), PageState::Modified, "the edit is still local");
+    assert!(h.read(".Other/comments.md").contains("On Other."), "the other draft waits");
+}

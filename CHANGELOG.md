@@ -20,6 +20,24 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-10-02
+
+### Fixed
+
+- **`comment add/reply/resolve --push` pushed the whole workspace**, as `rm --push`
+  did before 0.6.3: every edited page and every other page's comment drafts went out
+  with the comment. They now send only the comment work of the pages they name — no
+  page bodies, no attachments, nothing from other pages. The other `--push` shortcuts
+  (`attach`, `new`, `mv`, `rm`) and the TUI were checked and already push only what
+  they name.
+- A comment swept up from another page was listed with `kind: null` as if it were on
+  the page asked about; comment details now come from the comment's own page and
+  include its `page_id`.
+- `confed log <page>` answered 404 for every page on Data Center 9.5.4, which has no
+  `rest/api/content/{id}/version`. confed now falls back to the experimental history
+  endpoint and then to reading each version through the content endpoint, so a 404
+  means only that the page does not exist — and `log` says so in those words.
+
 ## [0.6.3] - 2026-10-02
 
 ### Fixed
@@ -356,7 +374,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/hxmn/confed/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/hxmn/confed/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/hxmn/confed/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/hxmn/confed/compare/v0.6.0...v0.6.1

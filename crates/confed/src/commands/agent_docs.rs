@@ -254,8 +254,9 @@ confed comment edit <id> -m "…"                           # immediate, on the 
 confed comment rm <id> [<id>…] --yes                      # immediate; replies go too
 ```
 
-`add`, `reply` and `resolve` queue the work locally; add `--push` to send it now, or
-run `confed push`. `reply --push` reports each reply's `id` and the `parent` it was
+`add`, `reply` and `resolve` queue the work locally; add `--push` to send that
+page's comment work now — only that: no page edits, no attachments, no other page's
+drafts — or run `confed push` to send everything. `reply --push` reports each reply's `id` and the `parent` it was
 posted under: inline threads are one level deep, so a reply to a reply in one goes to
 the thread's root (page-comment threads nest). `edit` and `rm` act on the server at once. A push reports
 `comments_added` (new threads), `replies_added` and `comments_resolved`; `push

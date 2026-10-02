@@ -677,17 +677,59 @@ impl ConfluenceClient for DcClient {
             .collect())
     }
 
+    /// Version history. `rest/api/content/{id}/version` is missing on some Data
+    /// Center releases (9.5.4 answers 404), so the experimental endpoint is
+    /// tried next, and failing that each version is read through the content
+    /// endpoint every release has. A 404 means a missing page only when the
+    /// page itself is missing.
     async fn get_page_versions(&self, id: &PageId, limit: usize) -> ApiResult<Vec<VersionInfo>> {
         let limit = limit.max(1);
-        let raw: Vec<v1::Version> = collect_offset(
-            &self.http,
-            &format!("rest/api/content/{id}/version"),
-            &[("expand", "content.version".to_string())],
-            limit.min(PAGE_SIZE),
-            Some(limit),
-        )
-        .await?;
-        Ok(raw.into_iter().map(|v| v.into_domain()).collect())
+        for endpoint in ["rest/api/content", "rest/experimental/content"] {
+            let listed: ApiResult<Vec<v1::Version>> = collect_offset(
+                &self.http,
+                &format!("{endpoint}/{id}/version"),
+                &[("expand", "content.version".to_string())],
+                limit.min(PAGE_SIZE),
+                Some(limit),
+            )
+            .await;
+            match listed {
+                Ok(raw) => return Ok(raw.into_iter().map(|v| v.into_domain()).collect()),
+                Err(ApiError::NotFound(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        // No history endpoint: walk back from the current version.
+        let current = self.fetch_content(id.as_str(), &[("expand", "version".to_string())]).await?;
+        let latest = current.version.map(v1::Version::into_domain);
+        let Some(latest) = latest else { return Ok(Vec::new()) };
+        let mut versions = vec![latest.clone()];
+        let mut number = latest.number;
+        while versions.len() < limit && number > 1 {
+            number -= 1;
+            let old = self
+                .fetch_content(
+                    id.as_str(),
+                    &[
+                        ("status", "historical".to_string()),
+                        ("version", number.to_string()),
+                        ("expand", "version".to_string()),
+                    ],
+                )
+                .await;
+            match old {
+                Ok(content) => {
+                    if let Some(v) = content.version.map(v1::Version::into_domain) {
+                        versions.push(VersionInfo { number, ..v });
+                    }
+                }
+                // A version the server no longer keeps ends the walk.
+                Err(ApiError::NotFound(_)) => break,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(versions)
     }
 
     async fn get_page_at_version(&self, id: &PageId, version: u32) -> ApiResult<Page> {
