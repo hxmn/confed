@@ -1923,3 +1923,181 @@ both_flavors!(the_base_and_the_file_agree_with_marks_present, |mut h: Harness| a
     );
     assert_eq!(h.read(&record.local_path).matches("<!--c").count(), 2, "one mark per block");
 });
+
+// ------------------------------------------ drafts at a paragraph's start ----
+
+/// Write a `new` mark the way `confed comment add --anchor` does: at the
+/// anchor's offset in the stripped body, then rendered through the mark layer.
+fn add_draft(h: &Harness, file: &str, anchor: &str, note: &str) {
+    let content = h.read(file);
+    let mut parsed = confed_core::frontmatter::parse(&content, file).unwrap();
+    let start = parsed.body.find(anchor).unwrap_or_else(|| panic!("{anchor:?} not in {file}"));
+    let line = parsed.body[..start].matches('\n').count() + 1;
+    parsed.marks.push(confed_convert::Mark {
+        id: confed_convert::MarkId::New,
+        start,
+        end: Some(start + anchor.len()),
+        text: anchor.to_string(),
+        note: note.to_string(),
+        line,
+    });
+    h.write(file, &parsed.render().unwrap());
+}
+
+/// The anchor in the storage the comment wrapped.
+fn wrapped_text(storage: &str) -> String {
+    let open = storage.find("<ac:inline-comment-marker").expect("a marker");
+    let inner = &storage[open..];
+    let start = inner.find('>').unwrap() + 1;
+    let end = inner.find("</ac:inline-comment-marker>").unwrap();
+    inner[start..end].to_string()
+}
+
+/// A comment on the start of a paragraph, the whole paragraph, or text right
+/// after inline markup is posted on exactly the text asked for, and every
+/// report of it says so — even where the mark itself has to sit a character
+/// in so the paragraph stays a paragraph.
+#[tokio::test]
+async fn drafts_at_a_paragraph_start_mean_the_whole_anchor() {
+    struct Case {
+        storage: &'static str,
+        anchor: &'static str,
+        /// What the mark looks like in the file.
+        in_file: &'static str,
+    }
+    let cases = [
+        // ASCII and multibyte, at the start of a paragraph but not all of it.
+        Case {
+            storage: "<p>Welcome to the team.</p>",
+            anchor: "Welcome",
+            in_file: "W<!--c new t-->elcome<!--/c new--> to the team.",
+        },
+        Case {
+            storage: "<p>Фраза 1.</p><p>Фраза 2.</p><p>Фраза 3.</p>",
+            anchor: "Фраза 2",
+            in_file: "Ф<!--c new t-->раза 2<!--/c new-->.",
+        },
+        // The whole paragraph.
+        Case {
+            storage: "<p>Фраза 1.</p><p>Фраза 2.</p><p>Фраза 3.</p>",
+            anchor: "Фраза 2.",
+            in_file: "Ф<!--c new t-->раза 2.<!--/c new-->",
+        },
+        Case {
+            storage: "<p>One line.</p>",
+            anchor: "One line.",
+            in_file: "O<!--c new t-->ne line.<!--/c new-->",
+        },
+        // Right after inline markup, and inside it at the paragraph's start.
+        Case {
+            storage: "<p><strong>bold</strong>text</p>",
+            anchor: "text",
+            in_file: "**bold**<!--c new t-->text<!--/c new-->",
+        },
+        Case {
+            storage: "<p><strong>bold</strong>text</p>",
+            anchor: "bold",
+            in_file: "**b<!--c new t-->old**<!--/c new-->text",
+        },
+    ];
+    for flavor in [Flavor::Cloud, Flavor::DataCenter] {
+        for case in &cases {
+            let mut h = Harness::new(flavor);
+            h.mock.seed_page("1001", "Page", None, case.storage);
+            h.pull().await;
+            let md_anchor = if case.anchor == "bold" { "**bold**" } else { case.anchor };
+            add_draft(&h, "Page.md", md_anchor, "t");
+            let file = h.read("Page.md");
+            assert!(file.contains(case.in_file), "{flavor} {:?}: {file}", case.anchor);
+
+            let plan = h
+                .engine
+                .plan_push(&h.ws, &PushOptions { with_comments: true, ..Default::default() })
+                .unwrap();
+            assert!(
+                plan.comment_ops
+                    .iter()
+                    .any(|op| op.contains(&format!("add inline comment on \"{}\"", case.anchor))),
+                "{flavor}: the dry run names {:?}: {:?}",
+                case.anchor,
+                plan.comment_ops
+            );
+
+            let outcome = h.push().await;
+            assert_eq!(outcome.comments_added.len(), 1, "{flavor} {:?}", case.anchor);
+            let posted = h.ws.state().page_comments("1001").unwrap();
+            let anchor: confed_api::InlineAnchor =
+                serde_json::from_str(posted.last().unwrap().anchor.as_deref().unwrap()).unwrap();
+            assert_eq!(anchor.text, case.anchor, "{flavor}: the selection posted");
+            assert_eq!(
+                wrapped_text(&h.mock.page_body("1001").unwrap()),
+                case.anchor,
+                "{flavor}: the text the server wrapped"
+            );
+            assert_eq!(h.status("1001"), PageState::Unchanged, "{flavor} {:?}", case.anchor);
+        }
+    }
+}
+
+/// A sidecar draft is listed as the inline comment it is, with its anchor and
+/// occurrence; a reply as a reply.
+#[tokio::test]
+async fn the_dry_run_describes_sidecar_drafts() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Page", None, "<p>Фраза 2. Фраза 2.</p>");
+    let root = h.mock.seed_comment("1001", "<p>Root.</p>", confed_api::CommentKind::Footer);
+    h.pull().await;
+    let mut sidecar = h.read(".Page/comments.md");
+    sidecar.push_str(&format!(
+        "\n<!-- confed:new anchor=\"Фраза 2.\" occurrence=2 -->\nt\n\
+         \n<!-- confed:new reply-to={root} -->\nОк.\n"
+    ));
+    h.write(".Page/comments.md", &sidecar);
+
+    let plan = h
+        .engine
+        .plan_push(&h.ws, &PushOptions { with_comments: true, ..Default::default() })
+        .unwrap();
+    assert!(
+        plan.comment_ops.contains(
+            &"1001: add inline comment on \"Фраза 2.\", occurrence 2 (comments.md)".to_string()
+        ),
+        "{:?}",
+        plan.comment_ops
+    );
+    assert!(
+        plan.comment_ops.contains(&format!("1001: reply to {root} (3 chars)")),
+        "{:?}",
+        plan.comment_ops
+    );
+}
+
+/// A page fetch found but pull has not written yet is reported under the path
+/// pull will give it, not an empty one.
+#[tokio::test]
+async fn a_new_remote_page_has_its_future_path_in_status() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Parent", None, "<p>p</p>");
+    h.pull().await;
+    h.mock.seed_page("1002", "CH-200.7", Some("1001"), "<p>new</p>");
+    h.engine.fetch(&mut h.ws, &Default::default()).await.unwrap();
+
+    let status = worktree::scan(&h.ws).unwrap();
+    let page = status.find("1002").expect("listed");
+    assert_eq!(page.state, PageState::RemoteNew);
+    assert_eq!(page.path, "Parent/CH-200.7.md");
+}
+
+/// A page deleted on the server before it was ever pulled is not "deleted"
+/// locally: there was never a file.
+#[tokio::test]
+async fn an_unpulled_page_deleted_on_the_server_is_not_reported() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Kept", None, "<p>k</p>");
+    h.pull().await;
+    h.mock.seed_page("1002", "Short-lived", None, "<p>s</p>");
+    h.engine.fetch(&mut h.ws, &Default::default()).await.unwrap();
+    h.mock.delete_page_directly("1002");
+    let outcome = h.pull().await;
+    assert!(outcome.deleted.is_empty(), "{:?}", outcome.deleted);
+}

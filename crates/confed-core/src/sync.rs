@@ -13,7 +13,7 @@ use crate::comments;
 use crate::error::{ConfedError, Result};
 use crate::frontmatter::{Frontmatter, Managed, MarkdownFile};
 use crate::merge::{self, RemoteLabel, ScalarMerge};
-use crate::paths::{self, PagePlacement, Placement};
+use crate::paths::{self, Placement};
 use crate::progress::{self, ProgressRef};
 use crate::state::{
     hash_str, now, AttachmentRecord, CommentRecord, PageRecord, RemotePage, SyncState,
@@ -815,26 +815,7 @@ impl SyncEngine {
         remote: &[RemotePage],
         base: &[PageRecord],
     ) -> HashMap<String, Placement> {
-        let pages: Vec<PagePlacement> = remote
-            .iter()
-            .filter(|r| !r.deleted)
-            .map(|r| PagePlacement {
-                page_id: r.page_id.clone(),
-                title: r.title.clone(),
-                parent_id: r.parent_id.clone(),
-                position: r.position,
-            })
-            .collect();
-        // Pin a filename only when the user chose it. If the slug on disk is
-        // still the one confed derived from the title it last synced, a rename
-        // on the server should move the file; if the user renamed it themselves,
-        // that choice wins and only the title changes.
-        let existing: HashMap<String, String> = base
-            .iter()
-            .filter(|b| b.slug != crate::slug::slugify(&b.title))
-            .map(|b| (b.page_id.clone(), b.slug.clone()))
-            .collect();
-        paths::plan_paths(&pages, &existing)
+        paths::plan_from_records(remote, base)
     }
 
     fn in_scope(
@@ -1427,8 +1408,23 @@ impl SyncEngine {
                 let Ok(text) = std::fs::read_to_string(&path) else { continue };
                 let sidecar = comments::parse(&text)?;
                 for draft in sidecar.drafts() {
-                    plan.comment_ops
-                        .push(format!("{page_id}: add comment ({} chars)", draft.body.len()));
+                    let chars = draft.body.trim().chars().count();
+                    plan.comment_ops.push(match (&draft.anchor, &draft.reply_to) {
+                        (Some(anchor), _) if draft.kind == comments::SidecarKind::Inline => {
+                            format!(
+                                "{page_id}: add inline comment on \"{}\"{} (comments.md)",
+                                anchor.text,
+                                anchor
+                                    .match_index
+                                    .map(|i| format!(", occurrence {}", i + 1))
+                                    .unwrap_or_default()
+                            )
+                        }
+                        (_, Some(parent)) => {
+                            format!("{page_id}: reply to {parent} ({chars} chars)")
+                        }
+                        _ => format!("{page_id}: add comment ({chars} chars)"),
+                    });
                 }
                 for id in &sidecar.resolve_requests {
                     plan.comment_ops.push(format!("{page_id}: resolve {id}"));
@@ -1440,9 +1436,11 @@ impl SyncEngine {
                     validate_drafts(&local.file, &local.path)?;
                 }
                 for draft in local.file.drafts() {
+                    let Some((start, end)) = draft_span(&local.file.body, draft) else { continue };
                     plan.comment_ops.push(format!(
                         "{page_id}: add inline comment on \"{}\" (line {})",
-                        draft.text, draft.line
+                        marks::plain_text(&local.file.body[start..end]).trim(),
+                        draft.line
                     ));
                 }
             }
@@ -2017,10 +2015,7 @@ impl SyncEngine {
                 .map_err(|e| ConfedError::io(format!("reading {path}"), e))?;
             let mut file = crate::frontmatter::parse(&content, &path)?;
             let Some(draft) = file.drafts().find(|d| d.end.is_some()).cloned() else { break };
-            let end = draft.end.unwrap_or(draft.start);
-            // A mark cannot open a line, so one meant for a paragraph's first
-            // word sits a character in; the comment is on the whole word.
-            let start = marks::intended_start(&file.body, draft.start);
+            let Some((start, end)) = draft_span(&file.body, &draft) else { break };
             let base = ws.state().get_page(&record.page_id)?.unwrap_or_else(|| record.clone());
             refuse_unpushed_block(ws, &base, &file.body, start, end, &path)?;
 
@@ -2374,6 +2369,10 @@ fn decide_pull(
     stale_rendering: bool,
 ) -> PullAction {
     if remote.deleted {
+        // Never pulled: there is no file to delete, and nothing to report.
+        if base.is_none() && status.is_none() {
+            return PullAction::Nothing;
+        }
         return match status.map(|s| s.local_dirty) {
             Some(true) if !opts.force => {
                 PullAction::Blocked("deleted on the server but modified locally".to_string())
@@ -2602,6 +2601,17 @@ fn live_inline(
                 serde_json::from_str(c.anchor.as_deref()?).ok()?;
             Some((c, anchor))
         })
+}
+
+/// The stretch of a stripped body a `new` mark means.
+///
+/// A mark cannot open a line (a line starting with `<!--` is an HTML block),
+/// so a draft on a paragraph's first word is written a character in —
+/// `Ф<!--c new …-->раза 2.` — and still means `Фраза 2.`. Everything that
+/// reports or posts a draft goes through here, so they cannot disagree.
+pub fn draft_span(body: &str, draft: &Mark) -> Option<(usize, usize)> {
+    let end = draft.end?;
+    Some((marks::intended_start(body, draft.start), end))
 }
 
 /// The anchor a body draft creates: the span's plain text plus which

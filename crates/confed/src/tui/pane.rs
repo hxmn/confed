@@ -52,7 +52,8 @@ impl DiffSide {
 
 /// The working file, with its frontmatter dimmed and headings highlighted.
 pub fn preview(ws: &Workspace, path: &str) -> Vec<Line> {
-    if path.is_empty() {
+    // A page fetch found but pull has not written has a path, but no file yet.
+    if path.is_empty() || !ws.absolute(path).exists() {
         return vec![Line::new(
             LineKind::Warn,
             "This page exists only on the server. Press p to pull it.",

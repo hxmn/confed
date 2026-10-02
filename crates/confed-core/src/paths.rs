@@ -26,6 +26,34 @@ pub struct Placement {
 ///
 /// `existing` maps page id → the slug already on disk, so a page that has been
 /// pulled before keeps its filename even if a sibling would now sort first.
+/// Where every live page's file goes, from what fetch recorded: the same
+/// answer `pull` acts on, so `status` can name the file a new page will get.
+pub fn plan_from_records(
+    remote: &[crate::state::RemotePage],
+    base: &[crate::state::PageRecord],
+) -> HashMap<String, Placement> {
+    let pages: Vec<PagePlacement> = remote
+        .iter()
+        .filter(|r| !r.deleted)
+        .map(|r| PagePlacement {
+            page_id: r.page_id.clone(),
+            title: r.title.clone(),
+            parent_id: r.parent_id.clone(),
+            position: r.position,
+        })
+        .collect();
+    // Pin a filename only when the user chose it. If the slug on disk is
+    // still the one confed derived from the title it last synced, a rename
+    // on the server should move the file; if the user renamed it themselves,
+    // that choice wins and only the title changes.
+    let existing: HashMap<String, String> = base
+        .iter()
+        .filter(|b| b.slug != slugify(&b.title))
+        .map(|b| (b.page_id.clone(), b.slug.clone()))
+        .collect();
+    plan_paths(&pages, &existing)
+}
+
 pub fn plan_paths(
     pages: &[PagePlacement],
     existing: &HashMap<String, String>,

@@ -393,7 +393,9 @@ pub fn compute_status(
         );
     }
 
-    // Pages fetch found that were never materialized.
+    // Pages fetch found that were never materialized, under the path pull
+    // will give them.
+    let planned = crate::paths::plan_from_records(remote, base);
     for record in remote {
         if record.deleted || base_by_id.contains_key(record.page_id.as_str()) {
             continue;
@@ -403,7 +405,7 @@ pub fn compute_status(
             key,
             PageStatus {
                 page_id: Some(record.page_id.clone()),
-                path: String::new(),
+                path: planned.get(&record.page_id).map(|p| p.path.clone()).unwrap_or_default(),
                 title: record.title.clone(),
                 state: PageState::RemoteNew,
                 base_version: None,

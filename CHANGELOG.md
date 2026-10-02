@@ -20,6 +20,24 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-02
+
+### Fixed
+
+- `push --dry-run` named the wrong text for an inline comment on the start of a
+  paragraph: `add inline comment on "раза 2."` for `--anchor "Фраза 2."`. In the file
+  the mark has to sit one character in (`Ф<!--c new t-->раза 2.<!--/c new-->`),
+  because a line that starts with `<!--` is an HTML block to every Markdown renderer.
+  Push already posted the whole `Фраза 2.`; the dry run read the mark literally. Both
+  now go through one function, so what the dry run promises is what is posted.
+- A comment draft in `comments.md` was listed by the dry run as `add comment (N chars)`
+  even when it was inline. It now reads `add inline comment on "…", occurrence N
+  (comments.md)`, and a reply `reply to <id>`. They were always posted as such.
+- `status` showed an empty `path` for a page that is new on the server (`remote_new`);
+  it now shows the file `pull` will write.
+- `pull` reported a page deleted on the server before it was ever pulled as
+  `deleted` with an empty path. There was never a file, so it is no longer reported.
+
 ## [0.5.0] - 2026-10-02
 
 ### Added
@@ -232,7 +250,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/hxmn/confed/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/hxmn/confed/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/hxmn/confed/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/hxmn/confed/compare/v0.3.0...v0.4.0

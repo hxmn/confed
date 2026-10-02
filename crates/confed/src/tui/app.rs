@@ -541,7 +541,7 @@ impl App {
     fn push_options(&self) -> PushOptions {
         let scope = self
             .selected_node()
-            .filter(|node| !node.path.is_empty())
+            .filter(|node| !node.path.is_empty() && node.state != PageState::RemoteNew)
             .map(|node| vec![node.path.clone()])
             .unwrap_or_default();
         PushOptions { scope, with_attachments: true, with_comments: true, ..Default::default() }
@@ -956,7 +956,12 @@ mod tests {
         harness.press(KeyCode::Char('f'));
         harness.settle();
         assert!(harness.app.status.starts_with("Fetched"), "{}", harness.app.status);
-        assert_eq!(harness.state_of(""), PageState::RemoteNew, "known, but not written yet");
+        assert_eq!(
+            harness.state_of("Runbook/Escalation.md"),
+            PageState::RemoteNew,
+            "known, under the path pull will give it, but not written yet"
+        );
+        assert!(!harness.path("Runbook/Escalation.md").exists());
 
         // Pull is scoped to the selection, so select the page that is missing.
         let index = harness
