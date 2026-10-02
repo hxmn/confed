@@ -177,6 +177,12 @@ used when the file has no mark for a live comment:
 | Mark missing (mangled, deleted, or the page was merged) | `reanchor` by text + context; orphan if not found |
 | Storage has no marker for a live comment (some Cloud pages edited in the new editor) | `reanchor` by text; the mark is rendered from that offset |
 
+The fallback writes a mark only where the anchor text sits verbatim (exact, unique or
+context-picked match, never fuzzy), and `apply` refuses any span with an edge inside a
+fenced block, a code span or an HTML tag. A comment whose marker is in a preserved
+```` ```confluence ```` block is therefore found by text but never marked there: it
+stays in the sidecar, and the fence stays byte-identical to storage.
+
 The layer is (re)applied whenever confed writes a page file, and additionally on every
 pull for pages it did not otherwise rewrite, when the set of open inline comments
 changed: read → strip → apply → write only if the bytes differ. A comment resolved on

@@ -415,11 +415,29 @@ fn is_fence_close(line: &str, ch: char, len: usize) -> bool {
 /// the start of a line's content: at a continuation line it moves to the end
 /// of the previous line, and at a block's first line it moves one character
 /// in (past emphasis delimiters, or past a whole code span or image).
+///
+/// A mark that would land inside text [`strip`] treats as opaque — a fenced
+/// block, a code span, an HTML tag — is left out: there it would be content,
+/// not a mark, and would corrupt a raw ```` ```confluence ```` block.
 pub fn apply(body: &str, marks: &[PlacedMark]) -> String {
+    let opaque = opaque_ranges(body);
     let mut inserts: Vec<(usize, u8, String)> = Vec::with_capacity(marks.len() * 2);
     for m in marks {
         let (start, end) = (m.start.min(body.len()), m.end.min(body.len()));
         if start > end || !body.is_char_boundary(start) || !body.is_char_boundary(end) {
+            continue;
+        }
+        // Line breaks at a span's edges belong to no span. Left in, an edge
+        // after a blank line would be read as the next block's first line and
+        // stepped into it — into a fence's opening backticks, say.
+        let is_break = |c: char| c == '\n' || c == '\r';
+        let start =
+            start + (body[start..end].len() - body[start..end].trim_start_matches(is_break).len());
+        let end = start + body[start..end].trim_end_matches(is_break).len();
+        if start == end && m.start != m.end {
+            continue;
+        }
+        if opaque.iter().any(|r| r.blocks(start, end)) {
             continue;
         }
         inserts.push((start, 1, open_marker(&m.id, &m.note)));
@@ -437,6 +455,109 @@ pub fn apply(body: &str, marks: &[PlacedMark]) -> String {
     }
     out.push_str(&body[cursor..]);
     normalize_line_starts(&out)
+}
+
+/// A stretch of a body a mark must not open or close inside.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Opaque {
+    start: usize,
+    end: usize,
+    /// A fenced block is opaque as a whole: a span may not enter it, and may not
+    /// enclose it either. Inline constructs only forbid an edge strictly inside.
+    block: bool,
+}
+
+impl Opaque {
+    fn blocks(&self, start: usize, end: usize) -> bool {
+        if self.block {
+            start < self.end && end > self.start
+        } else {
+            let inside = |o: usize| self.start < o && o < self.end;
+            inside(start) || inside(end)
+        }
+    }
+}
+
+/// Fenced blocks, code spans and HTML tags in a clean body — the text
+/// [`strip`] copies through verbatim, so a mark placed there would never come
+/// back out.
+fn opaque_ranges(body: &str) -> Vec<Opaque> {
+    let mut out = Vec::new();
+    let mut fence: Option<(char, usize, usize)> = None; // (char, len, start offset)
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let content = line.trim_end_matches(['\n', '\r']);
+        let unquoted = strip_quote_prefix(content);
+        if let Some((ch, len, start)) = fence {
+            if is_fence_close(unquoted, ch, len) {
+                out.push(Opaque { start, end: offset, block: true });
+                fence = None;
+            }
+            continue;
+        }
+        if let Some((ch, len)) = fence_open(unquoted) {
+            fence = Some((ch, len, line_start));
+            continue;
+        }
+        inline_opaque(content, line_start, &mut out);
+    }
+    if let Some((_, _, start)) = fence {
+        out.push(Opaque { start, end: body.len(), block: true });
+    }
+    out
+}
+
+/// Code spans and `<…>` tags on one line, the same way [`strip_line`] skips
+/// them.
+fn inline_opaque(line: &str, base: usize, out: &mut Vec<Opaque>) {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'`' => {
+                let ticks = line[i..].bytes().take_while(|&b| b == b'`').count();
+                let run = &line[i..i + ticks];
+                let mut search = i + ticks;
+                let mut closed = None;
+                while let Some(found) = line[search..].find(run).map(|k| k + search) {
+                    let len = line[found..].bytes().take_while(|&b| b == b'`').count();
+                    if len == ticks {
+                        closed = Some(found + ticks);
+                        break;
+                    }
+                    search = found + len;
+                }
+                match closed {
+                    Some(end) => {
+                        out.push(Opaque { start: base + i, end: base + end, block: false });
+                        i = end;
+                    }
+                    None => i += ticks,
+                }
+            }
+            b'<' if line[i + 1..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?')) =>
+            {
+                let close = if line[i..].starts_with("<!--") {
+                    line[i..].find("-->").map(|k| i + k + 3)
+                } else {
+                    line[i..].find('>').map(|k| i + k + 1)
+                };
+                match close {
+                    Some(end) => {
+                        out.push(Opaque { start: base + i, end: base + end, block: false });
+                        i = end;
+                    }
+                    None => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
 }
 
 /// Move markers off the start of any line's content (see [`apply`]). Idempotent,
@@ -971,6 +1092,41 @@ mod tests {
         assert_eq!(s.body, clean);
         assert_eq!(s.marks[0].start, 14);
         assert_eq!(s.marks[0].end, Some(34));
+    }
+
+    #[test]
+    fn apply_never_writes_into_a_fence_a_code_span_or_a_tag() {
+        let m = |start, end| PlacedMark { id: c("1"), start, end, note: String::new() };
+        let raw = "x\n\n```confluence\n<p>(<code>Time</code>)</p>\n```\n";
+        let inside = raw.find("Time").unwrap();
+        assert_eq!(apply(raw, &[m(inside, inside + 4)]), raw, "inside a fence");
+        assert_eq!(apply(raw, &[m(0, raw.len())]), raw, "around a fence");
+
+        let code = "a `b c` d\n";
+        assert_eq!(apply(code, &[m(3, 5)]), code, "inside a code span");
+        assert_eq!(apply(code, &[m(2, 7)]), "a <!--c 1-->`b c`<!--/c 1--> d\n", "around one");
+
+        let tag = "a <span class=\"x\">b</span> c\n";
+        assert_eq!(apply(tag, &[m(5, 12)]), tag, "inside a tag");
+        assert_eq!(strip(&apply(tag, &[m(18, 19)])).body, tag, "between tags is fine");
+        assert_eq!(apply(tag, &[m(18, 19)]).matches("<!--c 1-->").count(), 1);
+    }
+
+    #[test]
+    fn whatever_apply_writes_strips_back_to_the_clean_body() {
+        // Every offset pair on a body with each opaque construct: the layer
+        // must always come back out, leaving fences byte-identical.
+        let body = "Intro `co de` and <b>bold</b>.\n\n```confluence\n<p>(<code>x</code>)</p>\n```\n\n- tail\n";
+        let offsets: Vec<usize> = (0..=body.len()).filter(|&i| body.is_char_boundary(i)).collect();
+        for &start in &offsets {
+            for &end in offsets.iter().filter(|&&e| e > start) {
+                let marked =
+                    apply(body, &[PlacedMark { id: c("1"), start, end, note: "n".into() }]);
+                let s = strip(&marked);
+                assert_eq!(s.body, body, "{start}..{end}: {marked}");
+                assert!(s.issues.is_empty(), "{start}..{end}: {marked}");
+            }
+        }
     }
 
     #[test]

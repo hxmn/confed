@@ -2203,6 +2203,17 @@ pub fn page_convert_options(ws: &Workspace, page_path: &str) -> ConvertOptions {
     opts
 }
 
+/// A stored body rendered for comparison with a page file's body.
+///
+/// A file is read with its comment marks stripped (design 06 §3), so the
+/// rendering is stripped too: anything that compares the two — `diff`, the
+/// TUI's diff pane — must go through here, or every open inline comment shows
+/// up as a change.
+pub fn comparable_markdown(storage: &str, opts: &ConvertOptions) -> Result<String> {
+    let markdown = confed_convert::storage_to_markdown(storage, opts)?.markdown;
+    Ok(marks::strip(&markdown).body)
+}
+
 fn convert_options(ws: &Workspace, path: &str, links: &HashMap<String, String>) -> ConvertOptions {
     let page_links: HashMap<String, String> =
         links.iter().map(|(id, target)| (id.clone(), paths::relative_link(path, target))).collect();
@@ -2446,9 +2457,18 @@ pub fn sync_marks(ws: &mut Workspace, page_id: &str, page_path: &str) -> Result<
         if mode == MarksMode::Off {
             continue;
         }
+        // A mark is written only where the anchor text sits verbatim. A fuzzy
+        // hit gives a start but no trustworthy end, and the text it found may
+        // be markup in a preserved storage block; such a comment stays in the
+        // sidecar. `apply` additionally refuses spans inside code and tags.
         let found = crate::reanchor::reanchor(&anchor, &body);
-        if let Some(offset) = found.offset {
-            placed.push(PlacedMark { id, start: offset, end: offset + anchor.text.len(), note });
+        if let Some(offset) =
+            found.offset.filter(|_| found.kind != crate::reanchor::MatchKind::Fuzzy)
+        {
+            let end = offset + anchor.text.len();
+            if body.get(offset..end) == Some(anchor.text.as_str()) {
+                placed.push(PlacedMark { id, start: offset, end, note });
+            }
         }
     }
 

@@ -20,6 +20,33 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-02
+
+### Fixed
+
+- `pull --reset` now leaves pages with inline comments clean. A comment whose
+  marker sits in a block kept as raw storage (a ```` ```confluence ```` fence)
+  is not shown in the body, but the fallback that places a comment by its text
+  went looking for it anyway, found it in the raw XML, and wrote the mark
+  there, sometimes in the middle of a word or a tag
+  (`</a<!--/c 1-->c:inline-comment-marker>`). Inside a fence a mark is content,
+  not a layer, so the page read as modified after every reset and a push would
+  have uploaded invalid markup. Marks are now never written inside a fenced
+  block, a code span or an HTML tag. The text fallback places a mark only where
+  the comment's text sits verbatim: a fuzzy match has no reliable end, so a
+  comment found only that way stays in the sidecar. A mark edge that falls on a
+  line break is pulled back to its text, so it can no longer be pushed into the
+  opening backticks of a fence that follows.
+- `confed diff` and the TUI's diff pane no longer show open inline comments as
+  changes. They compared the base, rendered *with* its marks, against the file
+  body read *without* them, so every commented page showed a diff that `status`
+  did not report. Both sides are compared without marks now, through one shared
+  function. `diff --storage` also feeds push's patcher the marked body, as push
+  does.
+- The converter version is bumped, so pages left untouched re-render on the next
+  pull. Pages already reported as modified because of a stray mark need one
+  `confed pull --reset` (or `pull --force` on those pages).
+
 ## [0.4.0] - 2026-09-07
 
 ### Added
@@ -160,6 +187,9 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/hxmn/confed/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/hxmn/confed/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/hxmn/confed/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/hxmn/confed/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hxmn/confed/releases/tag/v0.1.0

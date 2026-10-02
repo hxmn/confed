@@ -1737,3 +1737,50 @@ async fn a_conflicted_page_keeps_drafts_but_no_marks() {
     assert!(file.contains(&format!("<!--c {id} ")), "marks are back: {file}");
     assert!(file.contains("<!--c new Who?-->"), "{file}");
 }
+
+// A comment whose marker sits in a block kept as raw storage is listed in the
+// sidecar but never marked in the body: the fence must stay byte-identical
+// to the server's markup, and a reset must leave the tree clean.
+both_flavors!(a_comment_inside_a_raw_block_never_marks_the_fence, |mut h: Harness| async move {
+    let storage = "<p>Intro.</p><ac:structured-macro ac:name=\"mystery\"><ac:parameter ac:name=\"x\">(<ac:inline-comment-marker ac:ref=\"marker-1\">first week checklist</ac:inline-comment-marker>)</ac:parameter></ac:structured-macro>";
+    h.mock.seed_page("1001", "Raw", None, storage);
+    h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+
+    let file = h.read("Raw.md");
+    assert!(file.contains("```confluence"), "the macro is kept raw: {file}");
+    assert!(!file.contains("<!--c"), "no mark inside the raw block: {file}");
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+
+    for _ in 0..2 {
+        h.engine
+            .pull(&mut h.ws, &PullOptions { reset: true, ..PullOptions::everything() })
+            .await
+            .expect("reset");
+        assert_eq!(h.read("Raw.md"), file, "a reset converges");
+        assert_eq!(h.status("1001"), PageState::Unchanged, "a reset leaves the page clean");
+    }
+});
+
+// What `diff` compares the file against — the base, re-rendered — equals
+// the body read from disk, for a page whose comments start a list item and
+// span markers split across `<code>`.
+both_flavors!(the_base_and_the_file_agree_with_marks_present, |mut h: Harness| async move {
+    let storage = "<ol><li><ac:inline-comment-marker ac:ref=\"marker-1\">first week checklist</ac:inline-comment-marker>: <strong>not set</strong></li></ol><p>See <ac:inline-comment-marker ac:ref=\"marker-1\">(</ac:inline-comment-marker><code><ac:inline-comment-marker ac:ref=\"marker-1\">init time</ac:inline-comment-marker></code>) here.</p>";
+    h.mock.seed_page("1001", "Split", None, storage);
+    h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+
+    let record = h.ws.state().get_page("1001").unwrap().unwrap();
+    let on_disk =
+        confed_core::frontmatter::parse(&h.read(&record.local_path), &record.local_path).unwrap();
+    let options = confed_core::sync::page_convert_options(&h.ws, &record.local_path);
+    let rendered = confed_core::sync::comparable_markdown(&record.storage_body, &options).unwrap();
+    assert_eq!(
+        rendered.trim_end(),
+        on_disk.body.trim_end(),
+        "stripped base and file must agree, or diff reports a phantom change"
+    );
+    assert_eq!(h.read(&record.local_path).matches("<!--c").count(), 2, "one mark per block");
+});

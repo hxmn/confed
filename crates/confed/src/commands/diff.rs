@@ -104,7 +104,7 @@ fn collect(ctx: &Context, args: &DiffArgs, against_remote: bool) -> Result<Vec<P
 
         let right_text = if args.storage {
             // What push would actually upload.
-            build_push_storage(base_record, &local.file.body, &convert_opts)?
+            build_push_storage(base_record, &local.file.marked_body(), &convert_opts)?
         } else {
             local.file.body.clone()
         };
@@ -137,7 +137,7 @@ fn render_side(storage: &str, opts: &ConvertOptions, args: &DiffArgs) -> Result<
     if args.storage {
         return Ok(storage.to_string());
     }
-    Ok(confed_convert::storage_to_markdown(storage, opts)?.markdown)
+    confed_core::sync::comparable_markdown(storage, opts)
 }
 
 fn build_push_storage(base: &PageRecord, new_body: &str, opts: &ConvertOptions) -> Result<String> {

@@ -1217,6 +1217,25 @@ mod inline_mark_tests {
     }
 
     #[test]
+    fn a_comment_split_across_a_code_span_covers_all_of_it() {
+        // Confluence splits one comment into same-ref markers around <code>.
+        let storage = "<p>(see <ac:inline-comment-marker ac:ref=\"m\">(</ac:inline-comment-marker><code><ac:inline-comment-marker ac:ref=\"m\">init time</ac:inline-comment-marker></code>) here</p>";
+        let c = crate::storage_to_markdown(storage, &opts(&[("m", "5", "")])).unwrap();
+        assert_eq!(c.markdown, "(see <!--c 5-->(`init time`<!--/c 5-->) here\n");
+    }
+
+    #[test]
+    fn a_comment_starting_a_list_item_steps_one_character_in() {
+        // `<!--` at the start of an item's content would open an HTML block,
+        // so the opener moves past the first character; the text is unchanged.
+        let storage = "<ol><li><ac:inline-comment-marker ac:ref=\"m\">pseudo: <strong>unset</strong></ac:inline-comment-marker></li></ol>";
+        let c = crate::storage_to_markdown(storage, &opts(&[("m", "5", "")])).unwrap();
+        assert_eq!(c.markdown, "1. p<!--c 5-->seudo: **unset**<!--/c 5-->\n");
+        let plain = crate::storage_to_markdown(storage, &ConvertOptions::default()).unwrap();
+        assert_eq!(crate::marks::strip(&c.markdown).body, plain.markdown);
+    }
+
+    #[test]
     fn a_marker_in_a_heading_and_a_table_cell() {
         let storage = "<h2>Big <ac:inline-comment-marker ac:ref=\"m\">title</ac:inline-comment-marker></h2><table><tbody><tr><th>A</th></tr><tr><td><ac:inline-comment-marker ac:ref=\"n\">cell</ac:inline-comment-marker></td></tr></tbody></table>";
         let c =
