@@ -434,6 +434,26 @@ impl<'a> Generator<'a> {
     fn link(&self, url: &str, label: &str) -> String {
         let url = unwrap_destination(url);
 
+        // `[@Name](user:<key>)` names somebody directly — the way to write a
+        // mention of someone confed has not resolved yet (`confed user search`
+        // gives the key). `user:account-id=…` and `user:username=…` say which
+        // attribute; a bare key is matched against known people, else a userkey.
+        if let Some(id) = url.strip_prefix("user:") {
+            let (attr, value) = match id.split_once('=') {
+                Some((attr @ ("userkey" | "account-id" | "username"), value)) => {
+                    (attr.to_string(), value.to_string())
+                }
+                _ => match self.opts.users.values().find(|u| u.id_value == id) {
+                    Some(user) => (user.id_attr.clone(), id.to_string()),
+                    None => ("userkey".to_string(), id.to_string()),
+                },
+            };
+            return format!(
+                r#"<ac:link><ri:user ri:{attr}="{}" /></ac:link>"#,
+                dom::escape_attr(&value)
+            );
+        }
+
         // A link to somebody's profile is a mention, and goes back as the
         // element it came from — identified the way this site identifies people.
         if let Some(user) = self.opts.users.values().find(|u| u.profile_url == url) {
@@ -942,6 +962,27 @@ mod tests {
     #[test]
     fn thematic_break() {
         assert_eq!(gen("---\n"), "<hr />");
+    }
+}
+
+#[cfg(test)]
+mod mention_link_tests {
+    use crate::ConvertOptions;
+
+    #[test]
+    fn a_user_link_is_a_mention() {
+        let out = crate::markdown_to_storage(
+            "Ask [@Alice](user:ff8081) now\n",
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(out, r#"<p>Ask <ac:link><ri:user ri:userkey="ff8081" /></ac:link> now</p>"#);
+        let out = crate::markdown_to_storage(
+            "[@Bo](user:account-id=5b10:ac)\n",
+            &ConvertOptions::default(),
+        )
+        .unwrap();
+        assert!(out.contains(r#"<ri:user ri:account-id="5b10:ac" />"#), "{out}");
     }
 }
 

@@ -84,7 +84,11 @@ pub fn render(base_url: &str, flavor: Flavor, space_key: &str) -> String {
              or as a new page version; confed takes that change in, so the page stays \
              `unchanged`. Page (footer) comments can be added, replied to, edited and deleted, \
              but not resolved — `comment resolve` on one exits 9, and `--all` skips them. \
-             Deleting an inline comment leaves its marker in the page (`orphan_markers`)."
+             Deleting an inline comment leaves its marker in the page (`orphan_markers`). \
+             Data Center's inline-comment API rejects mentions and page links in a new \
+             comment, so confed creates it without them and adds them right after through \
+             the content API — still one comment, one notification; if that second step \
+             fails, the warning names `confed comment edit <id>`, which adds them."
         }
     };
 
@@ -161,6 +165,7 @@ confed pull --json                    # write remote changes into files (merges)
 confed push --dry-run --json          # exactly what would be uploaded
 confed push -m "reason" --json        # upload
 confed comment list <page> --json     # read discussion
+confed user search "name" --json      # people, with the mention to paste
 confed log <page> --json              # server version history
 confed log --json                     # what changed lately anywhere in the space
 confed version --json                 # this build, its schemas, its changelog
@@ -262,6 +267,16 @@ the thread's root (page-comment threads nest). `edit` and `rm` act on the server
 `comments_added` (new threads), `replies_added` and `comments_resolved`; `push
 --dry-run` lists the same work in `comments_pending` without sending anything.
 
+`--anchor` writes the draft into the page body as a `<!--c new …-->` mark when it
+can. When it cannot — the text is inside a ```` ```confluence ```` block (a raw table
+or macro), reads differently in the Markdown, or the comment is more than one line —
+the draft goes to `comments.md` instead, and the JSON says `"written_to": "sidecar"`
+with the reason. `--sidecar` asks for that directly. Either way the draft is queued.
+
+**Check every draft.** After queueing comments, `confed push --dry-run --json` must list
+each one in `comments_pending`. If one is missing, it was not written — say so, do not
+assume it will be posted.
+
 `--anchor` takes the text as it reads on the page (no Markdown), and must name one
 place: exit 6 if it is not on the page (or only inside a macro or code block, where
 Confluence cannot anchor), exit 2 if it appears more than once and no `--occurrence`
@@ -286,8 +301,34 @@ A reply.
 <!-- confed:resolve id=77120 -->
 ```
 
-Then `confed push`. Posted drafts and handled resolves leave the file, so pushing
-again never posts twice. Do not edit an existing comment's text in this file —
+Then push it. Posted drafts and handled resolves leave the file, so pushing again
+never posts twice.
+
+### Pushing comment work
+
+`confed push <page path>` and the `comment … --push` shortcuts send only that page's
+comment work. Plain `confed push` sends **everything** queued in the workspace —
+every page edit and every page's drafts, including another session's if the
+workspace is shared. Prefer the scoped forms.
+
+If confed exits 7 with "another confed process … is using this directory", another
+session is working in the same workspace: wait a few seconds and retry. confed clears a
+lock whose process has died by itself; never delete `.confed.lock` by hand.
+
+### Mentions and links in comments and pages
+
+Write them in Markdown, in comment bodies (`-m`, `comments.md`) as in pages:
+
+```markdown
+[@Danny Kimball](user:8a8b8181…)          a mention, by userkey (Data Center)
+[@Ana Ruiz](user:account-id=5b10a2…)      a mention, by account id (Cloud)
+[CH-200.1](../CH-200.1.md)                a link to another page, by its file
+```
+
+`confed user search "Danny" --json` gives each person's `userkey`/`account_id` and the
+`mention` to paste. Mentions of people already on pages appear as `[@Name](<profile
+url>)`; that form works too. Do not hand-write `<ac:link>` storage unless there is no
+other way. Do not edit an existing comment's text in this file —
 confed ignores it; use `confed comment edit`.
 
 ### Inline comments in the page body
@@ -410,6 +451,13 @@ mod tests {
             "<!--c 1--><!--c 2-->text<!--/c 2--><!--/c 1-->",
             "occurrence=1",
             "relative to the current directory",
+            "\"written_to\": \"sidecar\"",
+            "comments_pending",
+            "send only that page's",
+            "never delete `.confed.lock`",
+            "user search",
+            "(user:8a8b8181…)",
+            "user:account-id=",
         ] {
             assert!(doc.contains(required), "the contract should mention {required:?}");
         }

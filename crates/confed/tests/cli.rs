@@ -1454,3 +1454,49 @@ async fn rm_previews_and_deletes_only_what_it_names() {
     let live = envelope(&live, "comment");
     assert_eq!(live["result"]["source"], json!("server"), "{live}");
 }
+
+/// Text that exists only inside a raw ```confluence table cannot carry a body
+/// mark; the draft goes to the sidecar, the result says so, and the dry run
+/// lists it. Never a success with nothing written.
+#[tokio::test]
+async fn an_anchor_inside_a_raw_table_is_drafted_in_the_sidecar() {
+    let server = dc_server().await;
+    let storage = "<p>Intro.</p><ac:structured-macro ac:name=\"mystery\"><ac:rich-text-body><table><tbody><tr><td>Ширину данной колонки пользователь может менять.</td></tr></tbody></table></ac:rich-text-body></ac:structured-macro>";
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{CHILD_PAGE}")))
+        .respond_with({
+            let mut page = summary(CHILD_PAGE, "Onboarding", Some(ROOT_PAGE), 1);
+            page["body"] = json!({ "storage": { "value": storage, "representation": "storage" } });
+            ResponseTemplate::new(200).set_body_json(page)
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    assert!(read(dir.path(), CHILD_FILE).contains("```confluence"), "the table is raw");
+
+    let anchor = "Ширину данной колонки пользователь может менять.";
+    let output = run(confed_authed(
+        dir.path(),
+        &["comment", "add", CHILD_FILE, "--anchor", anchor, "-m", "Почему?", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    let value = envelope(&output, "comment");
+    assert_eq!(value["result"]["written_to"], json!("sidecar"), "{value}");
+    assert!(!read(dir.path(), CHILD_FILE).contains("<!--c new"), "nothing in the fence");
+
+    let dry = envelope(&run(confed_authed(dir.path(), &["push", "--dry-run", "--json"])), "push");
+    let pending = dry["result"]["comments_pending"].to_string();
+    assert!(pending.contains(anchor), "the dry run lists the draft: {dry}");
+
+    // A multi-line comment cannot be a one-line mark either; it is not squashed.
+    let output = run(confed_authed(
+        dir.path(),
+        &["comment", "add", CHILD_FILE, "--anchor", "Intro.", "-m", "line one\nline two", "--json"],
+    ));
+    assert_eq!(envelope(&output, "comment")["result"]["written_to"], json!("sidecar"));
+    let sidecar = read(dir.path(), "Team Handbook/.Onboarding/comments.md");
+    assert!(sidecar.contains("line one\nline two"), "{sidecar}");
+}

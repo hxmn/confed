@@ -422,6 +422,15 @@ is one level deep, so a reply to a reply there goes to the thread's root.
 On Data Center inline comments go through the server's undocumented inline-comment API;
 page comments cannot be resolved there (exit 9; `resolve --all` lists them as skipped).
 
+`--anchor` falls back to a `comments.md` draft when the text cannot carry a body mark
+(inside a ```` ```confluence ```` block, read differently in the Markdown, or a
+multi-line comment); `--json` says `"written_to": "sidecar"` and why.
+
+Comment bodies are converted in the page's context: `[@Name](user:<userkey>)` (or
+`user:account-id=…` on Cloud) is a mention, `[Title](Other.md)` a page link. `confed
+user search <name> --json` gives each person's `userkey`, `account_id` and the mention to
+paste.
+
 Page arguments everywhere are relative to the current directory, like git's, then the
 workspace root; a miss names where it looked and suggests the closest page.
 

@@ -2372,3 +2372,33 @@ async fn unsent_drafts_on_a_page_deleted_on_the_server() {
     assert!(!h.path("Parent").exists(), "the emptied children folder is removed");
     assert!(h.path("Parent.md").exists());
 }
+
+/// A comment's mentions and page links are written in Markdown and arrive as
+/// the real elements: `[@Name](user:<key>)` and `[Title](Page.md)`.
+#[tokio::test]
+async fn comment_bodies_carry_mentions_and_page_links() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Test", None, "<p>Фраза 3.</p>");
+    h.mock.seed_page("1002", "Glossary", None, "<p>g</p>");
+    h.pull().await;
+    let sidecar = ".Test/comments.md";
+    let existing = std::fs::read_to_string(h.path(sidecar)).unwrap_or_default();
+    h.write(
+        sidecar,
+        &format!(
+            "{existing}\n<!-- confed:new anchor=\"Фраза 3.\" -->\n\
+             [@Danny](user:8a8b81), see [Glossary](Glossary.md).\n"
+        ),
+    );
+    let outcome = h.push().await;
+    assert_eq!(outcome.comments_added.len(), 1, "{outcome:?}");
+    use confed_api::ConfluenceClient;
+    let posted = h.mock.list_comments(&confed_api::PageId::new("1001")).await.unwrap();
+    let body = &posted.last().unwrap().body_storage;
+    assert!(body.contains(r#"<ri:user ri:userkey="8a8b81" />"#), "{body}");
+    assert!(
+        body.contains(r#"<ri:page ri:content-id="1002" />"#)
+            || body.contains(r#"ri:content-title="Glossary""#),
+        "{body}"
+    );
+}

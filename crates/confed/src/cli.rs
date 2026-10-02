@@ -144,6 +144,10 @@ pub enum Command {
     /// List spaces visible to you.
     Spaces(SpacesArgs),
 
+    /// Find people, for writing mentions.
+    #[command(subcommand)]
+    User(UserCommand),
+
     /// Show the authenticated user and instance capabilities.
     Whoami,
 
@@ -190,6 +194,7 @@ impl Command {
             Command::Open(_) => "open",
             Command::Search(_) => "search",
             Command::Spaces(_) => "spaces",
+            Command::User(_) => "user",
             Command::Whoami => "whoami",
             Command::Config(_) => "config",
             Command::Doctor(_) => "doctor",
@@ -580,6 +585,17 @@ pub struct SearchArgs {
     /// Search every space, not just this one.
     #[arg(long)]
     pub all_spaces: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum UserCommand {
+    /// People whose name matches: username, userkey, account id, and the
+    /// mention to paste into a page or comment.
+    Search {
+        query: String,
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
 }
 
 #[derive(Args, Debug)]

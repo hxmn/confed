@@ -20,6 +20,40 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-02
+
+### Fixed
+
+- **`comment add --anchor` could lose the draft and report success.** Text inside a
+  ```` ```confluence ```` block (a raw table, a macro) cannot carry a body mark — since
+  0.4.1 confed never writes one into a fence — so the mark was dropped on write while
+  the command answered as if it were queued. confed now checks the mark is in the file
+  after writing it; when it is not, or cannot be (text that reads differently in the
+  Markdown, a multi-line comment, which a one-line mark used to squash), the draft goes
+  to `comments.md`, and the result says `"written_to": "sidecar"` with the reason.
+- Data Center answered 500 to creating an inline comment (or reply) whose body has a
+  mention or page link (`<ac:link>`). confed now creates it with those replaced by
+  their text and puts the real body right after through the content API: one push,
+  one comment, links and mentions intact, one notification. If the second step fails,
+  the comment is kept and the warning names `confed comment edit <id>`.
+- An error with an empty response body read as a dangling `…comments: `; it now says
+  the server sent no body. Error bodies are logged at debug, request bodies (never
+  credentials) at trace (`--log confed=trace`).
+
+### Added
+
+- Mentions in Markdown: `[@Name](user:<userkey>)`, or `user:account-id=…` on Cloud,
+  `user:username=…`, become real mentions — in pages and in comments.
+- Comment bodies are converted in their page's context, so mentions of known people
+  (`[@Name](<profile url>)`) and page links (`[Title](Other.md)`) work in comments as
+  they do in pages.
+- `confed user search <name> [--limit N] --json`: people with their `username`,
+  `userkey`, `account_id` and the `mention` to paste.
+- The agent guide covers: drafts that fall back to the sidecar, checking every draft in
+  `push --dry-run`, scoped pushes versus plain `push` in a shared workspace, the lock
+  (wait and retry; confed clears a dead process's lock), mentions and page links, and
+  Data Center's two-step create.
+
 ## [0.6.5] - 2026-10-02
 
 ### Fixed
@@ -390,7 +424,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.5...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/hxmn/confed/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/hxmn/confed/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/hxmn/confed/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/hxmn/confed/compare/v0.6.2...v0.6.3

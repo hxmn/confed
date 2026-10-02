@@ -516,6 +516,10 @@ impl ConfluenceClient for CloudClient {
         self.http.delete(&format!("api/v2/{}/{id}", comment_collection(kind))).await
     }
 
+    async fn search_users(&self, query: &str, limit: usize) -> ApiResult<Vec<User>> {
+        v1::search_users(&self.http, query, limit).await
+    }
+
     async fn search_cql(&self, cql: &str, limit: usize) -> ApiResult<Vec<SearchResult>> {
         // CQL search never made it to v2.
         let limit = limit.max(1);

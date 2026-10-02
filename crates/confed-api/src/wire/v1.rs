@@ -48,6 +48,49 @@ pub struct User {
     pub email: Option<String>,
 }
 
+/// One hit of `rest/api/search/user` (or `rest/api/search` with `type = user`).
+#[derive(Debug, Default, Deserialize)]
+pub struct UserHit {
+    #[serde(default)]
+    pub user: Option<User>,
+}
+
+/// People whose full name or username matches `query`, through CQL. Tried as
+/// the user search endpoint first, then as a general search for `type = user`,
+/// which older Data Center releases answer instead.
+pub async fn search_users(
+    http: &crate::http::Http,
+    query: &str,
+    limit: usize,
+) -> crate::error::ApiResult<Vec<crate::types::User>> {
+    let q = query.replace('\\', "\\\\").replace('"', "\\\"");
+    let attempts = [
+        ("rest/api/search/user", format!("user.fullname ~ \"{q}\"")),
+        ("rest/api/search", format!("type = user and user.fullname ~ \"{q}\"")),
+    ];
+    for (endpoint, cql) in attempts {
+        let found: crate::error::ApiResult<serde_json::Value> =
+            http.get_json(endpoint, &[("cql", cql), ("limit", limit.max(1).to_string())]).await;
+        match found {
+            Ok(value) => {
+                let hits: Vec<UserHit> =
+                    serde_json::from_value(value["results"].clone()).unwrap_or_default();
+                return Ok(hits
+                    .into_iter()
+                    .filter_map(|h| h.user)
+                    .map(User::into_domain)
+                    .collect());
+            }
+            Err(
+                crate::error::ApiError::NotFound(_)
+                | crate::error::ApiError::Server { status: 400, .. },
+            ) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(Vec::new())
+}
+
 impl User {
     pub fn into_domain(self) -> crate::types::User {
         let display_name = self
@@ -58,6 +101,7 @@ impl User {
             .unwrap_or_else(|| "unknown".to_string());
         crate::types::User {
             account_id: self.account_id,
+            user_key: self.user_key.clone(),
             username: self.username.or(self.user_key),
             display_name,
             email: self.email,

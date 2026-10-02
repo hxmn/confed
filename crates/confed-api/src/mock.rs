@@ -72,6 +72,7 @@ impl MockClient {
             next_id: Arc::new(AtomicU64::new(1000)),
             inline_bumps_version: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user: User {
+                user_key: Some("ff8081".into()),
                 account_id: Some("acc-1".into()),
                 username: Some("tester".into()),
                 display_name: "Test User".into(),
@@ -175,6 +176,7 @@ impl MockClient {
         self.state.lock().expect("mock poisoned").users.insert(
             id.to_string(),
             User {
+                user_key: Some(id.to_string()),
                 account_id: Some(id.to_string()),
                 username: Some(username.to_string()),
                 display_name: display_name.to_string(),
@@ -666,6 +668,18 @@ impl ConfluenceClient for MockClient {
             return Err(ApiError::NotFound(format!("comment {id}")));
         }
         Ok(())
+    }
+
+    async fn search_users(&self, query: &str, limit: usize) -> ApiResult<Vec<User>> {
+        let needle = query.to_lowercase();
+        let state = self.state.lock().expect("mock poisoned");
+        Ok(state
+            .users
+            .values()
+            .filter(|u| u.display_name.to_lowercase().contains(&needle))
+            .take(limit.max(1))
+            .cloned()
+            .collect())
     }
 
     async fn search_cql(&self, cql: &str, limit: usize) -> ApiResult<Vec<SearchResult>> {

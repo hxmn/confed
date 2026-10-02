@@ -242,6 +242,7 @@ impl Http {
                     let retriable = code == 429 || matches!(code, 502..=504);
                     if !retriable || attempt + 1 >= self.policy.max_attempts {
                         let body = resp.text().await.unwrap_or_default();
+                        debug!(target: "confed::http", context, status = code, body = %body, "error response");
                         if retriable && code == 429 {
                             return Err(ApiError::RateLimited(format!(
                                 "{context}: still rate limited after {} attempts",
@@ -333,6 +334,14 @@ impl Http {
         let ctx = format!("{method} {path}");
         let payload = serde_json::to_vec(body)
             .map_err(|e| ApiError::Decode { context: ctx.clone(), source: e })?;
+        // The body never carries credentials (they travel in headers), so it is
+        // safe to show when tracing what was sent.
+        tracing::trace!(
+            target: "confed::http",
+            context = %ctx,
+            body = %String::from_utf8_lossy(&payload),
+            "request"
+        );
         let resp = self
             .send_with_retry(&ctx, false, || {
                 self.request(method.clone(), url.clone())

@@ -1973,8 +1973,10 @@ impl SyncEngine {
 
             while let Some(index) = sidecar.comments.iter().position(|c| c.is_draft()) {
                 let draft = sidecar.comments[index].clone();
-                let storage =
-                    confed_convert::markdown_to_storage(&draft.body, &ConvertOptions::default())?;
+                let storage = confed_convert::markdown_to_storage(
+                    &draft.body,
+                    &comment_convert_options(ws, &record.local_path),
+                )?;
                 let posted = match &draft.anchor {
                     Some(anchor) if draft.kind == comments::SidecarKind::Inline => {
                         self.require_inline_create()?;
@@ -2139,8 +2141,10 @@ impl SyncEngine {
         body_markdown: &str,
     ) -> Result<()> {
         let (page, mut record) = find_comment(ws, comment_id)?;
-        let storage =
-            confed_convert::markdown_to_storage(body_markdown, &ConvertOptions::default())?;
+        let storage = confed_convert::markdown_to_storage(
+            body_markdown,
+            &comment_convert_options(ws, &page.local_path),
+        )?;
         self.client
             .update_comment(
                 &confed_api::CommentId::new(comment_id),
@@ -2291,7 +2295,8 @@ impl SyncEngine {
             })?;
 
             let body = draft.draft_body().unwrap_or_default();
-            let storage = confed_convert::markdown_to_storage(body, &ConvertOptions::default())?;
+            let storage =
+                confed_convert::markdown_to_storage(body, &comment_convert_options(ws, &path))?;
             let posted = self
                 .client
                 .add_inline_comment(&PageId::new(&record.page_id), &anchor, &storage)
@@ -2783,6 +2788,15 @@ fn decide_pull(
         // Unchanged, RemoteDeleted (handled above), and LocalNew: nothing to write.
         _ => PullAction::Nothing,
     }
+}
+
+/// How a comment on a page is converted: in the page's context, so a mention
+/// (`[@Alice Ng](<profile>)` or `[@Alice](user:<key>)`) becomes a real mention
+/// and `[Title](Other.md)` a page link, as they would in the page itself.
+pub fn comment_convert_options(ws: &Workspace, page_path: &str) -> ConvertOptions {
+    let mut opts = page_convert_options(ws, page_path);
+    opts.inline_marks.clear();
+    opts
 }
 
 /// Conversion context for one page file.

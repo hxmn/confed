@@ -173,6 +173,9 @@ impl UserReference {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct User {
     pub account_id: Option<String>,
+    /// Data Center's stable user key — what a mention in storage carries.
+    #[serde(default)]
+    pub user_key: Option<String>,
     pub username: Option<String>,
     pub display_name: String,
     pub email: Option<String>,

@@ -277,6 +277,7 @@ impl CurrentUser {
             .or_else(|| self.account_id.clone())
             .unwrap_or_else(|| "unknown".to_string());
         User {
+            user_key: None,
             account_id: self.account_id,
             username: self.username,
             display_name,

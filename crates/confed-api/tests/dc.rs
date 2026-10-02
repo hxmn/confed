@@ -1059,3 +1059,79 @@ async fn version_history_of_a_missing_page_is_not_found() {
     let err = client(&server).get_page_versions(&PageId::new("404"), 10).await.unwrap_err();
     assert!(matches!(err, ApiError::NotFound(_)), "{err:?}");
 }
+
+/// Data Center's inline-comment API answers 500 to a body with `<ac:link>`.
+/// The comment is created without them, and its real body put right after
+/// through the content API — one comment, mentions and links intact.
+#[tokio::test]
+async fn an_inline_comment_with_a_mention_and_a_page_link() {
+    let server = MockServer::start().await;
+    mount_manifest(&server, "9.5.4").await;
+    mount_page_version(&server, 1).await;
+    let body = "<p>Ask <ac:link><ri:user ri:userkey=\"ff8081\" /></ac:link> about \
+                <ac:link><ri:page ri:content-title=\"CH-200.1\" /></ac:link></p>";
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/inlinecomments/1.0/comments"))
+        .and(|req: &Request| {
+            let sent: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            let posted = sent["body"].as_str().unwrap_or_default();
+            !posted.contains("<ac:link")
+                && posted.contains("@ff8081")
+                && posted.contains("CH-200.1")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(fixture("create.response.json")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/900000099220"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "900000099220", "type": "comment",
+            "container": { "id": TEST_PAGE, "type": "page" },
+            "version": { "number": 1 }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/confluence/rest/api/content/900000099220"))
+        .and(move |req: &Request| {
+            let sent: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+            sent["body"]["storage"]["value"] == json!(body) && sent["version"]["number"] == json!(2)
+        })
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "id": "900000099220", "type": "comment" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = client(&server)
+        .add_inline_comment(&PageId::new(TEST_PAGE), &selection(), body)
+        .await
+        .unwrap();
+    assert_eq!(c.id, CommentId::new("900000099220"));
+    assert_eq!(c.body_storage, body, "recorded with its links");
+}
+
+#[tokio::test]
+async fn people_are_found_by_name_with_their_userkey() {
+    let server = MockServer::start().await;
+    // No user search endpoint (404): the general search answers instead.
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/search"))
+        .and(query_param("cql", "type = user and user.fullname ~ \"Danny\""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{ "user": {
+                "type": "known", "username": "kimball", "userKey": "8a8b81",
+                "displayName": "Kimball Danny"
+            } }],
+            "size": 1, "_links": {}
+        })))
+        .mount(&server)
+        .await;
+    let people = client(&server).search_users("Danny", 10).await.unwrap();
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].user_key.as_deref(), Some("8a8b81"));
+    assert_eq!(people[0].display_name, "Kimball Danny");
+}

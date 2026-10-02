@@ -77,6 +77,23 @@ impl DcClient {
         self.http.get_json(&format!("rest/api/content/{id}"), query).await
     }
 
+    /// Second half of creating a comment with mentions or page links: the
+    /// comment exists with plain text, and gets its real body through the
+    /// content API, which takes storage as is. A failure here must not fail the
+    /// create — the comment is on the server — so it is reported, with the fix.
+    async fn put_links_back(&self, comment: &mut Comment, body: &str, posted: &str) {
+        if let Err(e) = self.update_comment(&comment.id, CommentKind::Inline, body).await {
+            tracing::warn!(
+                target: "confed::api",
+                comment = %comment.id, error = %e,
+                "comment {} was created without its mentions and links, which could not be \
+                 added: `confed comment edit {}` adds them",
+                comment.id, comment.id
+            );
+            comment.body_storage = posted.to_string();
+        }
+    }
+
     async fn cached_version(&self) -> Option<String> {
         self.version
             .get_or_init(|| async {
@@ -146,6 +163,62 @@ fn parse_manifest_version(manifest: &str) -> Option<String> {
     };
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+/// The body without its `<ac:link>` elements, each replaced by the text a reader
+/// would see. Data Center's inline-comment API answers 500 to a body with a
+/// mention or page link; the comment is created from this, and the real body
+/// put through the content API right after.
+fn without_ac_links(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("<ac:link") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let open_end = tail.find('>').map_or(tail.len(), |i| i + 1);
+        let end = if tail[..open_end].ends_with("/>") {
+            open_end
+        } else {
+            tail.find("</ac:link>").map_or(tail.len(), |i| i + "</ac:link>".len())
+        };
+        out.push_str(&link_text(&tail[..end]));
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What a reader sees for one `<ac:link>…</ac:link>`.
+fn link_text(link: &str) -> String {
+    let between = |s: &str, a: &str, b: &str| -> Option<String> {
+        let i = s.find(a)? + a.len();
+        let j = s[i..].find(b)? + i;
+        Some(s[i..j].to_string())
+    };
+    let attr = |name: &str| between(link, &format!("{name}=\""), "\"");
+    let label = between(link, "<![CDATA[", "]]>").or_else(|| {
+        between(link, "<ac:link-body>", "</ac:link-body>").map(|inner| {
+            let mut text = String::new();
+            let mut in_tag = false;
+            for c in inner.chars() {
+                match c {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    c if !in_tag => text.push(c),
+                    _ => {}
+                }
+            }
+            text
+        })
+    });
+    if let Some(label) = label.filter(|l| !l.trim().is_empty()) {
+        return label;
+    }
+    if link.contains("<ri:user") {
+        let who = attr("ri:username").or_else(|| attr("ri:userkey")).unwrap_or_default();
+        return format!("@{who}");
+    }
+    attr("ri:content-title").or_else(|| attr("ri:filename")).unwrap_or_default()
 }
 
 fn now_millis() -> String {
@@ -506,9 +579,11 @@ impl ConfluenceClient for DcClient {
             .version;
         // The page view's own request (fixtures/dc-inline/create.request.json),
         // less the author fields the server takes from the credentials.
+        let has_links = body.contains("<ac:link");
+        let posted_body = if has_links { without_ac_links(body) } else { body.to_string() };
         let payload = json!({
             "originalSelection": anchor.text,
-            "body": body,
+            "body": posted_body,
             "matchIndex": anchor.match_index.unwrap_or(0),
             "numMatches": anchor.match_count.unwrap_or(1),
             "serializedHighlights": SERIALIZED_HIGHLIGHTS,
@@ -528,8 +603,9 @@ impl ConfluenceClient for DcClient {
                 Err(e) => return Err(self.inline_error("create inline comment", e).await),
             };
         let mut comment = created.into_comment(page);
-        if comment.body_storage.is_empty() {
-            comment.body_storage = body.to_string();
+        comment.body_storage = body.to_string();
+        if has_links {
+            self.put_links_back(&mut comment, body, &posted_body).await;
         }
         if let Some(a) = comment.anchor.as_mut() {
             if a.text.is_empty() {
@@ -553,7 +629,9 @@ impl ConfluenceClient for DcClient {
             .parse::<u64>()
             .map(Into::into)
             .unwrap_or_else(|_| parent.as_str().into());
-        let payload = json!({ "body": body, "commentId": parent_id });
+        let has_links = body.contains("<ac:link");
+        let posted_body = if has_links { without_ac_links(body) } else { body.to_string() };
+        let payload = json!({ "body": posted_body, "commentId": parent_id });
         let path = format!(
             "{INLINE_API}/{}/replies?containerId={}",
             encode(parent.as_str()),
@@ -564,8 +642,9 @@ impl ConfluenceClient for DcClient {
             Err(e) => return Err(self.inline_error("reply to inline comment", e).await),
         };
         let mut comment = created.into_comment(page);
-        if comment.body_storage.is_empty() {
-            comment.body_storage = body.to_string();
+        comment.body_storage = body.to_string();
+        if has_links {
+            self.put_links_back(&mut comment, body, &posted_body).await;
         }
         if comment.parent_comment_id.is_none() {
             comment.parent_comment_id = Some(parent.clone());
@@ -654,6 +733,10 @@ impl ConfluenceClient for DcClient {
 
     async fn server_version(&self) -> ApiResult<Option<String>> {
         Ok(self.cached_version().await)
+    }
+
+    async fn search_users(&self, query: &str, limit: usize) -> ApiResult<Vec<User>> {
+        v1::search_users(&self.http, query, limit).await
     }
 
     async fn search_cql(&self, cql: &str, limit: usize) -> ApiResult<Vec<SearchResult>> {
@@ -760,6 +843,15 @@ mod tests {
             c.page_url(&PageId::new("1001"), "DOCS"),
             "https://wiki.corp/confluence/pages/viewpage.action?pageId=1001"
         );
+    }
+
+    #[test]
+    fn links_become_the_text_a_reader_sees() {
+        let body = "<p>Ask <ac:link><ri:user ri:userkey=\"ff8081\" /></ac:link> about \
+                    <ac:link><ri:page ri:content-title=\"CH-200.1\" /><ac:plain-text-link-body><![CDATA[the spec]]></ac:plain-text-link-body></ac:link> \
+                    and <ac:link><ri:page ri:content-title=\"Glossary\" /></ac:link>.</p>";
+        assert_eq!(without_ac_links(body), "<p>Ask @ff8081 about the spec and Glossary.</p>");
+        assert_eq!(without_ac_links("<p>plain</p>"), "<p>plain</p>");
     }
 
     #[test]

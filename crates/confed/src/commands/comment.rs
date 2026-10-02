@@ -466,6 +466,7 @@ async fn add(
         return Err(ConfedError::usage("the comment body is empty"));
     }
 
+    let mut sidecar_reason: Option<&str> = None;
     // An inline anchor must name one place in the page's text, as Confluence
     // extracts it. Checked against the base copy, so a missing or ambiguous
     // anchor fails before anything is written or sent.
@@ -479,24 +480,21 @@ async fn add(
                 client.flavor()
             )));
         }
-        if !placement.sidecar {
-            // The draft goes into the page body as a mark, at the chosen
-            // occurrence, so repeated text is no obstacle.
-            let (path, _, mut file) = page_file(ctx, &page_id)?;
-            let (start, end) = locate_anchor(&file, anchor_text, placement.occurrence)?;
-            let line = file.body[..start].matches('\n').count() + 1;
-            file.marks.push(confed_convert::Mark {
-                id: MarkId::New,
-                start,
-                end: Some(end),
-                text: anchor_text.to_string(),
-                note: body.clone(),
-                line,
-            });
-            write_atomic(&path, &file.render()?)?;
+        let body_draft = if placement.sidecar {
+            None
+        } else {
+            body_draft(ctx, &page_id, anchor_text, placement.occurrence, &body)?
+        };
+        if body_draft.is_none() && !placement.sidecar {
+            sidecar_reason = Some(
+                "the text cannot carry a mark in the page body (it is inside a ```confluence \
+                 block, reads differently in the Markdown, or the comment is more than one line)",
+            );
+        }
+        if let Some((path, line)) = body_draft {
             let mut human =
                 format!("Added a draft inline comment at line {line} of {}\n", path.display());
-            let mut result = json!({ "page_id": page_id, "draft": true, "body": body, "anchor": anchor_text, "line": line });
+            let mut result = json!({ "page_id": page_id, "draft": true, "body": body, "anchor": anchor_text, "line": line, "written_to": "body" });
             if push {
                 let engine = ctx.engine(client)?;
                 let ws = ctx.workspace_mut()?;
@@ -541,7 +539,17 @@ async fn add(
     write_sidecar(ctx, &page_id, &sidecar)?;
 
     let mut human = format!("Added a draft comment to {}\n", path.display());
-    let mut result = json!({ "page_id": page_id, "draft": true, "body": body });
+    if let Some(reason) = sidecar_reason {
+        let _ = writeln!(human, "  in comments.md, not the page body: {reason}");
+    }
+    let mut result = json!({
+        "page_id": page_id,
+        "draft": true,
+        "body": body,
+        "anchor": anchor,
+        "written_to": "sidecar",
+        "sidecar_reason": sidecar_reason,
+    });
 
     if push {
         let client = ctx.build_client()?;
@@ -668,6 +676,46 @@ fn write_sidecar(ctx: &Context, page_id: &str, sidecar: &comments::Sidecar) -> R
             .map_err(|e| ConfedError::io(format!("creating {}", parent.display()), e))?;
     }
     write_atomic(&path, &comments::render(page_id, &record.title, &records, &drafts))
+}
+
+/// Write an inline draft into the page body as a `<!--c new …-->` mark, and
+/// check it is really there. `None` when it cannot be: a multi-line or `--`
+/// comment (a mark holds one line), text the Markdown reads differently, or a
+/// span inside a ```confluence block, where a mark would be content and is
+/// never written. The caller then uses the sidecar — a draft is never lost.
+fn body_draft(
+    ctx: &Context,
+    page_id: &str,
+    anchor: &str,
+    occurrence: Option<usize>,
+    body: &str,
+) -> Result<Option<(std::path::PathBuf, usize)>> {
+    if body.contains('\n') || body.contains("--") {
+        return Ok(None);
+    }
+    let (path, original, mut file) = page_file(ctx, page_id)?;
+    let Ok((start, end)) = locate_anchor(&file, anchor, occurrence) else { return Ok(None) };
+    let before = file.drafts().count();
+    let line = file.body[..start].matches('\n').count() + 1;
+    file.marks.push(confed_convert::Mark {
+        id: MarkId::New,
+        start,
+        end: Some(end),
+        text: anchor.to_string(),
+        note: body.to_string(),
+        line,
+    });
+    write_atomic(&path, &file.render()?)?;
+
+    let written = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| confed_core::frontmatter::parse(&c, &path.to_string_lossy()).ok())
+        .is_some_and(|f| f.drafts().count() == before + 1);
+    if !written {
+        write_atomic(&path, &original)?;
+        return Ok(None);
+    }
+    Ok(Some((path, line)))
 }
 
 /// Where a body draft goes: the only occurrence of the text, or the one the

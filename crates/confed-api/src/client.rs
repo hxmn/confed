@@ -105,6 +105,9 @@ pub trait ConfluenceClient: Send + Sync {
     /// Delete a comment (and, as Confluence does it, its replies).
     async fn delete_comment(&self, id: &CommentId, kind: CommentKind) -> ApiResult<()>;
 
+    /// People whose name matches `query`, for writing mentions.
+    async fn search_users(&self, query: &str, limit: usize) -> ApiResult<Vec<User>>;
+
     /// The server's product version (`9.5.4`), when it says. Used to warn before
     /// relying on an undocumented API on a release confed was not tested with.
     async fn server_version(&self) -> ApiResult<Option<String>> {

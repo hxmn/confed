@@ -102,6 +102,9 @@ impl From<url::ParseError> for ApiError {
 fn truncate(body: &str) -> String {
     const MAX: usize = 400;
     let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "(the server sent no body)".to_string();
+    }
     if trimmed.len() <= MAX {
         return trimmed.to_string();
     }
