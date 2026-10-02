@@ -41,6 +41,9 @@ pub struct MockClient {
     base_url: String,
     next_id: Arc<AtomicU64>,
     user: User,
+    /// Whether a Data Center inline comment saves a new page version. 9.5.4
+    /// wraps the marker in place; the switch exercises servers that do not.
+    inline_bumps_version: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockClient {
@@ -67,6 +70,7 @@ impl MockClient {
                 Flavor::DataCenter => "https://wiki.mock.test".into(),
             },
             next_id: Arc::new(AtomicU64::new(1000)),
+            inline_bumps_version: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             user: User {
                 account_id: Some("acc-1".into()),
                 username: Some("tester".into()),
@@ -74,6 +78,11 @@ impl MockClient {
                 email: Some("tester@example.com".into()),
             },
         }
+    }
+
+    /// Make a Data Center inline comment save a new page version.
+    pub fn inline_comments_bump_version(&self, bump: bool) {
+        self.inline_bumps_version.store(bump, Ordering::SeqCst);
     }
 
     fn fresh_id(&self) -> String {
@@ -546,6 +555,7 @@ impl ConfluenceClient for MockClient {
         // it in place; Data Center saves a new page version.
         let marker = format!("marker-{}", id.0);
         let data_center = self.capabilities.flavor == Flavor::DataCenter;
+        let bump = data_center && self.inline_bumps_version.load(Ordering::SeqCst);
         let mut state = self.state.lock().expect("mock poisoned");
         let mut anchor = anchor.clone();
         if let Some(p) = state.pages.get_mut(page.as_str()) {
@@ -566,7 +576,7 @@ impl ConfluenceClient for MockClient {
                     anchor.text
                 );
                 p.body.replace_range(pos..pos + anchor.text.len(), &wrapped);
-                if data_center {
+                if bump {
                     p.summary.version += 1;
                     p.history.push(VersionInfo {
                         number: p.summary.version,
@@ -624,6 +634,36 @@ impl ConfluenceClient for MockClient {
         let mut state = self.state.lock().expect("mock poisoned");
         if let Some(c) = state.comments.iter_mut().find(|c| c.id == *id) {
             c.resolved = true;
+        }
+        Ok(())
+    }
+
+    async fn update_comment(
+        &self,
+        id: &CommentId,
+        _kind: CommentKind,
+        body_storage: &str,
+    ) -> ApiResult<()> {
+        self.record(format!("update_comment:{id}"));
+        let mut state = self.state.lock().expect("mock poisoned");
+        let comment = state
+            .comments
+            .iter_mut()
+            .find(|c| c.id == *id)
+            .ok_or_else(|| ApiError::NotFound(format!("comment {id}")))?;
+        comment.body_storage = body_storage.to_string();
+        Ok(())
+    }
+
+    async fn delete_comment(&self, id: &CommentId, _kind: CommentKind) -> ApiResult<()> {
+        self.record(format!("delete_comment:{id}"));
+        let mut state = self.state.lock().expect("mock poisoned");
+        let before = state.comments.len();
+        // Like Confluence: the thread goes with its root. The page keeps its
+        // marker, as Data Center leaves it.
+        state.comments.retain(|c| c.id != *id && c.parent_comment_id.as_ref() != Some(id));
+        if state.comments.len() == before {
+            return Err(ApiError::NotFound(format!("comment {id}")));
         }
         Ok(())
     }
@@ -709,6 +749,7 @@ mod tests {
     #[tokio::test]
     async fn data_center_inline_comments_add_a_version_and_check_the_count() {
         let mock = MockClient::new(Flavor::DataCenter);
+        mock.inline_comments_bump_version(true);
         let id = mock.seed_page("1001", "Page", None, "<p>hi there, hi</p>");
         let anchor = |count| InlineAnchor {
             text: "hi".into(),

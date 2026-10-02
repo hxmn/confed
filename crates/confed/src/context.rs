@@ -250,21 +250,78 @@ impl Context {
     }
 
     /// Resolve a user-supplied page reference (path or id) to a page id.
+    /// The current directory relative to the workspace root (`Handbook 1`),
+    /// or empty at the root or outside it.
+    fn cwd_prefix(&self) -> String {
+        let Ok(ws) = self.workspace() else { return String::new() };
+        let root = ws.root().canonicalize().unwrap_or_else(|_| ws.root().to_path_buf());
+        let cwd = self.cwd.canonicalize().unwrap_or_else(|_| self.cwd.clone());
+        cwd.strip_prefix(&root)
+            .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default()
+    }
+
+    /// A path argument as the workspace knows it. Like git, a path is relative
+    /// to the current directory; one that names nothing there is tried from
+    /// the workspace root, which is how confed always read it.
+    pub fn workspace_path(&self, arg: &str) -> String {
+        let arg = arg.replace('\\', "/");
+        let Ok(ws) = self.workspace() else { return arg };
+        // A page id is not a path.
+        if !arg.is_empty() && arg.chars().all(|c| c.is_ascii_digit()) {
+            return arg;
+        }
+        if std::path::Path::new(&arg).is_absolute() {
+            let root = ws.root().canonicalize().unwrap_or_else(|_| ws.root().to_path_buf());
+            let abs = std::path::Path::new(&arg);
+            let abs = abs.canonicalize().unwrap_or_else(|_| abs.to_path_buf());
+            return abs
+                .strip_prefix(&root)
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .unwrap_or(arg);
+        }
+        let prefix = self.cwd_prefix();
+        if prefix.is_empty() {
+            return normalize_rel(&arg);
+        }
+        let joined = normalize_rel(&format!("{prefix}/{arg}"));
+        let names_something = |p: &str| {
+            !p.is_empty()
+                && (ws.absolute(p).exists()
+                    || ws.absolute(&format!("{p}.md")).exists()
+                    || ws.state().get_page_by_path(p).ok().flatten().is_some()
+                    || ws.state().get_page_by_path(&format!("{p}.md")).ok().flatten().is_some())
+        };
+        // A glob is a pattern, not a file: it is relative to here, like git's.
+        if arg.contains('*') || names_something(&joined) || !names_something(&normalize_rel(&arg)) {
+            joined
+        } else {
+            normalize_rel(&arg)
+        }
+    }
+
+    /// [`Self::workspace_path`] over a list of scope arguments.
+    pub fn workspace_paths(&self, args: &[String]) -> Vec<String> {
+        args.iter().map(|a| self.workspace_path(a)).collect()
+    }
+
     pub fn resolve_page(&self, reference: &str) -> Result<String> {
         let ws = self.workspace()?;
-        let normalized = reference.trim_start_matches("./").replace('\\', "/");
+        let normalized = self.workspace_path(reference);
 
         for candidate in [normalized.clone(), format!("{normalized}.md")] {
             if let Some(record) = ws.state().get_page_by_path(&candidate)? {
                 return Ok(record.page_id);
             }
         }
-        if ws.state().get_page(&normalized)?.is_some() {
-            return Ok(normalized);
-        }
-        // A page that exists on the server but has not been materialized yet.
-        if ws.state().get_remote(&normalized)?.is_some() {
-            return Ok(normalized);
+        for id in [reference.trim(), normalized.as_str()] {
+            if ws.state().get_page(id)?.is_some() {
+                return Ok(id.to_string());
+            }
+            // A page that exists on the server but has not been materialized yet.
+            if ws.state().get_remote(id)?.is_some() {
+                return Ok(id.to_string());
+            }
         }
         // Fall back to the file itself, which knows its own id.
         let path = ws.absolute(&normalized);
@@ -277,6 +334,92 @@ impl Context {
                 }
             }
         }
-        Err(ConfedError::NotFound(format!("no page matching `{reference}`")))
+
+        let prefix = self.cwd_prefix();
+        let looked = if prefix.is_empty() {
+            format!("`{normalized}` from the workspace root")
+        } else {
+            format!("`{normalized}` (from `{prefix}/`) and `{reference}` from the workspace root")
+        };
+        let hint = closest_page(ws, reference)
+            .map(|p| format!("did you mean `{p}`? Paths are relative to the current directory, then the workspace root"))
+            .unwrap_or_else(|| {
+                "paths are relative to the current directory, then the workspace root; \
+                 `confed status` lists every page"
+                    .to_string()
+            });
+        Err(ConfedError::NotFound(format!(
+            "no page matching `{reference}`: looked for {looked}; {hint}"
+        )))
+    }
+}
+
+/// `a/./b/../c` → `a/c`, without touching the filesystem.
+fn normalize_rel(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
+/// The tracked page whose path is nearest to `reference`, for a "did you
+/// mean": same file name first, then the smallest edit distance.
+fn closest_page(ws: &confed_core::workspace::Workspace, reference: &str) -> Option<String> {
+    let pages = ws.state().all_pages().ok()?;
+    let wanted = reference.trim_end_matches(".md").to_lowercase();
+    let name = wanted.rsplit('/').next().unwrap_or(&wanted).to_string();
+    pages
+        .iter()
+        .map(|p| p.local_path.clone())
+        .min_by_key(|path| {
+            let lower = path.trim_end_matches(".md").to_lowercase();
+            let file = lower.rsplit('/').next().unwrap_or(&lower).to_string();
+            (file != name, edit_distance(&file, &name))
+        })
+        .filter(|path| {
+            let lower = path.trim_end_matches(".md").to_lowercase();
+            let file = lower.rsplit('/').next().unwrap_or(&lower).to_string();
+            file == name || edit_distance(&file, &name) <= name.chars().count().max(3) / 3
+        })
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()]
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn relative_paths_normalize() {
+        assert_eq!(normalize_rel("Handbook 1/./Test.md"), "Handbook 1/Test.md");
+        assert_eq!(normalize_rel("Handbook 1/../Other.md"), "Other.md");
+        assert_eq!(normalize_rel("./Test.md"), "Test.md");
+    }
+
+    #[test]
+    fn edit_distance_counts_edits() {
+        assert_eq!(edit_distance("test", "test"), 0);
+        assert_eq!(edit_distance("tset", "test"), 2);
+        assert_eq!(edit_distance("фраза", "фразы"), 1);
     }
 }

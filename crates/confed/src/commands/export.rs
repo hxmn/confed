@@ -16,9 +16,10 @@ pub async fn run(ctx: &mut Context, args: &ExportArgs) -> Result<Output> {
     let mut exported = Vec::new();
     let mut human = String::new();
 
+    let scope = ctx.workspace_paths(&args.paths);
     for page in &pages {
-        if !args.paths.is_empty()
-            && !args.paths.iter().any(|p| {
+        if !scope.is_empty()
+            && !scope.iter().any(|p| {
                 p == &page.page_id || p == &page.local_path || path_matches(p, &page.local_path)
             })
         {

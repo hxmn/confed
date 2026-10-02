@@ -20,6 +20,52 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-02
+
+### Added
+
+- `confed comment edit <id> -m "…"` and `confed comment rm <id>…` change and delete
+  posted comments on the server at once (rm asks first when interactive; `--yes`
+  skips it; replies go with their thread). On Data Center both use the public REST
+  v1 content endpoint.
+- `confed comment reply` and `confed comment resolve` take several ids, and
+  `confed comment resolve --all <page>` resolves every open thread on a page — on
+  Data Center every open inline thread, listing page comments as skipped.
+- A push reports `replies_added` and `comments_resolved` next to `comments_added`,
+  and prints each one. **Changed:** `comments_added` now holds new threads only;
+  replies moved to `replies_added`.
+- `comment list --json` gives every comment `thread_resolved`, and a reply's
+  `resolved` is now its thread's status: a reply has none of its own, and showing
+  `false` in a resolved thread read as "still open". It also lists `orphan_markers`:
+  inline markers in the page that no comment claims, such as those deleted comments
+  leave behind on Data Center. `confed doctor` warns about them.
+- Every command run in a workspace warns — in `--json`, in `warnings` — when
+  `CLAUDE.md`/`AGENTS.md` were written by another confed, naming `confed doctor
+  --fix`, which regenerates them. An upgrade no longer leaves an agent following an
+  old guide unawares.
+- The agent guide now documents comments in full: reading them, every `comment`
+  command, the sidecar draft forms, the push report, the exit codes, the Data Center
+  specifics, and how inline marks read — including that a comment on a paragraph's
+  first word is written one character in (`Ф<!--c …-->раза 2.` is a comment on
+  `Фраза 2.`) and must not be "fixed".
+
+### Changed
+
+- Page arguments are relative to the current directory, like git's: `confed comment
+  add Test.md …` from `Handbook 1/` finds `Handbook 1/Test.md`. A path that names
+  nothing there is still read from the workspace root, so existing scripts keep
+  working, and globs are relative to the current directory. A miss says where it
+  looked and suggests the closest page. This covers every command that takes a page
+  or a path scope (`comment`, `attach`, `log`, `open`, `rm`, `mv`, `new`, `resolve`,
+  `diff`, `push`, `pull`, `export`).
+
+### Fixed
+
+- Two comments on the same text produced crossed marks
+  (`<!--c A--><!--c B-->text<!--/c A--><!--/c B-->`); they now nest, as in storage.
+- The `--anchor` help and the docs said a Data Center inline comment always adds a
+  page version. 9.5.4 wraps the marker in place, without one; confed handles both.
+
 ## [0.5.1] - 2026-10-02
 
 ### Fixed
@@ -250,7 +296,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/hxmn/confed/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/hxmn/confed/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/hxmn/confed/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/hxmn/confed/compare/v0.4.0...v0.4.1

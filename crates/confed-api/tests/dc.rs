@@ -960,3 +960,42 @@ async fn capabilities_advertise_the_data_center_gaps() {
         format!("{}/confluence/pages/viewpage.action?pageId=1001", server.uri())
     );
 }
+
+#[tokio::test]
+async fn a_comment_is_edited_and_deleted_through_rest_v1() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/77"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "77", "type": "comment", "status": "current",
+            "container": { "id": "1001", "type": "page" },
+            "version": { "number": 2 }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/confluence/rest/api/content/77"))
+        .and(body_json(json!({
+            "id": "77",
+            "type": "comment",
+            "version": { "number": 3 },
+            "body": { "storage": { "value": "<p>new</p>", "representation": "storage" } },
+            "container": { "id": "1001", "type": "page" }
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": "77", "type": "comment" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/confluence/rest/api/content/77"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    c.update_comment(&CommentId::new("77"), CommentKind::Inline, "<p>new</p>").await.unwrap();
+    c.delete_comment(&CommentId::new("77"), CommentKind::Inline).await.unwrap();
+}

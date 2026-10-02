@@ -1217,6 +1217,14 @@ mod inline_mark_tests {
     }
 
     #[test]
+    fn two_comments_on_the_same_text_nest() {
+        let storage = "<p>see <ac:inline-comment-marker ac:ref=\"a\"><ac:inline-comment-marker ac:ref=\"b\">this</ac:inline-comment-marker></ac:inline-comment-marker> now</p>";
+        let c =
+            crate::storage_to_markdown(storage, &opts(&[("a", "1", ""), ("b", "2", "")])).unwrap();
+        assert_eq!(c.markdown, "see <!--c 1--><!--c 2-->this<!--/c 2--><!--/c 1--> now\n");
+    }
+
+    #[test]
     fn a_comment_split_across_a_code_span_covers_all_of_it() {
         // Confluence splits one comment into same-ref markers around <code>.
         let storage = "<p>(see <ac:inline-comment-marker ac:ref=\"m\">(</ac:inline-comment-marker><code><ac:inline-comment-marker ac:ref=\"m\">init time</ac:inline-comment-marker></code>) here</p>";

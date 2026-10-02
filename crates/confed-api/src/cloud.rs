@@ -151,6 +151,13 @@ impl CloudClient {
 
 /// A stale `version.number` comes back as 409 on most Cloud tenants, but some
 /// reject it as a 400 whose message merely mentions the version. Both are conflicts.
+fn comment_collection(kind: CommentKind) -> &'static str {
+    match kind {
+        CommentKind::Footer => "footer-comments",
+        CommentKind::Inline => "inline-comments",
+    }
+}
+
 fn as_conflict(err: ApiError) -> ApiError {
     match err {
         ApiError::Server { status, body }
@@ -490,6 +497,23 @@ impl ConfluenceClient for CloudClient {
                 Ok(())
             }
         }
+    }
+
+    async fn update_comment(&self, id: &CommentId, kind: CommentKind, body: &str) -> ApiResult<()> {
+        let path = format!("api/v2/{}/{id}", comment_collection(kind));
+        let current: v2::Comment = self.http.get_json(&path, &[]).await?;
+        let version = current.version.as_ref().and_then(|v| v.number).unwrap_or(1);
+        let payload = json!({
+            "version": { "number": version + 1, "message": "edited with confed" },
+            "body": storage_body(body),
+        });
+        let _: serde_json::Value =
+            self.http.put_json(&path, &payload).await.map_err(as_conflict)?;
+        Ok(())
+    }
+
+    async fn delete_comment(&self, id: &CommentId, kind: CommentKind) -> ApiResult<()> {
+        self.http.delete(&format!("api/v2/{}/{id}", comment_collection(kind))).await
     }
 
     async fn search_cql(&self, cql: &str, limit: usize) -> ApiResult<Vec<SearchResult>> {

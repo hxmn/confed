@@ -23,7 +23,8 @@ pub async fn run(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
     let mut new_path = old_path.clone();
 
     if let Some(destination) = &args.destination {
-        let raw = destination.trim_start_matches("./").trim_end_matches(".md");
+        let destination = ctx.workspace_path(destination);
+        let raw = destination.trim_end_matches(".md");
         let (dir, name) = match raw.rsplit_once('/') {
             Some((dir, name)) => (Some(dir.to_string()), name.to_string()),
             None => (None, raw.to_string()),

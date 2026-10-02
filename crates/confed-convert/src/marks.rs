@@ -421,8 +421,9 @@ fn is_fence_close(line: &str, ch: char, len: usize) -> bool {
 /// not a mark, and would corrupt a raw ```` ```confluence ```` block.
 pub fn apply(body: &str, marks: &[PlacedMark]) -> String {
     let opaque = opaque_ranges(body);
-    let mut inserts: Vec<(usize, u8, String)> = Vec::with_capacity(marks.len() * 2);
-    for m in marks {
+    // (offset, closers before openers, nesting order, text)
+    let mut inserts: Vec<(usize, u8, (i64, i64), String)> = Vec::with_capacity(marks.len() * 2);
+    for (index, m) in marks.iter().enumerate() {
         let (start, end) = (m.start.min(body.len()), m.end.min(body.len()));
         if start > end || !body.is_char_boundary(start) || !body.is_char_boundary(end) {
             continue;
@@ -440,15 +441,18 @@ pub fn apply(body: &str, marks: &[PlacedMark]) -> String {
         if opaque.iter().any(|r| r.blocks(start, end)) {
             continue;
         }
-        inserts.push((start, 1, open_marker(&m.id, &m.note)));
-        inserts.push((end, 0, close_marker(&m.id)));
+        // Spans nest: at one offset the longest span opens first, and a span
+        // that opened later closes first.
+        let index = index as i64;
+        inserts.push((start, 1, (-(end as i64), index), open_marker(&m.id, &m.note)));
+        inserts.push((end, 0, (-(start as i64), -index), close_marker(&m.id)));
     }
-    inserts.sort_by_key(|(offset, order, _)| (*offset, *order));
+    inserts.sort_by_key(|(offset, order, nesting, _)| (*offset, *order, *nesting));
 
     let mut out =
-        String::with_capacity(body.len() + inserts.iter().map(|i| i.2.len()).sum::<usize>());
+        String::with_capacity(body.len() + inserts.iter().map(|i| i.3.len()).sum::<usize>());
     let mut cursor = 0;
-    for (offset, _, text) in inserts {
+    for (offset, _, _, text) in inserts {
         out.push_str(&body[cursor..offset]);
         out.push_str(&text);
         cursor = offset;
@@ -1148,6 +1152,28 @@ mod tests {
                 assert!(s.issues.is_empty(), "{start}..{end}: {marked}");
             }
         }
+    }
+
+    #[test]
+    fn spans_on_the_same_text_nest_instead_of_crossing() {
+        let m = |id: &str, start, end| PlacedMark { id: c(id), start, end, note: String::new() };
+        assert_eq!(
+            apply("x text y\n", &[m("1", 2, 6), m("2", 2, 6)]),
+            "x <!--c 1--><!--c 2-->text<!--/c 2--><!--/c 1--> y\n"
+        );
+        // A span inside another, sharing an edge, still nests.
+        assert_eq!(
+            apply("x text y\n", &[m("1", 2, 4), m("2", 2, 6)]),
+            "x <!--c 2--><!--c 1-->te<!--/c 1-->xt<!--/c 2--> y\n"
+        );
+        assert_eq!(
+            apply("x text y\n", &[m("1", 2, 6), m("2", 4, 6)]),
+            "x <!--c 1-->te<!--c 2-->xt<!--/c 2--><!--/c 1--> y\n"
+        );
+        let s = strip(&apply("x text y\n", &[m("1", 2, 6), m("2", 2, 6)]));
+        assert_eq!(s.body, "x text y\n");
+        assert_eq!(s.marks.len(), 2);
+        assert!(s.marks.iter().all(|k| k.text == "text"));
     }
 
     #[test]

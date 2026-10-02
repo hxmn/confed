@@ -65,10 +65,11 @@ fn collect(ctx: &Context, args: &DiffArgs, against_remote: bool) -> Result<Vec<P
     let base = ws.state().all_pages()?;
     let remote = ws.state().all_remote()?;
 
+    let scope = ctx.workspace_paths(&args.paths);
     let mut out = Vec::new();
     for local in &files {
         let Some(page_id) = local.file.frontmatter.page_id() else { continue };
-        if !in_scope(&args.paths, &local.path, page_id) {
+        if !in_scope(&scope, &local.path, page_id) {
             continue;
         }
         let Some(base_record) = base.iter().find(|b| b.page_id == page_id) else { continue };

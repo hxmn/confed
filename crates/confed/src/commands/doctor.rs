@@ -201,6 +201,29 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
         }
     }
 
+    // --- orphan inline markers --------------------------------------------
+    // Markers in a page that no comment claims, usually left behind when a
+    // comment was deleted. Harmless, but they pile up unseen.
+    let mut orphaned: Vec<String> = Vec::new();
+    for page in ctx.workspace()?.state().all_pages()? {
+        let found = confed_core::sync::orphan_markers(ctx.workspace()?, &page.page_id)?;
+        if !found.is_empty() {
+            orphaned.push(format!("{} ({})", page.local_path, found.len()));
+        }
+    }
+    if orphaned.is_empty() {
+        checks.push(Check::pass("inline markers", "every marker belongs to a comment"));
+    } else {
+        checks.push(Check::warn(
+            "inline markers",
+            format!(
+                "markers with no comment in {}; `confed comment list <page>` shows them \
+                 (remove them by editing the page in Confluence)",
+                orphaned.join(", ")
+            ),
+        ));
+    }
+
     // --- converter self-test ---------------------------------------------
     checks.push(converter_self_test());
 

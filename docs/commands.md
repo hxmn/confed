@@ -399,11 +399,20 @@ immediately.
 |---|---|
 | `comment list <PAGE>` | `--unresolved`, `--inline` |
 | `comment add <PAGE>` | `-m`, `--body <TEXT>`, `--anchor <TEXT>`, `--occurrence <N>`, `--sidecar`, `--push` |
-| `comment reply <COMMENT_ID>` | `-m`, `--body <TEXT>` (required), `--push` |
-| `comment resolve <COMMENT_ID>` | `--push` (on Data Center, inline threads only) |
+| `comment reply <COMMENT_ID>...` | `-m`, `--body <TEXT>` (required), `--push` |
+| `comment resolve <COMMENT_ID>...` | `--all <PAGE>`, `--push` (on Data Center, inline threads only) |
+| `comment edit <COMMENT_ID>` | `-m`, `--body <TEXT>` (required); applied on the server at once |
+| `comment rm <COMMENT_ID>...` | global `--yes` to skip the question; deletes on the server at once, replies included |
 
-Creating an inline comment and resolving a comment do not exist in the Data Center API;
-both exit 9 there with a message saying so.
+`list --json` gives each comment `resolved` and `thread_resolved` (a reply carries its
+thread's status) and the page's `orphan_markers`: inline markers no comment claims.
+A push reports `comments_added`, `replies_added` and `comments_resolved` separately.
+
+On Data Center inline comments go through the server's undocumented inline-comment API;
+page comments cannot be resolved there (exit 9; `resolve --all` lists them as skipped).
+
+Page arguments everywhere are relative to the current directory, like git's, then the
+workspace root; a miss names where it looked and suggests the closest page.
 
 `--anchor` writes the draft into the page body as a `<!--c new …-->` mark around the
 text (see [format.md](format.md#inline-comments-in-the-page-body)). Text that appears

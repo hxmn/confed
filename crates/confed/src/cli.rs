@@ -489,7 +489,9 @@ pub enum CommentCommand {
         /// draft is written into the page body as a `<!--c new …-->` mark. Exit 6
         /// when the text is not on the page, 2 when it appears more than once
         /// and no --occurrence is given. On Data Center this uses the server's
-        /// undocumented inline-comment API, and posting adds a page version.
+        /// undocumented inline-comment API. The server wraps the text in a
+        /// marker, in place or as a new page version; confed takes the change
+        /// in either way, so the page stays unchanged locally.
         #[arg(long)]
         anchor: Option<String>,
         /// Which occurrence of the anchor text is meant, 1-based, when it
@@ -502,19 +504,39 @@ pub enum CommentCommand {
         #[arg(long)]
         push: bool,
     },
-    /// Reply to a comment.
+    /// Reply to one or more comments with the same text.
     Reply {
-        comment_id: String,
+        #[arg(required = true, num_args = 1..)]
+        comment_ids: Vec<String>,
         #[arg(long, short = 'm')]
         body: String,
         #[arg(long)]
         push: bool,
     },
-    /// Mark a comment resolved. On Data Center, inline threads only.
+    /// Resolve threads, by id or every open one on a page. On Data Center,
+    /// inline threads only.
     Resolve {
-        comment_id: String,
+        /// Thread ids to resolve.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        comment_ids: Vec<String>,
+        /// Resolve every open thread on this page (on Data Center, every open
+        /// inline thread; page comments are listed as skipped).
+        #[arg(long, value_name = "PAGE")]
+        all: Option<String>,
         #[arg(long)]
         push: bool,
+    },
+    /// Replace a posted comment's text on the server.
+    Edit {
+        comment_id: String,
+        #[arg(long, short = 'm')]
+        body: String,
+    },
+    /// Delete posted comments on the server, with their replies. Asks first
+    /// when interactive, unless --yes.
+    Rm {
+        #[arg(required = true, num_args = 1..)]
+        comment_ids: Vec<String>,
     },
 }
 

@@ -246,7 +246,8 @@ page view uses (`rest/inlinecomments/1.0`, undocumented; captures of 9.5.4 in
   the page's own character is sent), macro parameters and code excluded, no match
   across blocks. A draft whose paragraph has unpushed edits that cannot be pushed first
   is refused with exit 7 rather than sent.
-- **Creating a comment saves a page version.** After each post confed fetches the page;
+- **Creating a comment may save a page version.** (9.5.4 wraps the marker in place, like
+  Cloud; the version path is kept for releases that do not.) After each post confed fetches the page;
   if the new version is the base plus one and, with the new comment's marker taken out,
   reads the same as the base, it is adopted — base storage and version, the file's
   `confed.version`, and (for an untouched file) the body, re-rendered so file and base

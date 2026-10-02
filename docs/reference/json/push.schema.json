@@ -40,12 +40,22 @@
         },
         "comments_added": {
           "type": "array",
-          "description": "Ids of comments posted from `confed:new` markers in comment sidecars.",
+          "description": "Ids of new top-level comments posted: `confed:new` sidecar drafts without `reply-to`, and `<!--c new …-->` marks in page bodies.",
+          "items": { "type": "string" }
+        },
+        "replies_added": {
+          "type": "array",
+          "description": "Ids of replies posted (`confed:new reply-to=…`, `confed comment reply`).",
+          "items": { "type": "string" }
+        },
+        "comments_resolved": {
+          "type": "array",
+          "description": "Ids of threads resolved (`confed:resolve`, `confed comment resolve`).",
           "items": { "type": "string" }
         },
         "comments_pending": {
           "type": "array",
-          "description": "Comment work a --dry-run found. Absent on a real push, which reports ids in `comments_added`.",
+          "description": "Comment work a --dry-run found. Absent on a real push, which reports ids in `comments_added`, `replies_added` and `comments_resolved`.",
           "items": { "type": "string" }
         },
         "skipped": {

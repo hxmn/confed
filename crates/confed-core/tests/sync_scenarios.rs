@@ -1644,10 +1644,35 @@ both_flavors!(a_deleted_mark_is_re_placed_without_touching_edits, |mut h: Harnes
 // Data Center creates inline comments through its private plugin API, and
 // unlike Cloud each one saves a new page version. The mock does the same.
 
+/// A Data Center that saves a page version for each inline comment, as some
+/// releases do (9.5.4 does not; see `data_center_without_a_version_bump`).
 fn dc_with_page(storage: &str) -> Harness {
     let h = Harness::new(Flavor::DataCenter);
+    h.mock.inline_comments_bump_version(true);
     h.mock.seed_page("1001", "Onboarding", None, storage);
     h
+}
+
+/// DC 9.5.4 wraps the marker without a new page version: the base takes the
+/// new storage, the version stays, and the page is unchanged.
+#[tokio::test]
+async fn data_center_without_a_version_bump() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    h.pull().await;
+    let file = h
+        .read("Onboarding.md")
+        .replace("ask questions", "ask <!--c new Who?-->questions<!--/c new-->");
+    h.write("Onboarding.md", &file);
+    let outcome = h.push().await;
+    assert_eq!(outcome.comments_added.len(), 1);
+    let id = &outcome.comments_added[0];
+    assert_eq!(h.mock.page_version("1001"), Some(1));
+    let base = h.ws.state().get_page("1001").unwrap().unwrap();
+    assert_eq!(base.version, 1);
+    assert!(base.storage_body.contains(&format!("marker-{id}")), "the base has the marker");
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+    assert!(h.read("Onboarding.md").contains(&format!("questions<!--/c {id}-->")));
 }
 
 fn dc_push_opts() -> PushOptions {
@@ -1763,7 +1788,9 @@ async fn data_center_sidecar_drafts_replies_and_resolve() {
     h.write(".Onboarding/comments.md", &sidecar);
 
     let outcome = h.push().await;
-    assert_eq!(outcome.comments_added.len(), 2, "{outcome:?}");
+    assert_eq!(outcome.comments_added.len(), 1, "the inline comment: {outcome:?}");
+    assert_eq!(outcome.replies_added.len(), 1, "the reply: {outcome:?}");
+    assert_eq!(outcome.comments_resolved, vec![root.0.clone()], "the resolve: {outcome:?}");
     let calls = h.mock.calls();
     assert!(calls.iter().any(|c| c == "add_inline_comment:1001"), "{calls:?}");
     assert!(calls.iter().any(|c| c == "add_inline_reply:1001"), "{calls:?}");
@@ -2100,4 +2127,35 @@ async fn an_unpulled_page_deleted_on_the_server_is_not_reported() {
     h.mock.delete_page_directly("1002");
     let outcome = h.pull().await;
     assert!(outcome.deleted.is_empty(), "{:?}", outcome.deleted);
+}
+
+/// A posted comment can be edited and deleted from confed; the sidecar and
+/// the mark layer follow.
+#[tokio::test]
+async fn comments_are_edited_and_deleted_on_the_server() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    let id =
+        h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+    h.pull().await;
+    assert!(h.read("Onboarding.md").contains(&format!("<!--c {id} Alice Ng: Link the template?")));
+
+    h.engine.edit_comment(&mut h.ws, &id.0, "Link the **new** template?").await.unwrap();
+    assert!(h.mock.calls().contains(&format!("update_comment:{id}")));
+    let listed = h.engine.client().list_comments(&confed_api::PageId::new("1001")).await.unwrap();
+    assert!(listed[0].body_storage.contains("<strong>new</strong>"), "{:?}", listed[0]);
+    assert!(h.read(".Onboarding/comments.md").contains("Link the **new** template?"));
+    assert!(h.read("Onboarding.md").contains("Link the **new** template?"), "the preview follows");
+
+    h.engine.delete_comment(&mut h.ws, &id.0).await.unwrap();
+    assert!(h.mock.calls().contains(&format!("delete_comment:{id}")));
+    assert!(!h.read("Onboarding.md").contains("<!--c"), "its mark leaves the body");
+    assert!(!h.read(".Onboarding/comments.md").contains("template"));
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+    // Data Center leaves the marker in the page; it is now an orphan.
+    let orphans = confed_core::sync::orphan_markers(&h.ws, "1001").unwrap();
+    assert_eq!(orphans, vec![("marker-1".to_string(), "first week checklist".to_string())]);
+
+    let err = h.engine.delete_comment(&mut h.ws, "999").await.unwrap_err();
+    assert_eq!(err.exit_code(), confed_core::error::ExitCode::NotFound);
 }

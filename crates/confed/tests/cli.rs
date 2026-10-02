@@ -1320,3 +1320,85 @@ async fn an_inline_comment_on_data_center_leaves_the_tree_clean() {
     assert_eq!(listed["kind"], json!("inline"), "{list}");
     assert_eq!(listed["anchor"]["text"], json!("Welcome"));
 }
+
+/// Like git, a page path is relative to the current directory; one that names
+/// nothing there is read from the workspace root. A miss says where it looked
+/// and suggests the closest page.
+#[tokio::test]
+async fn page_paths_resolve_from_the_current_directory() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let sub = dir.path().join("Team Handbook");
+
+    for reference in ["Onboarding.md", "Onboarding", "./Onboarding.md", CHILD_FILE, "1002"] {
+        let output = run(confed_authed(&sub, &["comment", "list", reference, "--json"]));
+        assert_eq!(exit_code(&output), 0, "{reference}: {}", stderr(&output));
+        assert_eq!(envelope(&output, "comment")["result"]["page_id"], json!(CHILD_PAGE));
+    }
+    let output = run(confed_authed(&sub, &["comment", "list", "../Team Handbook.md", "--json"]));
+    assert_eq!(envelope(&output, "comment")["result"]["page_id"], json!(ROOT_PAGE));
+
+    let output = run(confed_authed(&sub, &["comment", "list", "Onbaording.md"]));
+    assert_eq!(exit_code(&output), 6);
+    let err = stderr(&output);
+    assert!(err.contains("Team Handbook/Onbaording.md"), "says where it looked: {err}");
+    assert!(err.contains("did you mean `Team Handbook/Onboarding.md`"), "suggests: {err}");
+
+    // Scopes too: `diff Onboarding.md` from the subdirectory is that page.
+    std::fs::write(
+        sub.join("Onboarding.md"),
+        read(dir.path(), CHILD_FILE).replace("First week checklist.", "Edited."),
+    )
+    .unwrap();
+    let output = run(confed_authed(&sub, &["diff", "--name-only", "Onboarding.md"]));
+    assert!(stdout(&output).contains(CHILD_FILE), "{}", stdout(&output));
+}
+
+/// After an upgrade, the agent guide describes the old confed; every command
+/// says so, in the JSON warnings an agent reads, until doctor rewrites it.
+#[tokio::test]
+async fn a_stale_agent_guide_is_flagged_on_every_command() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    let guide = dir.path().join("CLAUDE.md");
+    let text = std::fs::read_to_string(&guide).expect("init writes CLAUDE.md");
+    let first = text.lines().next().unwrap().to_string();
+    std::fs::write(&guide, text.replacen(&first, "<!-- confed:agent-docs version=0.4.0 -->", 1))
+        .unwrap();
+
+    let value = envelope(&run(confed_authed(dir.path(), &["status", "--json"])), "status");
+    let warnings = value["warnings"].to_string();
+    assert!(warnings.contains("confed 0.4.0") && warnings.contains("doctor --fix"), "{value}");
+
+    run(confed_authed(dir.path(), &["doctor", "--fix"]));
+    let value = envelope(&run(confed_authed(dir.path(), &["status", "--json"])), "status");
+    assert_eq!(value["warnings"], json!([]), "{value}");
+}
+
+/// A marker in the page that no comment claims is listed, not hidden.
+#[tokio::test]
+async fn markers_without_a_comment_are_reported() {
+    let server = dc_server().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{CHILD_PAGE}")))
+        .respond_with({
+            let mut page = summary(CHILD_PAGE, "Onboarding", Some(ROOT_PAGE), 1);
+            page["body"] = json!({ "storage": { "value": "<p>First <ac:inline-comment-marker ac:ref=\"gone-1\">week</ac:inline-comment-marker> checklist.</p>", "representation": "storage" } });
+            ResponseTemplate::new(200).set_body_json(page)
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+
+    let value = envelope(
+        &run(confed_authed(dir.path(), &["comment", "list", CHILD_FILE, "--json"])),
+        "comment",
+    );
+    assert_eq!(value["result"]["orphan_markers"], json!([{ "ref": "gone-1", "text": "week" }]));
+}

@@ -363,7 +363,8 @@ checklist<!--/c 77120--> before Friday.
   ```
 
   `confed push` creates the comment and rewrites the mark with its id. On Data Center
-  creating it saves a new page version, which confed adopts so the page stays unchanged.
+  the server wraps the text in a marker, in place (9.5.4) or as a new page version;
+  confed takes that change in, so the page stays unchanged.
   Confluence checks the text against its own copy of the page: a draft on a paragraph
   with unpushed edits that cannot be pushed first stops the push with exit 7. The draft is one line and may not contain `--`; a longer body, or a
   span inside a code block, goes through the sidecar's `confed:new anchor="…"` form.

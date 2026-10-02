@@ -95,6 +95,15 @@ pub trait ConfluenceClient: Send + Sync {
         self.add_footer_comment(page, body_storage, Some(parent)).await
     }
     async fn resolve_comment(&self, id: &CommentId) -> ApiResult<()>;
+    /// Replace a comment's body.
+    async fn update_comment(
+        &self,
+        id: &CommentId,
+        kind: CommentKind,
+        body_storage: &str,
+    ) -> ApiResult<()>;
+    /// Delete a comment (and, as Confluence does it, its replies).
+    async fn delete_comment(&self, id: &CommentId, kind: CommentKind) -> ApiResult<()>;
 
     /// The server's product version (`9.5.4`), when it says. Used to warn before
     /// relying on an undocumented API on a release confed was not tested with.

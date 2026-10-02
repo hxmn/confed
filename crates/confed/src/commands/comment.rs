@@ -22,21 +22,123 @@ pub async fn run(ctx: &mut Context, command: &CommentCommand) -> Result<Output> 
             let placement = AnchorPlacement { occurrence: *occurrence, sidecar: *sidecar };
             add(ctx, page, body.as_deref(), anchor.as_deref(), placement, None, *push).await
         }
-        CommentCommand::Reply { comment_id, body, push } => {
-            let page = page_of_comment(ctx, comment_id)?;
-            add(
-                ctx,
-                &page,
-                Some(body),
-                None,
-                AnchorPlacement::default(),
-                Some(comment_id.clone()),
-                *push,
-            )
-            .await
+        CommentCommand::Reply { comment_ids, body, push } => {
+            reply(ctx, comment_ids, body, *push).await
         }
-        CommentCommand::Resolve { comment_id, push } => resolve(ctx, comment_id, *push).await,
+        CommentCommand::Resolve { comment_ids, all, push } => {
+            resolve(ctx, comment_ids, all.as_deref(), *push).await
+        }
+        CommentCommand::Edit { comment_id, body } => edit_comment(ctx, comment_id, body).await,
+        CommentCommand::Rm { comment_ids } => remove(ctx, comment_ids).await,
     }
+}
+
+/// Push comment work now, reporting what the server got.
+async fn push_now(ctx: &mut Context) -> Result<confed_core::sync::PushOutcome> {
+    let client = ctx.build_client()?;
+    let engine = ctx.engine(client)?;
+    let ws = ctx.workspace_mut()?;
+    let _lock = ws.lock()?;
+    engine.push(ws, &PushOptions { with_comments: true, ..Default::default() }).await
+}
+
+fn comment_results(outcome: &confed_core::sync::PushOutcome) -> serde_json::Value {
+    json!({
+        "comments_added": outcome.comments_added,
+        "replies_added": outcome.replies_added,
+        "comments_resolved": outcome.comments_resolved,
+    })
+}
+
+/// Queue the same reply on each thread, then push them together.
+async fn reply(ctx: &mut Context, ids: &[String], body: &str, push: bool) -> Result<Output> {
+    if body.trim().is_empty() {
+        return Err(ConfedError::usage("the comment body is empty"));
+    }
+    let mut queued = Vec::new();
+    for id in ids {
+        let page_id = page_of_comment(ctx, id)?;
+        let path = sidecar_path(ctx, &page_id)?;
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut sidecar = if existing.is_empty() {
+            comments::Sidecar { page_id: page_id.clone(), ..Default::default() }
+        } else {
+            comments::parse(&existing)?
+        };
+        sidecar.comments.push(SidecarComment {
+            id: None,
+            kind: SidecarKind::Footer,
+            reply_to: Some(id.clone()),
+            author: None,
+            date: None,
+            resolved: false,
+            anchor: None,
+            body: body.to_string(),
+        });
+        write_sidecar(ctx, &page_id, &sidecar)?;
+        queued.push(json!({ "reply_to": id, "page_id": page_id }));
+    }
+    let mut result = json!({ "queued": queued, "draft": !push });
+    let human = if push {
+        let outcome = push_now(ctx).await?;
+        result["result"] = comment_results(&outcome);
+        format!(
+            "Posted {}.\n",
+            crate::output::plural(outcome.replies_added.len(), "reply", "replies")
+        )
+    } else {
+        format!(
+            "Queued {}. {}",
+            crate::output::plural(ids.len(), "reply", "replies"),
+            ctx.style.dim("Run `confed push` to post.\n")
+        )
+    };
+    Ok(Output::new(result, human))
+}
+
+/// Edit a posted comment on the server right away.
+async fn edit_comment(ctx: &mut Context, id: &str, body: &str) -> Result<Output> {
+    if body.trim().is_empty() {
+        return Err(ConfedError::usage("the comment body is empty"));
+    }
+    let client = ctx.build_client()?;
+    let engine = ctx.engine(client)?;
+    let ws = ctx.workspace_mut()?;
+    let _lock = ws.lock()?;
+    engine.edit_comment(ws, id, body).await?;
+    Ok(Output::new(json!({ "comment_id": id, "edited": true }), format!("Edited {id}.\n")))
+}
+
+/// Delete posted comments on the server right away.
+async fn remove(ctx: &mut Context, ids: &[String]) -> Result<Output> {
+    for id in ids {
+        page_of_comment(ctx, id)?;
+    }
+    if !ctx.global.yes && ctx.is_interactive() {
+        let question = format!(
+            "Delete {} and their replies on the server?",
+            crate::output::plural(ids.len(), "comment", "comments")
+        );
+        if !crate::prompt::confirm(&question, false)? {
+            return Ok(Output::new(
+                json!({ "deleted": [], "cancelled": true }),
+                "Cancelled: nothing was deleted.\n".to_string(),
+            ));
+        }
+    }
+    let client = ctx.build_client()?;
+    let engine = ctx.engine(client)?;
+    let ws = ctx.workspace_mut()?;
+    let _lock = ws.lock()?;
+    let mut deleted = Vec::new();
+    for id in ids {
+        engine.delete_comment(ws, id).await?;
+        deleted.push(id.clone());
+    }
+    Ok(Output::new(
+        json!({ "deleted": deleted }),
+        format!("Deleted {}.\n", crate::output::plural(deleted.len(), "comment", "comments")),
+    ))
 }
 
 fn sidecar_path(ctx: &Context, page_id: &str) -> Result<std::path::PathBuf> {
@@ -73,10 +175,24 @@ fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Resul
     let records = ctx.workspace()?.state().page_comments(&page_id)?;
     let marks = page_file(ctx, &page_id).map(|(_, _, f)| f.marks).unwrap_or_default();
 
+    // A reply has no status of its own: it is as resolved as its thread.
+    let thread_resolved = |record: &confed_core::state::CommentRecord| {
+        let mut current = record;
+        for _ in 0..records.len() {
+            let Some(parent) = current.parent_comment_id.as_deref() else { break };
+            match records.iter().find(|r| r.comment_id == parent) {
+                Some(p) => current = p,
+                None => break,
+            }
+        }
+        current.resolved
+    };
+
     let mut human = String::new();
     let mut entries = Vec::new();
     for record in &records {
-        if unresolved && record.resolved {
+        let resolved = thread_resolved(record);
+        if unresolved && resolved {
             continue;
         }
         if inline_only && record.kind != "inline" {
@@ -91,7 +207,7 @@ fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Resul
             "{indent}{} {} {}",
             ctx.style.bold(&record.author.clone().unwrap_or_else(|| "unknown".into())),
             ctx.style.dim(&record.created_at.clone().unwrap_or_default()),
-            if record.resolved { ctx.style.green("(resolved)") } else { String::new() }
+            if resolved { ctx.style.green("(resolved)") } else { String::new() }
         );
         let mark = marks
             .iter()
@@ -119,7 +235,8 @@ fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Resul
             "kind": record.kind,
             "author": record.author,
             "created": record.created_at,
-            "resolved": record.resolved,
+            "resolved": resolved,
+            "thread_resolved": resolved,
             "reply_to": record.parent_comment_id,
             "anchor": anchor.map(|a| json!({
                 "text": a.text,
@@ -134,7 +251,27 @@ fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Resul
         human.push_str("No comments.\n");
     }
 
-    Ok(Output::new(json!({ "page_id": page_id, "comments": entries }), human))
+    let orphans = confed_core::sync::orphan_markers(ctx.workspace()?, &page_id)?;
+    if !orphans.is_empty() {
+        let _ = writeln!(
+            human,
+            "{}",
+            ctx.style.yellow(&format!(
+                "{} in the page belong to no comment (left by deleted comments?):",
+                crate::output::plural(orphans.len(), "inline marker", "inline markers")
+            ))
+        );
+        for (r, text) in &orphans {
+            let _ = writeln!(human, "  {} on \"{text}\"", ctx.style.dim(r));
+        }
+    }
+    let orphan_markers: Vec<serde_json::Value> =
+        orphans.iter().map(|(r, text)| json!({ "ref": r, "text": text })).collect();
+
+    Ok(Output::new(
+        json!({ "page_id": page_id, "comments": entries, "orphan_markers": orphan_markers }),
+        human,
+    ))
 }
 
 async fn add(
@@ -256,7 +393,14 @@ async fn add(
     Ok(Output::new(result, human))
 }
 
-async fn resolve(ctx: &mut Context, comment_id: &str, push: bool) -> Result<Output> {
+/// Queue resolves — the ids given, or every open thread on a page — then
+/// push them together.
+async fn resolve(
+    ctx: &mut Context,
+    ids: &[String],
+    all: Option<&str>,
+    push: bool,
+) -> Result<Output> {
     let client = ctx.build_client()?;
     if !client.capabilities().comment_resolve {
         return Err(ConfedError::Unsupported(format!(
@@ -264,28 +408,77 @@ async fn resolve(ctx: &mut Context, comment_id: &str, push: bool) -> Result<Outp
             client.flavor()
         )));
     }
+    let data_center = client.flavor() == confed_api::Flavor::DataCenter;
 
-    let page_id = page_of_comment(ctx, comment_id)?;
-    let path = sidecar_path(ctx, &page_id)?;
-    let mut content = std::fs::read_to_string(&path)
-        .map_err(|e| ConfedError::io(format!("reading {}", path.display()), e))?;
-    if !content.ends_with('\n') {
-        content.push('\n');
+    let mut targets: Vec<(String, String)> = Vec::new(); // (page, id)
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
+    match all {
+        Some(page) => {
+            let page_id = ctx.resolve_page(page)?;
+            for c in ctx.workspace()?.state().page_comments(&page_id)? {
+                if c.parent_comment_id.is_some() || c.resolved {
+                    continue;
+                }
+                if data_center && c.kind != "inline" {
+                    skipped.push(json!({ "id": c.comment_id, "reason": "page comments cannot be resolved on Data Center" }));
+                    continue;
+                }
+                targets.push((page_id.clone(), c.comment_id));
+            }
+        }
+        None => {
+            for id in ids {
+                targets.push((page_of_comment(ctx, id)?, id.clone()));
+            }
+        }
     }
-    content.push_str(&format!("\n<!-- confed:resolve id={comment_id} -->\n"));
-    write_atomic(&path, &content)?;
 
-    let mut human = format!("Marked {comment_id} resolved in the sidecar.\n");
-    if push {
-        let engine = ctx.engine(client)?;
-        let ws = ctx.workspace_mut()?;
-        let _lock = ws.lock()?;
-        engine.push(ws, &PushOptions { with_comments: true, ..Default::default() }).await?;
-        human = format!("Resolved {comment_id}.\n");
+    for (page_id, id) in &targets {
+        let path = sidecar_path(ctx, page_id)?;
+        let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+        if content.contains(&format!("confed:resolve id={id} ")) {
+            continue;
+        }
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(&format!("\n<!-- confed:resolve id={id} -->\n"));
+        write_atomic(&path, &content)?;
+    }
+
+    let ids: Vec<&String> = targets.iter().map(|(_, id)| id).collect();
+    let mut result = json!({ "queued": ids, "skipped": skipped, "draft": !push });
+    let mut human = String::new();
+    for s in &skipped {
+        let _ = writeln!(
+            human,
+            "  skipped  {} — {}",
+            s["id"].as_str().unwrap_or(""),
+            s["reason"].as_str().unwrap_or("")
+        );
+    }
+    if push && !targets.is_empty() {
+        let outcome = push_now(ctx).await?;
+        result["result"] = comment_results(&outcome);
+        for id in &outcome.comments_resolved {
+            let _ = writeln!(human, "  resolved {id}");
+        }
+        let _ = writeln!(
+            human,
+            "Resolved {}.",
+            crate::output::plural(outcome.comments_resolved.len(), "thread", "threads")
+        );
+    } else if targets.is_empty() {
+        human.push_str("No open threads to resolve.\n");
     } else {
-        human.push_str(&ctx.style.dim("Run `confed push` to apply it.\n"));
+        let _ = writeln!(
+            human,
+            "Queued {} in the sidecar. {}",
+            crate::output::plural(targets.len(), "resolve", "resolves"),
+            ctx.style.dim("Run `confed push` to apply.")
+        );
     }
-    Ok(Output::new(json!({ "comment_id": comment_id, "page_id": page_id }), human))
+    Ok(Output::new(result, human))
 }
 
 fn write_sidecar(ctx: &Context, page_id: &str, sidecar: &comments::Sidecar) -> Result<()> {

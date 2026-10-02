@@ -264,13 +264,29 @@ pub struct PushOutcome {
     pub deleted: Vec<PageChange>,
     pub attachments_uploaded: Vec<String>,
     pub attachments_deleted: Vec<String>,
+    /// New top-level comments, page and inline.
     pub comments_added: Vec<String>,
-    /// Comment work a dry run found; a real push reports ids in `comments_added`.
+    /// Replies posted, to either kind of thread.
+    #[serde(default)]
+    pub replies_added: Vec<String>,
+    /// Threads resolved.
+    #[serde(default)]
+    pub comments_resolved: Vec<String>,
+    /// Comment work a dry run found; a real push reports ids in `comments_added`,
+    /// `replies_added` and `comments_resolved`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub comments_pending: Vec<String>,
     pub skipped: Vec<BlockedPage>,
     pub failed: Vec<FailedPage>,
     pub dry_run: bool,
+}
+
+/// What a push did with comments.
+#[derive(Default)]
+struct CommentWork {
+    added: Vec<String>,
+    replies: Vec<String>,
+    resolved: Vec<String>,
 }
 
 // ------------------------------------------------------------ the engine ----
@@ -1519,7 +1535,10 @@ impl SyncEngine {
             self.push_attachments(ws, opts, &plan.attachment_ops, &mut outcome).await?;
         }
         if opts.with_comments {
-            outcome.comments_added = self.push_comments(ws).await?;
+            let work = self.push_comments(ws).await?;
+            outcome.comments_added = work.added;
+            outcome.replies_added = work.replies;
+            outcome.comments_resolved = work.resolved;
         }
 
         self.progress.finish();
@@ -1863,8 +1882,8 @@ impl SyncEngine {
         })
     }
 
-    async fn push_comments(&self, ws: &mut Workspace) -> Result<Vec<String>> {
-        let mut added = Vec::new();
+    async fn push_comments(&self, ws: &mut Workspace) -> Result<CommentWork> {
+        let mut work = CommentWork::default();
         for record in ws.state().all_pages()? {
             let path = ws
                 .absolute(&paths::sidecar_for(&record.local_path))
@@ -1920,7 +1939,11 @@ impl SyncEngine {
                         posted
                     }
                 };
-                added.push(posted.id.0.clone());
+                if posted.parent_comment_id.is_some() {
+                    work.replies.push(posted.id.0.clone());
+                } else {
+                    work.added.push(posted.id.0.clone());
+                }
                 // Posted: out of the sidecar now, so a failure later in this
                 // push cannot post it twice on the retry.
                 sidecar.comments.remove(index);
@@ -1944,6 +1967,7 @@ impl SyncEngine {
                     c.resolved = true;
                     ws.state().upsert_comment(&c)?;
                 }
+                work.resolved.push(id.clone());
                 sidecar.resolve_requests.remove(0);
                 self.rewrite_sidecar(ws, &record, &path, &sidecar)?;
             }
@@ -1953,9 +1977,62 @@ impl SyncEngine {
 
         // Drafts written into page bodies as `new` marks.
         for record in ws.state().all_pages()? {
-            added.extend(self.push_body_drafts(ws, &record).await?);
+            work.added.extend(self.push_body_drafts(ws, &record).await?);
         }
-        Ok(added)
+        Ok(work)
+    }
+
+    /// Replace a posted comment's body on the server, then here.
+    pub async fn edit_comment(
+        &self,
+        ws: &mut Workspace,
+        comment_id: &str,
+        body_markdown: &str,
+    ) -> Result<()> {
+        let (page, mut record) = find_comment(ws, comment_id)?;
+        let storage =
+            confed_convert::markdown_to_storage(body_markdown, &ConvertOptions::default())?;
+        self.client
+            .update_comment(
+                &confed_api::CommentId::new(comment_id),
+                comment_kind(&record),
+                &storage,
+            )
+            .await?;
+        record.body_storage = Some(storage);
+        record.body_markdown = body_markdown.trim().to_string();
+        ws.state().upsert_comment(&record)?;
+        self.refresh_comment_files(ws, &page)
+    }
+
+    /// Delete a posted comment, with its replies, on the server, then here.
+    /// An inline comment's marker may stay in the page on Data Center; `comment
+    /// list` reports such markers as `orphan_markers`.
+    pub async fn delete_comment(&self, ws: &mut Workspace, comment_id: &str) -> Result<()> {
+        let (page, record) = find_comment(ws, comment_id)?;
+        self.client
+            .delete_comment(&confed_api::CommentId::new(comment_id), comment_kind(&record))
+            .await?;
+        for reply in ws.state().page_comments(&page.page_id)? {
+            if reply.parent_comment_id.as_deref() == Some(comment_id) {
+                ws.state().delete_comment(&reply.comment_id)?;
+            }
+        }
+        ws.state().delete_comment(comment_id)?;
+        self.refresh_comment_files(ws, &page)
+    }
+
+    /// Rewrite a page's sidecar and mark layer from the database, keeping
+    /// unpushed drafts.
+    fn refresh_comment_files(&self, ws: &mut Workspace, page: &PageRecord) -> Result<()> {
+        let path =
+            ws.absolute(&paths::sidecar_for(&page.local_path)).join(comments::COMMENTS_FILENAME);
+        let sidecar = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|t| comments::parse(&t).ok())
+            .unwrap_or_default();
+        self.rewrite_sidecar(ws, page, &path, &sidecar)?;
+        sync_marks(ws, &page.page_id, &page.local_path)
     }
 
     fn require_inline_create(&self) -> Result<()> {
@@ -2156,6 +2233,50 @@ impl SyncEngine {
             cache.put_body(page_id, page.summary.version, &page.body_storage)?;
         }
         self.write_storage_copy(ws, &path, &page.body_storage)
+    }
+}
+
+/// Inline-comment markers in a page's base copy that no comment confed knows
+/// claims, as `(ref, text)` — usually left by deleted comments, which Data
+/// Center does not unwrap.
+pub fn orphan_markers(ws: &Workspace, page_id: &str) -> Result<Vec<(String, String)>> {
+    let Some(page) = ws.state().get_page(page_id)? else { return Ok(Vec::new()) };
+    let known: Vec<String> = ws
+        .state()
+        .page_comments(page_id)?
+        .iter()
+        .filter_map(|c| c.anchor.as_deref())
+        .filter_map(|a| serde_json::from_str::<confed_api::InlineAnchor>(a).ok())
+        .filter_map(|a| a.marker_ref)
+        .collect();
+    Ok(confed_convert::selection::marker_refs(&page.storage_body)?
+        .into_iter()
+        .filter(|(r, _)| !known.contains(r))
+        .collect())
+}
+
+/// A comment confed knows, and the page it is on.
+fn find_comment(ws: &Workspace, comment_id: &str) -> Result<(PageRecord, CommentRecord)> {
+    for page in ws.state().all_pages()? {
+        if let Some(c) = ws
+            .state()
+            .page_comments(&page.page_id)?
+            .into_iter()
+            .find(|c| c.comment_id == comment_id)
+        {
+            return Ok((page, c));
+        }
+    }
+    Err(ConfedError::NotFound(format!(
+        "no comment {comment_id}; `confed pull` refreshes comments, `confed comment list <page>` shows them"
+    )))
+}
+
+fn comment_kind(record: &CommentRecord) -> confed_api::CommentKind {
+    if record.kind == "inline" {
+        confed_api::CommentKind::Inline
+    } else {
+        confed_api::CommentKind::Footer
     }
 }
 

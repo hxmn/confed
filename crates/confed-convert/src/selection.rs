@@ -211,6 +211,30 @@ fn context(text: &str, start: usize, end: usize) -> String {
     format!("…{} [{}] {}…", clean(&before), &text[start..end], clean(&after))
 }
 
+/// Every inline-comment marker in storage, as `(ref, text)`, fragments of
+/// one ref joined, in order of first appearance.
+pub fn marker_refs(storage: &str) -> ConvertResult<Vec<(String, String)>> {
+    let nodes = dom::parse_fragment(storage)?;
+    let mut out: Vec<(String, String)> = Vec::new();
+    fn visit(nodes: &[Node], out: &mut Vec<(String, String)>) {
+        for node in nodes {
+            let Node::Element(el) = node else { continue };
+            if el.local() == "inline-comment-marker" {
+                if let Some(r) = el.attr_local("ref") {
+                    let text = el.text();
+                    match out.iter_mut().find(|(known, _)| known == r) {
+                        Some((_, joined)) => joined.push_str(&text),
+                        None => out.push((r.to_string(), text)),
+                    }
+                }
+            }
+            visit(&el.children, out);
+        }
+    }
+    visit(&nodes, &mut out);
+    Ok(out)
+}
+
 /// Remove one comment's `<ac:inline-comment-marker>` wrappers from storage,
 /// keeping what they enclose. Used to check that the only change the server
 /// made when a comment was created was wrapping its selection.
@@ -351,6 +375,15 @@ mod tests {
     fn entities_are_decoded() {
         let s = sel("<p>R&amp;D &mdash; ok</p>", "R&D — ok", None).unwrap();
         assert_eq!(s.text, "R&D — ok");
+    }
+
+    #[test]
+    fn markers_are_listed_with_their_text() {
+        let storage = "<p><ac:inline-comment-marker ac:ref=\"a\">Фраза</ac:inline-comment-marker> 3.<strong><ac:inline-comment-marker ac:ref=\"a\">!</ac:inline-comment-marker></strong> <ac:inline-comment-marker ac:ref=\"b\">x</ac:inline-comment-marker></p>";
+        assert_eq!(
+            marker_refs(storage).unwrap(),
+            vec![("a".to_string(), "Фраза!".to_string()), ("b".to_string(), "x".to_string())]
+        );
     }
 
     #[test]

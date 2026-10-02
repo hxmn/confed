@@ -47,8 +47,33 @@ fn run(cli: Cli) -> Result<Output> {
         _ => {}
     }
 
-    let mut ctx = Context::build(global)?;
+    let ctx = Context::build(global)?;
+    let guide = stale_guide_warning(&ctx, &command);
+    let output = run_in(ctx, command)?;
+    Ok(match guide {
+        Some(warning) => output.warn(warning),
+        None => output,
+    })
+}
 
+/// The agent guide (`CLAUDE.md`/`AGENTS.md`) describes the confed that wrote
+/// it. After an upgrade an agent would follow obsolete rules, so every command
+/// in the workspace says so until it is regenerated.
+fn stale_guide_warning(ctx: &Context, command: &Command) -> Option<String> {
+    if matches!(command, Command::Doctor(_) | Command::Init(_) | Command::Clone(_)) {
+        return None;
+    }
+    let root = ctx.workspace().ok()?.root().to_path_buf();
+    let (_, stale) = commands::agent_docs::audit(&root);
+    let (name, written_by) = stale.first()?;
+    Some(format!(
+        "{name} was written by confed {written_by} and describes that version, not {}; \
+         run `confed doctor --fix` to regenerate it",
+        commands::agent_docs::VERSION
+    ))
+}
+
+fn run_in(mut ctx: Context, command: Command) -> Result<Output> {
     // Purely local commands never touch the network or the keyring.
     match &command {
         Command::Config(args) => return commands::config::run(&mut ctx, args),

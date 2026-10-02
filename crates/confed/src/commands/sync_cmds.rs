@@ -77,8 +77,8 @@ pub mod pull {
         let client = ctx.build_client()?;
         let engine = ctx.engine(client.clone())?;
 
-        let mut scope = args.paths.clone();
-        scope.extend(args.pages.clone());
+        let mut scope = ctx.workspace_paths(&args.paths);
+        scope.extend(ctx.workspace_paths(&args.pages));
 
         // Label and CQL filters resolve to page ids on the server.
         if let Some(label) = &args.label {
@@ -186,7 +186,7 @@ pub mod push {
         let engine = ctx.engine(client)?;
 
         let opts = PushOptions {
-            scope: args.paths.clone(),
+            scope: ctx.workspace_paths(&args.paths),
             dry_run: args.dry_run,
             allow_delete: args.allow_delete,
             allow_attachment_delete: args.allow_delete,
@@ -268,9 +268,26 @@ pub mod push {
             );
         }
 
+        for (label, ids) in [
+            ("comment", &outcome.comments_added),
+            ("reply", &outcome.replies_added),
+            ("resolved", &outcome.comments_resolved),
+        ] {
+            for id in ids {
+                let _ = writeln!(human, "  {label:<8} {id}");
+            }
+        }
+        for op in &outcome.comments_pending {
+            let _ = writeln!(human, "  {:<8} {op}", "would");
+        }
+
         let total = outcome.created.len() + outcome.pushed.len() + outcome.deleted.len();
         let files = outcome.attachments_uploaded.len() + outcome.attachments_deleted.len();
-        if total == 0 && files == 0 && outcome.skipped.is_empty() {
+        let comment_work = outcome.comments_added.len()
+            + outcome.replies_added.len()
+            + outcome.comments_resolved.len()
+            + outcome.comments_pending.len();
+        if total == 0 && files == 0 && comment_work == 0 && outcome.skipped.is_empty() {
             let _ = writeln!(human, "{}", style.green("Nothing to push."));
         } else if !args.dry_run {
             let attachments = if files > 0 {

@@ -618,6 +618,40 @@ impl ConfluenceClient for DcClient {
         Ok(())
     }
 
+    /// Comments are content on Data Center, inline ones included, so the
+    /// public REST v1 content endpoint edits and deletes both.
+    async fn update_comment(
+        &self,
+        id: &CommentId,
+        _kind: CommentKind,
+        body: &str,
+    ) -> ApiResult<()> {
+        let current =
+            self.fetch_content(id.as_str(), &[("expand", "version,container".to_string())]).await?;
+        let container =
+            current.container.as_ref().and_then(|c| c.id.as_ref()).map(|i| i.as_string());
+        let version = current.summary("").version;
+        let mut payload = json!({
+            "id": id.as_str(),
+            "type": "comment",
+            "version": { "number": version + 1 },
+            "body": storage_body(body),
+        });
+        if let Some(page) = container {
+            payload["container"] = json!({ "id": page, "type": "page" });
+        }
+        let _: v1::Content = self
+            .http
+            .put_json(&format!("rest/api/content/{id}"), &payload)
+            .await
+            .map_err(as_conflict)?;
+        Ok(())
+    }
+
+    async fn delete_comment(&self, id: &CommentId, _kind: CommentKind) -> ApiResult<()> {
+        self.http.delete(&format!("rest/api/content/{id}")).await
+    }
+
     async fn server_version(&self) -> ApiResult<Option<String>> {
         Ok(self.cached_version().await)
     }
