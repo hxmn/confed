@@ -20,6 +20,18 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-10-05
+
+### Fixed
+
+- confed no longer built on its minimum supported Rust, 1.85: newer releases of several
+  dependencies (`darling`, `globset`, the ICU crates, `instability`, `idna_adapter`)
+  need 1.86–1.88, and `wiremock` 0.6.5, a test dependency, uses newer syntax without
+  saying so. Dependencies are resolved again to versions that support 1.85.
+- The workspace uses Cargo's version-aware resolver (`resolver = "3"`), so a future
+  `cargo update` keeps to the declared minimum on its own; `wiremock` is held below 0.6.5,
+  which the resolver cannot know about.
+
 ## [0.7.2] - 2026-10-05
 
 ### Fixed
@@ -459,7 +471,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/hxmn/confed/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/hxmn/confed/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/hxmn/confed/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/hxmn/confed/compare/v0.6.5...v0.7.0

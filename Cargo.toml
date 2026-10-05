@@ -1,5 +1,7 @@
 [workspace]
-resolver = "2"
+# "3" resolves dependencies to versions that support `rust-version`, so a
+# `cargo update` cannot quietly raise the minimum supported Rust.
+resolver = "3"
 members = [
     "crates/confed",
     "crates/confed-api",
@@ -8,16 +10,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.2"
+version = "0.7.3"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hxmn/confed"
 
 [workspace.dependencies]
-confed-api = { path = "crates/confed-api", version = "0.7.2" }
-confed-convert = { path = "crates/confed-convert", version = "0.7.2" }
-confed-core = { path = "crates/confed-core", version = "0.7.2" }
+confed-api = { path = "crates/confed-api", version = "0.7.3" }
+confed-convert = { path = "crates/confed-convert", version = "0.7.3" }
+confed-core = { path = "crates/confed-core", version = "0.7.3" }
 
 anyhow = "1"
 async-trait = "0.1"
@@ -63,7 +65,9 @@ zstd = "0.13"
 
 insta = { version = "1", features = ["json", "yaml", "filters"] }
 proptest = "1"
-wiremock = "0.6"
+# 0.6.5 needs a newer Rust than our minimum and does not declare it, so the
+# resolver cannot know; keep below it until `rust-version` moves past 1.87.
+wiremock = ">=0.6.4, <0.6.5"
 
 [profile.dev]
 incremental = false
