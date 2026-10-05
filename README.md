@@ -119,7 +119,7 @@ confed was designed to be driven by coding agents as much as by people.
 ```console
 $ confed status --json
 {
-  "confed": { "schema": 1, "version": "0.7.3", "command": "status", "ok": true, "exit_code": 0 },
+  "confed": { "schema": 1, "version": "0.7.4", "command": "status", "ok": true, "exit_code": 0 },
   "result": {
     "clean": false,
     "pages": [
@@ -204,7 +204,7 @@ names, hosts or content from the Confluence instances confed is tested against.
 
 ## 📍 Status
 
-**0.7.3**, and complete enough for daily use: both API clients, the converter, the
+**0.7.4**, and complete enough for daily use: both API clients, the converter, the
 sync engine, comments, the full command set and the TUI are implemented and tested.
 [CHANGELOG.md](CHANGELOG.md) records every release. Not there yet: prebuilt binaries
 and a crates.io release — install from source for now.

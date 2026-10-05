@@ -20,6 +20,19 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-05
+
+### Security
+
+- `quick-xml`, which parses every page body confed receives, is upgraded from 0.38 to
+  0.41, fixing two denial-of-service advisories: unbounded allocation on namespace
+  declarations (RUSTSEC-2026-0195) and quadratic time on duplicate attribute checks
+  (RUSTSEC-2026-0194).
+- The Markdown parser no longer pulls in syntax highlighting or its own command-line
+  tool, neither of which confed uses. That removes `time` (stack-exhaustion
+  denial of service, RUSTSEC-2026-0009) and the unmaintained `bincode` and `yaml-rust`
+  from the build, along with about 40 other crates.
+
 ## [0.7.3] - 2026-10-05
 
 ### Fixed
@@ -471,7 +484,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/hxmn/confed/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/hxmn/confed/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/hxmn/confed/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/hxmn/confed/compare/v0.7.0...v0.7.1

@@ -52,6 +52,11 @@ jobs:
   audit:
     name: dependency audit
     runs-on: ubuntu-latest
+    # audit-check reports through a check run, which the default read-only
+    # token may not create.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
