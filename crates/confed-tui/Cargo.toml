@@ -1,0 +1,27 @@
+[package]
+name = "confed-tui"
+description = "The interactive terminal views of confed, the offline-first Confluence editor"
+readme = "README.md"
+keywords = ["confluence", "markdown", "tui", "terminal"]
+categories = ["command-line-utilities"]
+homepage.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+confed-api.workspace = true
+confed-cli.workspace = true
+confed-core.workspace = true
+
+crossterm.workspace = true
+ratatui.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

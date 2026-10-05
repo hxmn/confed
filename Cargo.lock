@@ -571,33 +571,20 @@ dependencies = [
 
 [[package]]
 name = "confed"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "clap_complete",
- "confed-api",
- "confed-convert",
- "confed-core",
- "crossterm 0.29.0",
- "futures",
+ "confed-cli",
+ "confed-tui",
  "insta",
- "ratatui",
- "serde",
  "serde_json",
- "similar",
  "tempfile",
  "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
  "wiremock",
 ]
 
 [[package]]
 name = "confed-api"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -618,8 +605,48 @@ dependencies = [
 ]
 
 [[package]]
-name = "confed-convert"
-version = "0.7.5"
+name = "confed-cli"
+version = "0.8.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "confed-api",
+ "confed-cloud",
+ "confed-converter",
+ "confed-core",
+ "confed-dc",
+ "crossterm 0.29.0",
+ "futures",
+ "insta",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "confed-cloud"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "confed-api",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "confed-converter"
+version = "0.8.0"
 dependencies = [
  "comrak",
  "insta",
@@ -637,11 +664,11 @@ dependencies = [
 
 [[package]]
 name = "confed-core"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "confed-api",
- "confed-convert",
+ "confed-converter",
  "diffy",
  "futures",
  "globset",
@@ -663,6 +690,38 @@ dependencies = [
  "uuid",
  "walkdir",
  "zstd",
+]
+
+[[package]]
+name = "confed-dc"
+version = "0.8.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "confed-api",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "confed-tui"
+version = "0.8.0"
+dependencies = [
+ "confed-api",
+ "confed-cli",
+ "confed-core",
+ "crossterm 0.29.0",
+ "ratatui",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

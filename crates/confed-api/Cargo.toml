@@ -1,6 +1,6 @@
 [package]
 name = "confed-api"
-description = "Confluence Cloud and Data Center API clients for confed"
+description = "The Confluence client contract shared by confed's Cloud and Data Center clients: trait, types, HTTP, REST v1 formats and a test mock"
 readme = "README.md"
 keywords = ["confluence", "atlassian", "api", "client", "rest"]
 categories = ["api-bindings", "web-programming::http-client"]

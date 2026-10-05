@@ -23,7 +23,7 @@ use crate::worktree::{self, LocalFile, PageState, PageStatus};
 use confed_api::{
     BodyFormat, Comment, CommentKind, ConfluenceClient, NewPage, Page, PageId, PageUpdate, SpaceId,
 };
-use confed_convert::{
+use confed_converter::{
     marks, BlockMap, ConvertOptions, InlineMark, Mark, MarkId, MarkIssue, PlacedMark,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -552,7 +552,7 @@ impl SyncEngine {
         let mut wanted: Vec<(String, String)> = Vec::new();
         for remote in ws.state().all_remote()? {
             let Some(body) = &remote.storage_body else { continue };
-            for (attr, id) in confed_convert::user_references(body) {
+            for (attr, id) in confed_converter::user_references(body) {
                 if !wanted.iter().any(|(_, existing)| existing == &id) {
                     wanted.push((attr, id));
                 }
@@ -921,7 +921,7 @@ impl SyncEngine {
         if opts.with_comments {
             convert_opts.inline_marks = inline_marks_for(ws, &remote.page_id);
         }
-        let converted = confed_convert::storage_to_markdown(&storage, &convert_opts)?;
+        let converted = confed_converter::storage_to_markdown(&storage, &convert_opts)?;
 
         let body = body_override.unwrap_or(converted.markdown);
         let file = self.build_file(ws, remote, placement, local, body)?;
@@ -1062,9 +1062,9 @@ impl SyncEngine {
 
         let convert_opts = convert_options(ws, &placement.path, links);
         let base_md =
-            confed_convert::storage_to_markdown(&base_record.storage_body, &convert_opts)?;
+            confed_converter::storage_to_markdown(&base_record.storage_body, &convert_opts)?;
         let remote_storage = remote.storage_body.clone().unwrap_or_default();
-        let remote_md = confed_convert::storage_to_markdown(&remote_storage, &convert_opts)?;
+        let remote_md = confed_converter::storage_to_markdown(&remote_storage, &convert_opts)?;
 
         let label = RemoteLabel {
             version: Some(remote.version),
@@ -1720,7 +1720,7 @@ impl SyncEngine {
 
                 let parent_id = self.resolve_parent(ws, &path, &file, created_ids)?;
                 let convert_opts = page_convert_options(ws, &path);
-                let storage = confed_convert::markdown_to_storage(&file.body, &convert_opts)?;
+                let storage = confed_converter::markdown_to_storage(&file.body, &convert_opts)?;
 
                 let created = self
                     .client
@@ -1825,14 +1825,14 @@ impl SyncEngine {
         new_body: &str,
         opts: &ConvertOptions,
     ) -> Result<String> {
-        let base_md = confed_convert::storage_to_markdown(&base.storage_body, opts)?;
+        let base_md = confed_converter::storage_to_markdown(&base.storage_body, opts)?;
         let block_map: BlockMap = base
             .block_map
             .as_deref()
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_else(|| base_md.block_map.clone());
 
-        match confed_convert::markdown_to_storage_patched(
+        match confed_converter::markdown_to_storage_patched(
             &base.storage_body,
             &block_map,
             &base_md.markdown,
@@ -1840,7 +1840,7 @@ impl SyncEngine {
             opts,
         ) {
             Ok(storage) => Ok(storage),
-            Err(confed_convert::ConvertError::StaleBlockMap(reason)) => {
+            Err(confed_converter::ConvertError::StaleBlockMap(reason)) => {
                 // Falling back means the whole document is regenerated, so blocks
                 // the user never touched may be rewritten. Say so rather than
                 // silently reformatting the page.
@@ -1849,7 +1849,7 @@ impl SyncEngine {
                     page = %base.page_id, %reason,
                     "block map unusable; regenerating the whole body"
                 );
-                Ok(confed_convert::markdown_to_storage(new_body, opts)?)
+                Ok(confed_converter::markdown_to_storage(new_body, opts)?)
             }
             Err(e) => Err(e.into()),
         }
@@ -1907,7 +1907,7 @@ impl SyncEngine {
     ) -> Result<()> {
         let summary = &page.summary;
         let convert_opts = page_convert_options(ws, path);
-        let converted = confed_convert::storage_to_markdown(&page.body_storage, &convert_opts)?;
+        let converted = confed_converter::storage_to_markdown(&page.body_storage, &convert_opts)?;
 
         let mut file = local.clone();
         file.frontmatter.managed = Some(Managed {
@@ -1993,7 +1993,7 @@ impl SyncEngine {
 
             while let Some(index) = sidecar.comments.iter().position(|c| c.is_draft()) {
                 let draft = sidecar.comments[index].clone();
-                let storage = confed_convert::markdown_to_storage(
+                let storage = confed_converter::markdown_to_storage(
                     &draft.body,
                     &comment_convert_options(ws, &record.local_path),
                 )?;
@@ -2161,7 +2161,7 @@ impl SyncEngine {
                 op.page_id.as_deref().map(|id| ws.state().get_page(id)).transpose()?.flatten();
             let storage = match base {
                 Some(base) => self.build_storage(&base, &file.marked_body(), &convert_opts)?,
-                None => confed_convert::markdown_to_storage(&file.body, &convert_opts)?,
+                None => confed_converter::markdown_to_storage(&file.body, &convert_opts)?,
             };
             out.push(StoragePreview {
                 page_id: op.page_id.clone().unwrap_or_default(),
@@ -2185,7 +2185,7 @@ impl SyncEngine {
                     page_id: record.page_id.clone(),
                     path: record.local_path.clone(),
                     what,
-                    storage: confed_convert::markdown_to_storage(markdown, &convert_opts)?,
+                    storage: confed_converter::markdown_to_storage(markdown, &convert_opts)?,
                 });
                 Ok(())
             };
@@ -2241,7 +2241,7 @@ impl SyncEngine {
         body_markdown: &str,
     ) -> Result<()> {
         let (page, mut record) = find_comment(ws, comment_id)?;
-        let storage = confed_convert::markdown_to_storage(
+        let storage = confed_converter::markdown_to_storage(
             body_markdown,
             &comment_convert_options(ws, &page.local_path),
         )?;
@@ -2396,7 +2396,7 @@ impl SyncEngine {
 
             let body = draft.draft_body().unwrap_or_default();
             let storage =
-                confed_convert::markdown_to_storage(body, &comment_convert_options(ws, &path))?;
+                confed_converter::markdown_to_storage(body, &comment_convert_options(ws, &path))?;
             let posted = self
                 .client
                 .add_inline_comment(&PageId::new(&record.page_id), &anchor, &storage)
@@ -2444,7 +2444,7 @@ impl SyncEngine {
         if page.summary.version != base.version {
             let marker = posted.anchor.as_ref().and_then(|a| a.marker_ref.as_deref());
             let unmarked = match marker {
-                Some(r) => confed_convert::selection::strip_marker(&page.body_storage, r)?,
+                Some(r) => confed_converter::selection::strip_marker(&page.body_storage, r)?,
                 None => page.body_storage.clone(),
             };
             let same = unmarked == base.storage_body
@@ -2460,7 +2460,7 @@ impl SyncEngine {
             }
         }
 
-        let converted = confed_convert::storage_to_markdown(&page.body_storage, &opts)?;
+        let converted = confed_converter::storage_to_markdown(&page.body_storage, &opts)?;
         let mut updated = base.clone();
         updated.storage_body = page.body_storage.clone();
         updated.storage_hash = hash_str(&page.body_storage);
@@ -2517,7 +2517,7 @@ pub fn orphan_markers(ws: &Workspace, page_id: &str) -> Result<Vec<(String, Stri
         .filter_map(|a| serde_json::from_str::<confed_api::InlineAnchor>(a).ok())
         .filter_map(|a| a.marker_ref)
         .collect();
-    Ok(confed_convert::selection::marker_refs(&page.storage_body)?
+    Ok(confed_converter::selection::marker_refs(&page.storage_body)?
         .into_iter()
         .filter(|(r, _)| !known.contains(r))
         .collect())
@@ -2606,8 +2606,8 @@ fn local_body(ws: &Workspace, path: &str) -> Option<String> {
 
 /// How many times `text` occurs in the server's page text.
 fn server_occurrences(storage: &str, text: &str) -> usize {
-    match confed_convert::selection::select(storage, text, Some(usize::MAX)) {
-        Ok(Err(confed_convert::selection::SelectionError::OutOfRange { count })) => count,
+    match confed_converter::selection::select(storage, text, Some(usize::MAX)) {
+        Ok(Err(confed_converter::selection::SelectionError::OutOfRange { count })) => count,
         Ok(Ok(sel)) => sel.match_count,
         _ => 0,
     }
@@ -2625,7 +2625,7 @@ pub fn server_selection(
     local: Option<&str>,
     path: &str,
 ) -> Result<confed_api::InlineAnchor> {
-    use confed_convert::selection::{select, SelectionError};
+    use confed_converter::selection::{select, SelectionError};
     match select(storage, text, occurrence)? {
         Ok(sel) => Ok(confed_api::InlineAnchor {
             text: sel.text,
@@ -2649,11 +2649,11 @@ pub fn server_selection(
 /// The exit a selection problem deserves: 6 for text that is not there, 2 for
 /// a request that has to say more.
 pub fn selection_error(
-    e: confed_convert::selection::SelectionError,
+    e: confed_converter::selection::SelectionError,
     text: &str,
     path: &str,
 ) -> ConfedError {
-    use confed_convert::selection::SelectionError;
+    use confed_converter::selection::SelectionError;
     match e {
         SelectionError::NotFound { in_macro: true } => ConfedError::NotFound(format!(
             "\"{text}\" in {path} is only inside a macro or code block, where Confluence \
@@ -2756,7 +2756,7 @@ fn comment_record(page_id: &str, comment: &Comment) -> CommentRecord {
         author: comment.author.clone(),
         created_at: comment.created_at.clone(),
         body_storage: Some(comment.body_storage.clone()),
-        body_markdown: confed_convert::storage_fragment_to_markdown(&comment.body_storage)
+        body_markdown: confed_converter::storage_fragment_to_markdown(&comment.body_storage)
             .unwrap_or_else(|_| comment.body_storage.clone()),
         resolved: comment.resolved,
         anchor: comment.anchor.as_ref().and_then(|a| serde_json::to_string(a).ok()),
@@ -2929,7 +2929,7 @@ pub fn page_convert_options(ws: &Workspace, page_path: &str) -> ConvertOptions {
 /// TUI's diff pane — must go through here, or every open inline comment shows
 /// up as a change.
 pub fn comparable_markdown(storage: &str, opts: &ConvertOptions) -> Result<String> {
-    let markdown = confed_convert::storage_to_markdown(storage, opts)?.markdown;
+    let markdown = confed_converter::storage_to_markdown(storage, opts)?.markdown;
     Ok(marks::strip(&markdown).body)
 }
 
@@ -2971,7 +2971,7 @@ fn convert_options(ws: &Workspace, path: &str, links: &HashMap<String, String>) 
         .map(|u| {
             (
                 u.id.clone(),
-                confed_convert::UserLink {
+                confed_converter::UserLink {
                     display_name: u.display_name,
                     profile_url: u.profile_url,
                     id_attr: u.id_attr,
@@ -3272,9 +3272,9 @@ fn link_map(placements: &HashMap<String, Placement>) -> HashMap<String, String> 
 /// changing: the converter's rules improve, or somebody the page mentions
 /// becomes resolvable. Both belong in one value, so pull has a single question
 /// to ask rather than a growing list of special cases.
-pub fn render_key(storage: &str, users: &HashMap<String, confed_convert::UserLink>) -> String {
-    let mut parts = vec![format!("converter={}", confed_convert::CONVERTER_VERSION)];
-    let mut mentioned: Vec<String> = confed_convert::user_references(storage)
+pub fn render_key(storage: &str, users: &HashMap<String, confed_converter::UserLink>) -> String {
+    let mut parts = vec![format!("converter={}", confed_converter::CONVERTER_VERSION)];
+    let mut mentioned: Vec<String> = confed_converter::user_references(storage)
         .into_iter()
         .map(|(_, id)| match users.get(&id) {
             Some(user) => format!("{id}={}|{}", user.display_name, user.profile_url),
@@ -3332,10 +3332,10 @@ fn move_sidecar(old: &Path, new: &Path) {
 ///
 /// The file exists to be read and diffed, and Confluence ships a page body as a
 /// single line thousands of bytes long. Formatting only moves whitespace between
-/// block-level siblings — see [`confed_convert::pretty`] — and nothing reads the
+/// block-level siblings — see [`confed_converter::pretty`] — and nothing reads the
 /// file back, so the sidecar stays a faithful copy of what the server has.
 fn storage_file_text(storage: &str) -> String {
-    let body = confed_convert::pretty::format(storage);
+    let body = confed_converter::pretty::format(storage);
     if body.is_empty() {
         return body;
     }

@@ -241,7 +241,7 @@ page view uses (`rest/inlinecomments/1.0`, undocumented; captures of 9.5.4 in
 
 - **The selection is the server's.** `originalSelection`, `matchIndex` and `numMatches`
   are checked against the server's own text extraction (HTTP 412 on a mismatch). confed
-  computes them from the page's current storage (`confed_convert::selection`): text
+  computes them from the page's current storage (`confed_converter::selection`): text
   nodes with entities decoded, `&nbsp;` kept as U+00A0 (a typed space matches it, and
   the page's own character is sent), macro parameters and code excluded, no match
   across blocks. A draft whose paragraph has unpushed edits that cannot be pushed first

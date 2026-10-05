@@ -5,12 +5,16 @@ resolver = "3"
 members = [
     "crates/confed",
     "crates/confed-api",
-    "crates/confed-convert",
+    "crates/confed-cli",
+    "crates/confed-cloud",
+    "crates/confed-converter",
     "crates/confed-core",
+    "crates/confed-dc",
+    "crates/confed-tui",
 ]
 
 [workspace.package]
-version = "0.7.5"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -18,9 +22,13 @@ repository = "https://github.com/hxmn/confed"
 homepage = "https://github.com/hxmn/confed"
 
 [workspace.dependencies]
-confed-api = { path = "crates/confed-api", version = "0.7.5" }
-confed-convert = { path = "crates/confed-convert", version = "0.7.5" }
-confed-core = { path = "crates/confed-core", version = "0.7.5" }
+confed-api = { path = "crates/confed-api", version = "0.8.0" }
+confed-cli = { path = "crates/confed-cli", version = "0.8.0" }
+confed-cloud = { path = "crates/confed-cloud", version = "0.8.0" }
+confed-converter = { path = "crates/confed-converter", version = "0.8.0" }
+confed-core = { path = "crates/confed-core", version = "0.8.0" }
+confed-dc = { path = "crates/confed-dc", version = "0.8.0" }
+confed-tui = { path = "crates/confed-tui", version = "0.8.0" }
 
 anyhow = "1"
 async-trait = "0.1"

@@ -1,9 +1,0 @@
----
-source: crates/confed-convert/tests/golden.rs
----
-Paragraph md 0..2 storage 0..100
-Paragraph md 2..4 storage 101..140
-Paragraph md 4..6 storage 141..180
-Paragraph md 6..8 storage 181..213
-Paragraph md 8..10 storage 214..282
-Paragraph md 10..11 storage 283..335

@@ -12,32 +12,51 @@ command model (`fetch` / `pull` / `push` / `diff` / `status`).
 confed/
 ├── Cargo.toml                  # workspace
 ├── crates/
-│   ├── confed-api/             # ConfluenceClient trait + Cloud/DC impls, HTTP stack
-│   ├── confed-convert/         # storage-format (XHTML) ⇄ Markdown converter
+│   ├── confed/                 # the app: the `confed` binary, wiring only
+│   ├── confed-cli/             # clap CLI, the commands, output (human/JSON), context
+│   ├── confed-tui/             # interactive terminal views (ratatui)
 │   ├── confed-core/            # domain model, state DBs, sync engine, config resolution
-│   └── confed/                 # binary: clap CLI, output (human/JSON), TUI (ratatui)
+│   ├── confed-converter/       # storage-format (XHTML) ⇄ Markdown converter
+│   ├── confed-api/             # ConfluenceClient trait, types, HTTP, REST v1 formats, mock
+│   ├── confed-dc/              # Data Center client (REST v1 + inline-comment API)
+│   └── confed-cloud/           # Cloud client (REST v2)
 └── docs/
 ```
 
 Why a workspace and not one crate:
 
-- **Testability**: `confed-convert` is pure (no IO) and gets heavy snapshot testing;
-  `confed-api` is tested against `wiremock` in isolation; `confed-core` is tested with a
-  mock `ConfluenceClient`. Clean crate boundaries enforce those seams.
+- **Testability**: `confed-converter` is pure (no IO) and gets heavy snapshot testing;
+  `confed-dc` and `confed-cloud` are tested against `wiremock` in isolation;
+  `confed-core` is tested with the mock `ConfluenceClient` from `confed-api`. Clean
+  crate boundaries enforce those seams.
 - **Compile times**: the converter and the TUI are the two heavy dependency trees; they
   rebuild independently.
-- **Dependency direction is one-way**: `confed` → `confed-core` → {`confed-api`,
-  `confed-convert`}. `confed-api` and `confed-convert` do not know about each other or
-  about SQLite.
+- **Dependency direction is one-way**:
+
+  ```
+  confed ──▶ confed-tui ──▶ confed-cli ──▶ confed-core ──▶ confed-converter
+     │                          │               └────────▶ confed-api
+     └──────────▶ confed-cli    └──▶ confed-dc, confed-cloud ──▶ confed-api
+  ```
+
+  The engine (`confed-core`) knows only the `ConfluenceClient` trait; the CLI picks the
+  concrete client. `confed-cli` does not depend on the TUI: the app hands it
+  `confed_tui::run` to start `confed tui`, because the TUI builds on the CLI's context
+  and commands. `confed-api` and `confed-converter` know nothing of each other or of
+  SQLite.
 
 ### Module map
 
 | Crate | Modules | Responsibility |
 |---|---|---|
-| `confed-api` | `client` (trait), `cloud`, `dc`, `auth`, `retry`, `paginate`, `types` | All HTTP; API-flavor abstraction |
-| `confed-convert` | `storage_parse`, `to_markdown`, `to_storage`, `macros`, `blockmap`, `frontmatter` | Content conversion, macro preservation, block map |
+| `confed` | `main` | The binary; wires the CLI and the TUI together |
+| `confed-cli` | `cli`, `commands/*`, `context`, `output` (human+JSON envelope), `prompt`, `progress`, `changelog` | Commands and their output; no business logic |
+| `confed-tui` | `app`, `tree`, `pane`, `conflict`, `ui`, `term` | Interactive views over the same engine calls |
 | `confed-core` | `config`, `session`, `state`, `worktree`, `sync`, `merge`, `slug`, `comments`, `attachments` | State machine, DBs, filesystem mapping |
-| `confed` | `cli`, `commands/*`, `output` (human+JSON envelope), `tui/*`, `prompt` | UX layer only; no business logic |
+| `confed-converter` | `storage_parse`, `to_markdown`, `to_storage`, `macros`, `blockmap`, `marks`, `selection` | Content conversion, macro preservation, block map |
+| `confed-api` | `client` (trait), `types`, `error`, `http`, `paginate`, `secret`, `wire::v1`, `mock` | The client contract and what both clients share |
+| `confed-dc` | `lib` (`DcClient`), `inline` | Data Center: REST v1 and the inline-comment API |
+| `confed-cloud` | `lib` (`CloudClient`), `v2` | Cloud: REST v2 (and v1 where v2 has no equivalent) |
 
 ## 2. Client abstraction: Cloud vs Data Center
 

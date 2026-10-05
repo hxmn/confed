@@ -67,21 +67,22 @@ Every change that reaches the binary is a release:
    dependency versions beside it (semver; before 1.0 a breaking change bumps the minor).
 2. Add a dated `## [x.y.z] - YYYY-MM-DD` section to `CHANGELOG.md`, and its link at the
    bottom.
-3. `make changelog` — the `confed` crate compiles in its own copy,
-   `crates/confed/CHANGELOG.md`, because a published crate can only contain files from
+3. `make changelog` — the `confed-cli` crate compiles in its own copy,
+   `crates/confed-cli/CHANGELOG.md`, because a published crate can only contain files from
    its own directory. A test fails if the copy is stale.
 4. `make ci`, commit, tag `vX.Y.Z`, push the commit and the tag.
 
 ### crates.io
 
-Four crates are published, libraries first: `confed-api`, `confed-convert`,
-`confed-core`, `confed`. `cargo publish --workspace --dry-run` builds each from its
+Eight crates are published, each after the crates it depends on: `confed-api`,
+`confed-converter`, `confed-dc`, `confed-cloud`, `confed-core`, `confed-cli`,
+`confed-tui`, `confed`. `cargo publish --workspace` works out that order itself. `cargo publish --workspace --dry-run` builds each from its
 own package exactly as crates.io will; run it before a release that changes packaging.
 
 - **First release (by hand):** `cargo login` with a crates.io API token (scopes
   `publish-new`, `publish-update`), then `cargo publish --workspace` from the tagged
   commit.
-- **After that (automatic):** for each of the four crates, add a trusted publisher on
+- **After that (automatic):** for each of the eight crates, add a trusted publisher on
   crates.io (crate → Settings → Trusted Publishing: repository `hxmn/confed`, workflow
   `release.yml`), then set the repository variable `PUBLISH_CRATES` to `true`. From
   then on, pushing a `vX.Y.Z` tag publishes through `.github/workflows/release.yml`,

@@ -1227,7 +1227,7 @@ async fn an_inline_comment_on_data_center_leaves_the_tree_clean() {
     assert_eq!(exit_code(&init(dir.path(), &server)), 0);
     assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
 
-    let fixtures = format!("{}/../confed-api/tests/fixtures/dc-inline", env!("CARGO_MANIFEST_DIR"));
+    let fixtures = format!("{}/../confed-dc/tests/fixtures/dc-inline", env!("CARGO_MANIFEST_DIR"));
     let mut created: Value = serde_json::from_str(
         &std::fs::read_to_string(format!("{fixtures}/create.response.json")).unwrap(),
     )

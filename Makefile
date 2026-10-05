@@ -75,9 +75,9 @@ doc:
 doc-open:
 	$(CARGO) doc --workspace --no-deps --open
 
-## changelog: copy CHANGELOG.md into the confed crate, which compiles it in
+## changelog: copy CHANGELOG.md into the confed-cli crate, which compiles it in
 changelog:
-	cp CHANGELOG.md crates/confed/CHANGELOG.md
+	cp CHANGELOG.md crates/confed-cli/CHANGELOG.md
 
 ## msrv: check the workspace still builds on the minimum supported Rust version
 msrv:

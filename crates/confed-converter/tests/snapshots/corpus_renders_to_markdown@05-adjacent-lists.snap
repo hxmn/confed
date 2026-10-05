@@ -1,0 +1,12 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+Two separate lists follow.
+
+- list one item
+
+* list two item
+
+1. ordered one
+
+1) ordered two

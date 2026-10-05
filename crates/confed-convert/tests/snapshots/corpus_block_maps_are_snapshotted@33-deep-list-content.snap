@@ -1,4 +1,0 @@
----
-source: crates/confed-convert/tests/golden.rs
----
-List md 0..9 storage 0..375

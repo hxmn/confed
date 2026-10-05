@@ -1,0 +1,12 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+Emoji straight in the text: 🚀 ✅ 🇩🇪
+
+CJK: 支払いサービスの説明。
+
+RTL: مرحبا بالعالم
+
+Combining: été and a 😀 numeric emoji.
+
+## タイトル

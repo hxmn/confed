@@ -13,7 +13,7 @@ repository.workspace = true
 
 [dependencies]
 confed-api.workspace = true
-confed-convert.workspace = true
+confed-converter.workspace = true
 
 chrono.workspace = true
 diffy.workspace = true

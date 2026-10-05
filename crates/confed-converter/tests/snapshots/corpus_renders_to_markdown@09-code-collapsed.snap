@@ -1,0 +1,13 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+This one sets parameters we cannot express, so it is preserved whole.
+
+```confluence
+<ac:structured-macro ac:name="code" ac:schema-version="1" ac:macro-id="c0de">
+  <ac:parameter ac:name="language">java</ac:parameter>
+  <ac:parameter ac:name="collapse">true</ac:parameter>
+  <ac:parameter ac:name="linenumbers">true</ac:parameter>
+  <ac:plain-text-body><![CDATA[class A {}]]></ac:plain-text-body>
+</ac:structured-macro>
+```

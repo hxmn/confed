@@ -1,0 +1,28 @@
+[package]
+name = "confed-converter"
+description = "Confluence storage format to Markdown converter with block-level patching"
+readme = "README.md"
+keywords = ["confluence", "markdown", "converter", "xhtml"]
+categories = ["parser-implementations", "text-processing"]
+homepage.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+comrak.workspace = true
+percent-encoding.workspace = true
+quick-xml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+similar.workspace = true
+thiserror.workspace = true
+unicode-width.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+proptest.workspace = true

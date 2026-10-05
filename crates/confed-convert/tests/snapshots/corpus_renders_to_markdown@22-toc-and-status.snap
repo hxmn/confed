@@ -1,8 +1,0 @@
----
-source: crates/confed-convert/tests/golden.rs
----
-<!-- confed:toc -->
-
-## Overview
-
-Migration is **\[IN PROGRESS\]** as of today.

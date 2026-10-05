@@ -1,0 +1,10 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+Architecture:
+
+![System diagram](.page/architecture.png)
+
+Inline logo ![](<.page/logo small.svg>) in a sentence.
+
+![](https://cdn.example.test/banner.png)

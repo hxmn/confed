@@ -1,12 +1,13 @@
-//! Confluence API clients for confed.
+//! The Confluence client contract confed is built on.
 //!
-//! [`ConfluenceClient`] is the contract; [`cloud::CloudClient`] speaks REST v2 and
-//! [`dc::DcClient`] speaks REST v1. Capability differences are reported through
-//! [`types::Capabilities`] rather than by branching on the flavor.
+//! [`ConfluenceClient`] is the contract. `confed-cloud` implements it over REST v2
+//! and `confed-dc` over REST v1; this crate holds what they share — the types,
+//! errors and [`Http`] transport, the REST v1 wire formats (Cloud uses some of
+//! them too), and [`MockClient`], a stateful in-memory server for tests.
+//! Capability differences are reported through [`types::Capabilities`] rather
+//! than by branching on the flavor.
 
 pub mod client;
-pub mod cloud;
-pub mod dc;
 pub mod error;
 pub mod http;
 pub mod mock;
@@ -16,8 +17,6 @@ pub mod types;
 pub mod wire;
 
 pub use client::ConfluenceClient;
-pub use cloud::CloudClient;
-pub use dc::DcClient;
 pub use error::{ApiError, ApiResult};
 pub use http::{partial_path, Auth, Http, RetryPolicy, PARTIAL_SUFFIX};
 pub use mock::MockClient;

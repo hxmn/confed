@@ -1,8 +1,0 @@
----
-source: crates/confed-convert/tests/golden.rs
----
-Admonition md 0..3 storage 0..156
-Admonition md 3..8 storage 157..370
-Admonition md 8..15 storage 371..602
-Admonition md 15..18 storage 603..763
-Admonition md 18..22 storage 764..971

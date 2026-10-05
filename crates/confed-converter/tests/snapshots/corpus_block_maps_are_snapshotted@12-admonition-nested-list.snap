@@ -1,0 +1,4 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+Admonition md 0..11 storage 0..473

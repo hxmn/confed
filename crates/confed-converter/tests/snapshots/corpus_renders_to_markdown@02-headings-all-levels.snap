@@ -1,0 +1,16 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+# H1
+
+## H2
+
+### H3
+
+#### H4
+
+##### H5
+
+###### H6
+
+Body after the ladder.

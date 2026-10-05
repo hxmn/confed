@@ -19,7 +19,7 @@ leaf pages as plain files; the cost is that renaming a parent touches two paths 
 **Q3 — Sync format on Cloud: storage vs ADF.**
 Recommended: **storage everywhere** — one converter, one merge-base format, DC parity.
 Risk: Atlassian is ADF-first on Cloud; some new elements may round-trip poorly through
-their storage representation. Mitigation: `confed-convert` is format-agnostic at the
+their storage representation. Mitigation: `confed-converter` is format-agnostic at the
 block-map layer, so an ADF backend can be added in a later major phase.
 
 **Q4 — Admonition mapping: GitHub alerts (`> [!NOTE]`) — recommended — vs preserved

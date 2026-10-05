@@ -7,7 +7,7 @@ on:
 jobs:
   publish:
     name: publish to crates.io
-    # Off until crates.io trusted publishing is configured for all four crates
+    # Off until crates.io trusted publishing is configured for all eight crates
     # (it can only be set up once a crate exists, so the first release is
     # published by hand). Turn on with the repository variable
     # PUBLISH_CRATES=true — see "Releasing" in AGENTS.md.
@@ -31,7 +31,7 @@ jobs:
           fi
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      # Publishes confed-api, confed-convert, confed-core, then confed, each
+      # Publishes all eight crates, each after those it depends on, each
       # verified by building it from its own package first.
       - run: cargo publish --workspace
         env:

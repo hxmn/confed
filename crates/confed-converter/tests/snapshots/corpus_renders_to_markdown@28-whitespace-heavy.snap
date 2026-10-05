@@ -1,0 +1,8 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+Indented paragraph.
+
+Leading and trailing spaces inside the tag.
+
+## Padded heading

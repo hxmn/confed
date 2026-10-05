@@ -166,7 +166,7 @@ the move (`moved_from`) and everything keeps working.
 
 Everything after the frontmatter is CommonMark with GFM tables, task lists and GitHub
 alerts. The full mapping in both directions is tabulated in
-[`crates/confed-convert/README.md`](../crates/confed-convert/README.md); the short version:
+[`crates/confed-converter/README.md`](../crates/confed-converter/README.md); the short version:
 
 | Confluence | Markdown |
 |---|---|

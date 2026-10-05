@@ -1,0 +1,29 @@
+[package]
+name = "confed-dc"
+description = "Confluence Data Center (REST v1) client for confed"
+readme = "README.md"
+keywords = ["confluence", "atlassian", "datacenter", "api", "client"]
+categories = ["api-bindings", "web-programming::http-client"]
+homepage.workspace = true
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+confed-api.workspace = true
+
+async-trait.workspace = true
+chrono.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+wiremock.workspace = true

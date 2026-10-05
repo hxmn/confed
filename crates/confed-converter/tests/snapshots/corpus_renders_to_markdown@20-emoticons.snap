@@ -1,0 +1,10 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+Shipped it 👍 and nobody noticed 😜
+
+Status: ✅ done, ❌ blocked, ⚠️ at risk
+
+```confluence
+<p>An emoticon we do not know: <ac:emoticon ac:name="pineapple"/></p>
+```

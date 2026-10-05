@@ -119,7 +119,7 @@ confed was designed to be driven by coding agents as much as by people.
 ```console
 $ confed status --json
 {
-  "confed": { "schema": 1, "version": "0.7.5", "command": "status", "ok": true, "exit_code": 0 },
+  "confed": { "schema": 1, "version": "0.8.0", "command": "status", "ok": true, "exit_code": 0 },
   "result": {
     "clean": false,
     "pages": [
@@ -194,9 +194,19 @@ make test       # unit, wiremock and scenario tests
 make ci         # everything the CI pipeline runs — green here means green there
 ```
 
-Four crates, dependencies flowing one way — `confed` (the CLI) → `confed-core` (state,
-merge, sync engine) → `confed-api` (both Confluence clients) and `confed-convert`
-(storage ⇄ Markdown). Around 680 tests cover them, including sync scenarios that run
+Eight crates, dependencies flowing one way:
+
+| Crate | What it is |
+|---|---|
+| `confed` | the app — the binary, wiring the pieces together |
+| `confed-cli` | the commands, their JSON and human output |
+| `confed-tui` | the interactive terminal views |
+| `confed-core` | the sync engine: state, merge, fetch, pull, push, comments |
+| `confed-converter` | Confluence storage ⇄ Markdown |
+| `confed-api` | the client contract both clients implement, and a mock server for tests |
+| `confed-dc` | the Confluence Data Center client |
+| `confed-cloud` | the Confluence Cloud client |
+ Around 680 tests cover them, including sync scenarios that run
 end to end against a stateful mock server in both Cloud and Data Center modes.
 
 Contributing? Read [AGENTS.md](https://github.com/hxmn/confed/blob/main/AGENTS.md) first: this repository never takes real
@@ -204,7 +214,7 @@ names, hosts or content from the Confluence instances confed is tested against.
 
 ## 📍 Status
 
-**0.7.5**, and complete enough for daily use: both API clients, the converter, the
+**0.8.0**, and complete enough for daily use: both API clients, the converter, the
 sync engine, comments, the full command set and the TUI are implemented and tested.
 [CHANGELOG.md](https://github.com/hxmn/confed/blob/main/CHANGELOG.md) records every release. Not there yet: prebuilt binaries
 and a crates.io release — install from source for now.

@@ -1,0 +1,10 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+A sized image keeps its attributes by being preserved whole.
+
+```confluence
+<ac:image ac:width="640" ac:height="480" ac:align="center" ac:border="true">
+<ri:attachment ri:filename="screenshot.png"/>
+</ac:image>
+```

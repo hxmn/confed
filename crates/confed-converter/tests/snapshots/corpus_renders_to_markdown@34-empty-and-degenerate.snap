@@ -1,0 +1,14 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+```confluence
+<table>
+  <tbody></tbody>
+</table>
+```
+
+The only real content on the page.
+
+```
+
+```

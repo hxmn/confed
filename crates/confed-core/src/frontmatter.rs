@@ -7,7 +7,7 @@
 //! teams can keep their own metadata alongside.
 
 use crate::error::{ConfedError, Result};
-use confed_convert::marks::{self, Mark, MarkIssue, PlacedMark};
+use confed_converter::marks::{self, Mark, MarkIssue, PlacedMark};
 use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use sha2::{Digest, Sha256};

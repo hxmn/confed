@@ -1,0 +1,12 @@
+---
+source: crates/confed-converter/tests/golden.rs
+---
+```confluence
+<!-- an editor left this behind -->
+```
+
+Visible paragraph.
+
+```confluence
+<!-- and another -->
+```

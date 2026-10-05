@@ -917,8 +917,8 @@ async fn pull_saves_the_confluence_markup_beside_each_page() {
         )
     );
     assert_eq!(
-        confed_convert::pretty::minify(&on_disk),
-        confed_convert::pretty::minify(body),
+        confed_converter::pretty::minify(&on_disk),
+        confed_converter::pretty::minify(body),
         "the copy is the server's markup, not a re-serialization of it"
     );
     assert_eq!(h.read("Onboarding/.Nested/storage.xml"), "<p>Child.</p>\n");
@@ -950,8 +950,8 @@ async fn the_markup_copy_follows_the_page_and_is_not_an_attachment() {
 
     let on_disk = h.read(".Notes/storage.xml");
     assert_eq!(
-        confed_convert::pretty::minify(&on_disk),
-        confed_convert::pretty::minify(&h.mock.page_body("1001").unwrap()),
+        confed_converter::pretty::minify(&on_disk),
+        confed_converter::pretty::minify(&h.mock.page_body("1001").unwrap()),
         "it matches what the server now has"
     );
     assert!(on_disk.contains("A local addition"));
@@ -1452,7 +1452,7 @@ async fn the_base_re_renders_to_exactly_what_is_on_disk() {
                     .unwrap();
 
             let options = confed_core::sync::page_convert_options(&h.ws, &record.local_path);
-            let rendered = confed_convert::storage_to_markdown(&record.storage_body, &options)
+            let rendered = confed_converter::storage_to_markdown(&record.storage_body, &options)
                 .unwrap()
                 .markdown;
 
@@ -1625,7 +1625,7 @@ both_flavors!(a_deleted_mark_is_re_placed_without_touching_edits, |mut h: Harnes
     h.pull().await;
 
     let raw = h.read("Onboarding.md");
-    let stripped = confed_convert::marks::strip(&raw).body + "\nA local addition.\n";
+    let stripped = confed_converter::marks::strip(&raw).body + "\nA local addition.\n";
     h.write("Onboarding.md", &stripped);
     assert!(!h.read("Onboarding.md").contains("<!--c"));
 
@@ -1960,8 +1960,8 @@ fn add_draft(h: &Harness, file: &str, anchor: &str, note: &str) {
     let mut parsed = confed_core::frontmatter::parse(&content, file).unwrap();
     let start = parsed.body.find(anchor).unwrap_or_else(|| panic!("{anchor:?} not in {file}"));
     let line = parsed.body[..start].matches('\n').count() + 1;
-    parsed.marks.push(confed_convert::Mark {
-        id: confed_convert::MarkId::New,
+    parsed.marks.push(confed_converter::Mark {
+        id: confed_converter::MarkId::New,
         start,
         end: Some(start + anchor.len()),
         text: anchor.to_string(),
