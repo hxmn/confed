@@ -31,7 +31,7 @@ notes are compiled into it, so no network access or checkout is needed.
 - The Markdown parser no longer pulls in syntax highlighting or its own command-line
   tool, neither of which confed uses. That removes `time` (stack-exhaustion
   denial of service, RUSTSEC-2026-0009) and the unmaintained `bincode` and `yaml-rust`
-  from the build, along with about 40 other crates.
+  from the build, along with 19 other crates.
 
 ## [0.7.3] - 2026-10-05
 
