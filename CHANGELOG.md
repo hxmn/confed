@@ -20,6 +20,18 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-05
+
+### Fixed
+
+- The build failed under Rust 1.99's clippy (`manual_slice_fill` in the TUI's conflict
+  view), which CI runs with warnings denied.
+
+### Changed
+
+- The README says what confed does and why, with the Cloud / Data Center coverage, how
+  sync works, and what it offers AI agents.
+
 ## [0.7.1] - 2026-10-02
 
 ### Fixed
@@ -447,7 +459,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/hxmn/confed/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/hxmn/confed/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/hxmn/confed/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/hxmn/confed/compare/v0.6.4...v0.6.5

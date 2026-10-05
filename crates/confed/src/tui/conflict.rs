@@ -115,9 +115,7 @@ impl Resolver {
     }
 
     pub fn choose_all(&mut self, choice: Choice) {
-        for slot in &mut self.choices {
-            *slot = choice;
-        }
+        self.choices.fill(choice);
     }
 
     /// The file with every resolved hunk collapsed to the chosen side.

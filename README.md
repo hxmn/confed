@@ -1,127 +1,214 @@
+<div align="center">
+
 # confed
 
-An offline-first Confluence editor. `confed` mirrors a Confluence space into
-Markdown files on disk and moves changes between disk and server with a git-like
-command model: `fetch`, `pull`, `push`, `diff`, `status`.
+**conf**luence **ed**itor — `confed`, as in `ed`, the original Unix editor
 
-It works against **Confluence Cloud** (REST v2) and **Confluence Data Center**
-(REST v1), and it is built to be driven by people and by coding agents equally:
-every command speaks JSON, exit codes are deterministic, and nothing ever blocks
-on a prompt when there is no terminal.
+### Confluence, as Markdown files on your disk.
 
-```bash
-confed clone https://acme.atlassian.net/wiki/spaces/DOCS
-cd DOCS
-$EDITOR "Team Handbook/Onboarding.md"
-confed status
-confed push --dry-run     # exactly what would be uploaded
-confed push -m "Clarify the first-week checklist"
+Edit pages in your editor, review them in git, sync them like git —
+or hand the whole space to an AI agent.
+
+[![CI](https://github.com/hxmn/confed/actions/workflows/ci.yml/badge.svg)](https://github.com/hxmn/confed/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/tag/hxmn/confed?label=release&sort=semver&color=brightgreen)](CHANGELOG.md)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
+<br>
+[![Confluence Cloud](https://img.shields.io/badge/Confluence-Cloud-0052CC?logo=confluence&logoColor=white)](docs/auth.md)
+[![Confluence Data Center](https://img.shields.io/badge/Confluence-Data%20Center-0052CC?logo=confluence&logoColor=white)](docs/auth.md)
+[![JSON everywhere](https://img.shields.io/badge/output-JSON%20on%20every%20command-555)](docs/reference/json)
+[![Agent ready](https://img.shields.io/badge/AI%20agents-ready-8A2BE2?logo=anthropic&logoColor=white)](#-built-for-ai-agents)
+
+[Quickstart](docs/quickstart.md) ·
+[Commands](docs/commands.md) ·
+[How sync works](docs/sync.md) ·
+[Changelog](CHANGELOG.md)
+
+</div>
+
+---
+
+```console
+$ confed clone https://acme.atlassian.net/wiki/spaces/DOCS
+Cloned 214 pages, 96 attachments and 41 comment threads into DOCS/
+
+$ cd DOCS && $EDITOR "Team Handbook/Onboarding.md"
+
+$ confed status
+  modified  Team Handbook/Onboarding.md
+
+$ confed push --dry-run          # exactly what would be uploaded — nothing is sent
+$ confed push -m "Clarify the first-week checklist"
+  pushed    Team Handbook/Onboarding.md  v7 → v8
 ```
 
-## What makes it different
+## ✨ Why confed
 
-**Your edits do not get reformatted.** Confluence stores pages as XHTML with
-macros, which does not map cleanly onto Markdown. Rather than regenerating the
-whole document on every push, confed keeps a map from each storage block to the
-Markdown lines it produced, and re-emits the original bytes for every block you
-did not touch. Macros it cannot model are preserved inside
-```` ```confluence ```` fences — indented so you can actually read them, and
-round-tripping byte for byte when you leave them alone.
+Confluence's editor is fine for a paragraph. It is not where you want to restructure a
+handbook, review a colleague's change, fix a term across forty pages, or let an agent
+do any of that for you. confed puts the whole space on disk as Markdown — so your
+editor, `grep`, `git` and your agent all just work — and keeps it in sync with the
+server, safely.
 
-**Conflicts work like git.** confed keeps three snapshots per page — the base it
-last synced, your working file, and what the server has now — so a divergence
-gets a real three-way merge with familiar conflict markers, not a "last write
-wins" surprise. Pushes carry the page version, so a stale write is refused by
-the server rather than silently overwriting a colleague.
+| | |
+|---|---|
+| 🎯 **Your edits stay yours** | Only the blocks you change are regenerated. Everything else goes back byte-for-byte, so a one-word fix never reformats the page. |
+| 🔀 **Merges like git** | Three snapshots per page — base, yours, theirs — give a real three-way merge with familiar conflict markers. No "last write wins". |
+| 🛡️ **Refuses to lose work** | `pull` stops before clobbering local edits; `push` refuses stale versions, unresolved conflicts, and deletes you did not ask for. |
+| 🧩 **Nothing is lost in translation** | Macros confed cannot model travel as readable ```` ```confluence ```` blocks and round-trip exactly. |
+| 💬 **Comments in your text** | Open inline threads appear where they sit in the page; add one by wrapping a phrase. Reply, resolve, edit — from the terminal. |
+| 🤖 **Built for agents** | JSON on every command, deterministic exit codes, no prompts without a terminal, and a generated `CLAUDE.md` / `AGENTS.md` contract in every workspace. |
 
-**It refuses to lose work.** `pull` stops before writing anything if that would
-clobber local changes it cannot merge. `push` will not upload a page with
-unresolved conflict markers, and will not delete a page on the server unless you
-pass `--allow-delete`.
+## 🔄 How it works
 
-**Agents are a first-class user.** `confed init` writes `CLAUDE.md` and
-`AGENTS.md` into the directory describing the frontmatter contract, the command
-cheat-sheet, the conflict workflow, and the do-not-touch list. `--json` gives a
-versioned envelope on every command. Those contracts are stamped with the confed
-that wrote them, and `confed version --changelog --since <version>` prints the
-release notes compiled into the binary, so an agent that meets an upgraded confed
-can read what changed before it touches anything.
+```mermaid
+flowchart LR
+    C[("Confluence<br/>Cloud or Data Center")]
+    subgraph W["your workspace"]
+        M["📝 Markdown files<br/>+ attachments + comments"]
+        S[("base snapshots<br/>.state.db")]
+    end
+    Y["👩‍💻 you · 🤖 agents · git"]
+    C -- "fetch / pull<br/>three-way merge" --> M
+    M -- "push<br/>changed blocks only" --> C
+    S -. "what was last synced" .- M
+    Y <--> M
+```
 
-## Layout on disk
+`fetch` brings the server's state into a local database without touching your files.
+`pull` writes it into them, merging against the base it last synced. `push` uploads
+only what changed, carrying the page version so a colleague's newer edit is never
+overwritten. Read [docs/sync.md](docs/sync.md) for the whole model.
+
+## 📋 What it covers
+
+| | Cloud | Data Center |
+|---|:---:|:---:|
+| Pages: create, edit, move, reorder, rename, delete | ✅ | ✅ |
+| Labels, attachments, page version history | ✅ | ✅ |
+| Three-way merge and conflict resolution | ✅ | ✅ |
+| Page comments: add, reply, edit, delete | ✅ | ✅ |
+| Inline comments, shown in the page body | ✅ | ✅ |
+| Inline comments: create, reply, resolve | ✅ | ✅ ¹ |
+| Mentions and page links in Markdown | ✅ | ✅ |
+| CQL search, recent activity, open in browser | ✅ | ✅ |
+| HTML export and an MkDocs site over the space | ✅ | ✅ |
+| Interactive terminal UI | ✅ | ✅ |
+
+¹ Through the inline-comment API the Data Center page view itself uses, which Atlassian
+does not document; tested on 9.x.
+
+## 🤖 Built for AI agents
+
+confed was designed to be driven by coding agents as much as by people.
+
+- **Every command speaks JSON.** `--json` gives a versioned envelope with `result`,
+  `errors` and `warnings`; schemas live in [docs/reference/json](docs/reference/json).
+- **Exit codes mean something.** `4` is "pull first", `6` "not found", `7` "local state
+  needs attention", `9` "this server cannot do that" — never a bare `1`.
+- **It never hangs.** Without a terminal confed never prompts: a missing value fails
+  at once, naming the flag and the environment variable to set.
+- **The workspace explains itself.** `confed init` writes `CLAUDE.md` and `AGENTS.md`:
+  the frontmatter contract, what is safe to edit, the conflict workflow, how comments
+  work. They are stamped with the confed that wrote them, every command warns when they
+  are stale, and `confed version --changelog --since <version>` tells an agent exactly
+  what changed after an upgrade.
+- **Dry runs show everything.** `push --dry-run --show-storage` prints the exact
+  Confluence markup each page and comment would be sent as.
+
+```console
+$ confed status --json
+{
+  "confed": { "schema": 1, "version": "0.7.2", "command": "status", "ok": true, "exit_code": 0 },
+  "result": {
+    "clean": false,
+    "pages": [
+      { "path": "Team Handbook/Onboarding.md", "state": "modified", "comment_drafts": 1 }
+    ]
+  },
+  "errors": [],
+  "warnings": []
+}
+```
+
+## 🚀 Install
+
+```bash
+cargo install --git https://github.com/hxmn/confed confed
+```
+
+Requires Rust 1.85 or newer — no system dependencies: TLS, SQLite and the OS keyring
+integration are vendored or pure Rust. Then:
+
+```bash
+confed clone https://your-site.atlassian.net/wiki/spaces/KEY   # Cloud: email + API token
+confed clone https://wiki.example.com --space KEY              # Data Center: personal access token
+```
+
+[docs/quickstart.md](docs/quickstart.md) walks through the first sync in five minutes,
+and [docs/auth.md](docs/auth.md) covers tokens and where secrets are kept (the OS
+keyring, or a `0600` file).
+
+## 🧰 Commands
+
+| Sync | Authoring | Discussion | Explore | Workspace |
+|---|---|---|---|---|
+| `clone` · `fetch` · `pull` · `push` · `status` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `completion` |
+
+Every command, flag and exit code is in [docs/commands.md](docs/commands.md).
+
+## 📁 Layout on disk
 
 ```
 DOCS/
 ├── Team Handbook.md            a page
 ├── Team Handbook/              its child pages
 │   ├── Onboarding.md
-│   └── .Onboarding/            attachments + comments.md for Onboarding.md
+│   └── .Onboarding/            attachments, comments.md and storage.xml for Onboarding.md
 ├── CLAUDE.md · AGENTS.md       generated agent contract
 ├── .state.db                   sync state (git-ignored)
 └── .session.db                 credentials, mode 0600 (git-ignored)
 ```
 
-Each page carries YAML frontmatter. `title`, `labels` and `parent_id` are yours
-to edit and are synced on push; everything under `confed:` is tool-managed, and
-push refuses a page whose managed block was hand-edited.
+Each page carries YAML frontmatter. `title`, `labels` and `parent_id` are yours to edit
+and sync on push; everything under `confed:` is tool-managed, and push refuses a page
+whose managed block was hand-edited. Details in [docs/format.md](docs/format.md).
 
-## Installing
+## 📚 Documentation
 
-```bash
-cargo install --path crates/confed     # from a checkout
-```
+- [Quickstart](docs/quickstart.md) — first sync in five minutes
+- [Authentication](docs/auth.md) — API tokens, PATs, and where secrets are kept
+- [Commands](docs/commands.md) — every command, flag and exit code
+- [File format](docs/format.md) — frontmatter, layout, preserved macros, comment marks
+- [Sync model](docs/sync.md) — fetch, pull, push and the conflict workflow
+- [Troubleshooting](docs/troubleshooting.md) — symptoms, causes, fixes
 
-Requires Rust 1.85 or newer. There are no system dependencies: TLS, SQLite and
-the OS keyring integration are all vendored or pure Rust.
+Design documents live in [docs/design](docs/design/01-architecture.md), and the
+implementation plan in [docs/plan](docs/plan/README.md).
 
-## Documentation
-
-- [`docs/quickstart.md`](docs/quickstart.md) — first sync in five minutes
-- [`docs/auth.md`](docs/auth.md) — API tokens, PATs, and where secrets are kept
-- [`docs/commands.md`](docs/commands.md) — every command, flag and exit code
-- [`docs/format.md`](docs/format.md) — frontmatter, file layout, preserved macros
-- [`docs/sync.md`](docs/sync.md) — the sync model and the conflict workflow
-- [`docs/troubleshooting.md`](docs/troubleshooting.md) — symptoms, causes, fixes
-
-Design documents live in [`docs/design/`](docs/design/01-architecture.md) and the
-implementation plan, with what shipped and what did not, in
-[`docs/plan/`](docs/plan/README.md).
-
-## Development
+## 🛠️ Development
 
 ```bash
 make            # list the available tasks
 make test       # unit, wiremock and scenario tests
-make lint       # clippy over every target, warnings denied
-make ci         # everything the CI pipeline runs
+make ci         # everything the CI pipeline runs — green here means green there
 ```
 
-The `Makefile` is a thin wrapper over cargo, so `cargo test --workspace` and
-friends work equally well; `make ci` exists so a green local run means a green
-pipeline.
+Four crates, dependencies flowing one way — `confed` (the CLI) → `confed-core` (state,
+merge, sync engine) → `confed-api` (both Confluence clients) and `confed-convert`
+(storage ⇄ Markdown). Around 680 tests cover them, including sync scenarios that run
+end to end against a stateful mock server in both Cloud and Data Center modes.
 
-The workspace is four crates: `confed-api` (both Confluence clients),
-`confed-convert` (storage ⇄ Markdown), `confed-core` (state, merge, sync engine)
-and `confed` (the CLI). Dependencies flow one way,
-`confed → confed-core → {confed-api, confed-convert}`.
+Contributing? Read [AGENTS.md](AGENTS.md) first: this repository never takes real
+names, hosts or content from the Confluence instances confed is tested against.
 
-Sync behavior is covered end to end by
-`crates/confed-core/tests/sync_scenarios.rs`, which runs every scenario against
-a stateful in-memory server in both Cloud and Data Center modes.
+## 📍 Status
 
-## Status
-
-Early, but complete enough to use: **0.1.0** is the first release, and
-[CHANGELOG.md](CHANGELOG.md) records what is in it. Both API clients, the
-converter, the sync engine, the command set and the TUI are implemented and
-tested, including scenarios that run end to end against a mock server in both
-Confluence flavors. What is missing is packaging — no published crate or binary
-artifacts yet — plus the smaller gaps each phase file records.
-
-See [`docs/plan/README.md`](docs/plan/README.md) for the state of each phase and
-the defects the test suite caught along the way, and
-[`docs/design/05-open-questions.md`](docs/design/05-open-questions.md) for the
-decisions still open — the minimum supported Data Center version most of all.
+**0.7.2**, and complete enough for daily use: both API clients, the converter, the
+sync engine, comments, the full command set and the TUI are implemented and tested.
+[CHANGELOG.md](CHANGELOG.md) records every release. Not there yet: prebuilt binaries
+and a crates.io release — install from source for now.
 
 ## License
 
-MIT or Apache-2.0, at your option.
+Licensed under either of MIT or Apache-2.0, at your option.
