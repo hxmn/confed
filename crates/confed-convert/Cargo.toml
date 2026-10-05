@@ -1,6 +1,10 @@
 [package]
 name = "confed-convert"
 description = "Confluence storage format to Markdown converter with block-level patching"
+readme = "README.md"
+keywords = ["confluence", "markdown", "converter", "xhtml"]
+categories = ["parser-implementations", "text-processing"]
+homepage.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

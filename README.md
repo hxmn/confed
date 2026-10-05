@@ -10,19 +10,19 @@ Edit pages in your editor, review them in git, sync them like git —
 or hand the whole space to an AI agent.
 
 [![CI](https://github.com/hxmn/confed/actions/workflows/ci.yml/badge.svg)](https://github.com/hxmn/confed/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/tag/hxmn/confed?label=release&sort=semver&color=brightgreen)](CHANGELOG.md)
+[![Release](https://img.shields.io/github/v/tag/hxmn/confed?label=release&sort=semver&color=brightgreen)](https://github.com/hxmn/confed/blob/main/CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 <br>
-[![Confluence Cloud](https://img.shields.io/badge/Confluence-Cloud-0052CC?logo=confluence&logoColor=white)](docs/auth.md)
-[![Confluence Data Center](https://img.shields.io/badge/Confluence-Data%20Center-0052CC?logo=confluence&logoColor=white)](docs/auth.md)
-[![JSON everywhere](https://img.shields.io/badge/output-JSON%20on%20every%20command-555)](docs/reference/json)
+[![Confluence Cloud](https://img.shields.io/badge/Confluence-Cloud-0052CC?logo=confluence&logoColor=white)](https://github.com/hxmn/confed/blob/main/docs/auth.md)
+[![Confluence Data Center](https://img.shields.io/badge/Confluence-Data%20Center-0052CC?logo=confluence&logoColor=white)](https://github.com/hxmn/confed/blob/main/docs/auth.md)
+[![JSON everywhere](https://img.shields.io/badge/output-JSON%20on%20every%20command-555)](https://github.com/hxmn/confed/tree/main/docs/reference/json)
 [![Agent ready](https://img.shields.io/badge/AI%20agents-ready-8A2BE2?logo=anthropic&logoColor=white)](#-built-for-ai-agents)
 
-[Quickstart](docs/quickstart.md) ·
-[Commands](docs/commands.md) ·
-[How sync works](docs/sync.md) ·
-[Changelog](CHANGELOG.md)
+[Quickstart](https://github.com/hxmn/confed/blob/main/docs/quickstart.md) ·
+[Commands](https://github.com/hxmn/confed/blob/main/docs/commands.md) ·
+[How sync works](https://github.com/hxmn/confed/blob/main/docs/sync.md) ·
+[Changelog](https://github.com/hxmn/confed/blob/main/CHANGELOG.md)
 
 </div>
 
@@ -78,7 +78,7 @@ flowchart LR
 `fetch` brings the server's state into a local database without touching your files.
 `pull` writes it into them, merging against the base it last synced. `push` uploads
 only what changed, carrying the page version so a colleague's newer edit is never
-overwritten. Read [docs/sync.md](docs/sync.md) for the whole model.
+overwritten. Read [docs/sync.md](https://github.com/hxmn/confed/blob/main/docs/sync.md) for the whole model.
 
 ## 📋 What it covers
 
@@ -103,7 +103,7 @@ does not document; tested on 9.x.
 confed was designed to be driven by coding agents as much as by people.
 
 - **Every command speaks JSON.** `--json` gives a versioned envelope with `result`,
-  `errors` and `warnings`; schemas live in [docs/reference/json](docs/reference/json).
+  `errors` and `warnings`; schemas live in [docs/reference/json](https://github.com/hxmn/confed/tree/main/docs/reference/json).
 - **Exit codes mean something.** `4` is "pull first", `6` "not found", `7` "local state
   needs attention", `9` "this server cannot do that" — never a bare `1`.
 - **It never hangs.** Without a terminal confed never prompts: a missing value fails
@@ -119,7 +119,7 @@ confed was designed to be driven by coding agents as much as by people.
 ```console
 $ confed status --json
 {
-  "confed": { "schema": 1, "version": "0.7.4", "command": "status", "ok": true, "exit_code": 0 },
+  "confed": { "schema": 1, "version": "0.7.5", "command": "status", "ok": true, "exit_code": 0 },
   "result": {
     "clean": false,
     "pages": [
@@ -145,8 +145,8 @@ confed clone https://your-site.atlassian.net/wiki/spaces/KEY   # Cloud: email + 
 confed clone https://wiki.example.com --space KEY              # Data Center: personal access token
 ```
 
-[docs/quickstart.md](docs/quickstart.md) walks through the first sync in five minutes,
-and [docs/auth.md](docs/auth.md) covers tokens and where secrets are kept (the OS
+[docs/quickstart.md](https://github.com/hxmn/confed/blob/main/docs/quickstart.md) walks through the first sync in five minutes,
+and [docs/auth.md](https://github.com/hxmn/confed/blob/main/docs/auth.md) covers tokens and where secrets are kept (the OS
 keyring, or a `0600` file).
 
 ## 🧰 Commands
@@ -155,7 +155,7 @@ keyring, or a `0600` file).
 |---|---|---|---|---|
 | `clone` · `fetch` · `pull` · `push` · `status` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `completion` |
 
-Every command, flag and exit code is in [docs/commands.md](docs/commands.md).
+Every command, flag and exit code is in [docs/commands.md](https://github.com/hxmn/confed/blob/main/docs/commands.md).
 
 ## 📁 Layout on disk
 
@@ -172,19 +172,19 @@ DOCS/
 
 Each page carries YAML frontmatter. `title`, `labels` and `parent_id` are yours to edit
 and sync on push; everything under `confed:` is tool-managed, and push refuses a page
-whose managed block was hand-edited. Details in [docs/format.md](docs/format.md).
+whose managed block was hand-edited. Details in [docs/format.md](https://github.com/hxmn/confed/blob/main/docs/format.md).
 
 ## 📚 Documentation
 
-- [Quickstart](docs/quickstart.md) — first sync in five minutes
-- [Authentication](docs/auth.md) — API tokens, PATs, and where secrets are kept
-- [Commands](docs/commands.md) — every command, flag and exit code
-- [File format](docs/format.md) — frontmatter, layout, preserved macros, comment marks
-- [Sync model](docs/sync.md) — fetch, pull, push and the conflict workflow
-- [Troubleshooting](docs/troubleshooting.md) — symptoms, causes, fixes
+- [Quickstart](https://github.com/hxmn/confed/blob/main/docs/quickstart.md) — first sync in five minutes
+- [Authentication](https://github.com/hxmn/confed/blob/main/docs/auth.md) — API tokens, PATs, and where secrets are kept
+- [Commands](https://github.com/hxmn/confed/blob/main/docs/commands.md) — every command, flag and exit code
+- [File format](https://github.com/hxmn/confed/blob/main/docs/format.md) — frontmatter, layout, preserved macros, comment marks
+- [Sync model](https://github.com/hxmn/confed/blob/main/docs/sync.md) — fetch, pull, push and the conflict workflow
+- [Troubleshooting](https://github.com/hxmn/confed/blob/main/docs/troubleshooting.md) — symptoms, causes, fixes
 
-Design documents live in [docs/design](docs/design/01-architecture.md), and the
-implementation plan in [docs/plan](docs/plan/README.md).
+Design documents live in [docs/design](https://github.com/hxmn/confed/blob/main/docs/design/01-architecture.md), and the
+implementation plan in [docs/plan](https://github.com/hxmn/confed/blob/main/docs/plan/README.md).
 
 ## 🛠️ Development
 
@@ -199,16 +199,17 @@ merge, sync engine) → `confed-api` (both Confluence clients) and `confed-conve
 (storage ⇄ Markdown). Around 680 tests cover them, including sync scenarios that run
 end to end against a stateful mock server in both Cloud and Data Center modes.
 
-Contributing? Read [AGENTS.md](AGENTS.md) first: this repository never takes real
+Contributing? Read [AGENTS.md](https://github.com/hxmn/confed/blob/main/AGENTS.md) first: this repository never takes real
 names, hosts or content from the Confluence instances confed is tested against.
 
 ## 📍 Status
 
-**0.7.4**, and complete enough for daily use: both API clients, the converter, the
+**0.7.5**, and complete enough for daily use: both API clients, the converter, the
 sync engine, comments, the full command set and the TUI are implemented and tested.
-[CHANGELOG.md](CHANGELOG.md) records every release. Not there yet: prebuilt binaries
+[CHANGELOG.md](https://github.com/hxmn/confed/blob/main/CHANGELOG.md) records every release. Not there yet: prebuilt binaries
 and a crates.io release — install from source for now.
 
 ## License
 
-Licensed under either of MIT or Apache-2.0, at your option.
+Licensed under either of [MIT](https://github.com/hxmn/confed/blob/main/LICENSE-MIT) or
+[Apache-2.0](https://github.com/hxmn/confed/blob/main/LICENSE-APACHE), at your option.

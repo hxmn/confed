@@ -3,7 +3,7 @@
 Confluence storage format (XHTML + `ac:`/`ri:` macros) ⇄ Markdown, with
 block-level patching on the way back.
 
-Implements [design 03](../../docs/design/03-conversion-and-conflicts.md).
+Implements [design 03](https://github.com/hxmn/confed/blob/main/docs/design/03-conversion-and-conflicts.md).
 
 ## The two guarantees
 
@@ -159,7 +159,7 @@ cannot turn into syntax.
 
 ## Fixture corpus
 
-35 storage documents in [`fixtures/`](fixtures/README.md), covering every row of
+35 storage documents in [`fixtures/`](https://github.com/hxmn/confed/blob/main/crates/confed-convert/fixtures/README.md), covering every row of
 the mapping table plus nested macros, `ac:layout`, CDATA containing `]]`,
 colspan tables, images with attributes, every link flavour, emoticons, task
 lists, unknown third-party macros (jira, drawio), pretty-printed whitespace,

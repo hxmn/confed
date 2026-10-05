@@ -1,6 +1,10 @@
 [package]
 name = "confed"
 description = "Offline-first Confluence editor: sync a space to Markdown files"
+readme = "../../README.md"
+keywords = ["confluence", "markdown", "cli", "sync", "atlassian"]
+categories = ["command-line-utilities", "text-processing"]
+homepage.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

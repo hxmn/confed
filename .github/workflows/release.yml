@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    name: publish to crates.io
+    # Off until crates.io trusted publishing is configured for all four crates
+    # (it can only be set up once a crate exists, so the first release is
+    # published by hand). Turn on with the repository variable
+    # PUBLISH_CRATES=true — see "Releasing" in AGENTS.md.
+    if: vars.PUBLISH_CRATES == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # crates.io trusted publishing: GitHub's OIDC token is exchanged for a
+      # short-lived crates.io token; no secret is stored in the repository.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: The tag names the version being published
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "confed") | .version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME, but Cargo.toml says $version" >&2
+            exit 1
+          fi
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      # Publishes confed-api, confed-convert, confed-core, then confed, each
+      # verified by building it from its own package first.
+      - run: cargo publish --workspace
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

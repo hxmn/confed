@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "confed"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "anyhow",
  "chrono",
@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "confed-api"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "confed-convert"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "comrak",
  "insta",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "confed-core"
-version = "0.7.4"
+version = "0.7.5"
 dependencies = [
  "chrono",
  "confed-api",

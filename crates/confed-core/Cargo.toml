@@ -1,6 +1,10 @@
 [package]
 name = "confed-core"
 description = "Core domain model, state storage and sync engine for confed"
+readme = "README.md"
+keywords = ["confluence", "markdown", "sync", "merge"]
+categories = ["text-processing"]
+homepage.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -75,6 +75,10 @@ doc:
 doc-open:
 	$(CARGO) doc --workspace --no-deps --open
 
+## changelog: copy CHANGELOG.md into the confed crate, which compiles it in
+changelog:
+	cp CHANGELOG.md crates/confed/CHANGELOG.md
+
 ## msrv: check the workspace still builds on the minimum supported Rust version
 msrv:
 	@rustup toolchain list | grep -q '^$(MSRV)' \
@@ -116,5 +120,5 @@ help:
 	@echo "Variables: CARGO=$(CARGO)  MSRV=$(MSRV)  ARGS (for make run)  NAME (for make test-one)"
 
 .PHONY: build release install run test test-one test-sync test-cli \
-        fmt fmt-check lint lint-fix doc doc-open msrv audit ci \
+        fmt fmt-check lint lint-fix doc doc-open changelog msrv audit ci \
         clean clean-cache update help

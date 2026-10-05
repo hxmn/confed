@@ -1,0 +1,5 @@
+# Check every text file out with LF line endings, Windows included. The
+# converter's fixtures and snapshots record byte offsets into Confluence
+# storage, and the changelog is compiled into the binary: a CRLF checkout
+# shifts every offset by one per line and makes the tests fail on Windows.
+* text=auto eol=lf

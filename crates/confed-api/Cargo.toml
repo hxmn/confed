@@ -1,6 +1,10 @@
 [package]
 name = "confed-api"
 description = "Confluence Cloud and Data Center API clients for confed"
+readme = "README.md"
+keywords = ["confluence", "atlassian", "api", "client", "rest"]
+categories = ["api-bindings", "web-programming::http-client"]
+homepage.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

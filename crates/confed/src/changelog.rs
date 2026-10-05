@@ -7,9 +7,11 @@
 
 use serde::Serialize;
 
-/// The repository's changelog. `include_str!` also makes cargo rebuild this
-/// crate whenever the changelog changes, so the two can never drift.
-const SOURCE: &str = include_str!("../../../CHANGELOG.md");
+/// The changelog. A crate may only compile in files inside its own directory —
+/// the published package holds nothing else — so this is a copy of the
+/// repository's `CHANGELOG.md`, which a test keeps identical. `include_str!`
+/// also makes cargo rebuild this crate whenever it changes.
+const SOURCE: &str = include_str!("../CHANGELOG.md");
 
 /// The version of this build.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -142,6 +144,19 @@ fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The packaged copy must be the repository's changelog. Skipped where
+    /// there is no repository around it — a crate unpacked from crates.io.
+    #[test]
+    fn the_packaged_changelog_is_the_repository_changelog() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../CHANGELOG.md");
+        let Ok(repository) = std::fs::read_to_string(&root) else { return };
+        assert!(
+            repository == SOURCE,
+            "crates/confed/CHANGELOG.md is out of date: `cp CHANGELOG.md crates/confed/` \
+             (or `make changelog`) after editing the changelog"
+        );
+    }
 
     const SAMPLE: &str = "\
 # Changelog
