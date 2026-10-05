@@ -81,9 +81,45 @@ unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
     kill(pid, sig)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use std::ffi::c_void;
+
+    // The kernel32 functions this needs, declared here rather than pulling in a
+    // Windows bindings crate for three calls.
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn GetExitCodeProcess(process: *mut c_void, code: *mut u32) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    // confed never writes pid 0 (the System Idle Process).
+    if pid == 0 {
+        return false;
+    }
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            // No such process — unless it exists but belongs to someone we may
+            // not inspect, which still means it is running.
+            return GetLastError() == ERROR_ACCESS_DENIED;
+        }
+        let mut code = 0u32;
+        let queried = GetExitCodeProcess(process, &mut code) != 0;
+        CloseHandle(process);
+        // An exited process whose handle is still open somewhere reports its
+        // exit code; a running one reports STILL_ACTIVE.
+        !queried || code == STILL_ACTIVE
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_alive(_pid: u32) -> bool {
-    // Without a cheap portable check, assume the holder is alive: refusing to
+    // Without a check on this platform, assume the holder is alive: refusing to
     // run is safer than two processes writing the same files.
     true
 }

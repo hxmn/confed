@@ -20,6 +20,16 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-05
+
+### Fixed
+
+- On Windows, a workspace lock left by a confed run that crashed or was killed was
+  never reclaimed: confed could not tell whether the process that wrote it was still
+  running, assumed it was, and refused every command until `.confed.lock` was deleted
+  by hand. It now asks Windows whether that process is alive, as it already did on
+  Linux and macOS.
+
 ## [0.8.0] - 2026-10-05
 
 ### Changed
@@ -522,7 +532,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/hxmn/confed/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/hxmn/confed/compare/v0.7.5...v0.8.0
 [0.7.5]: https://github.com/hxmn/confed/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/hxmn/confed/compare/v0.7.3...v0.7.4
