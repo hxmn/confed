@@ -20,6 +20,42 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-06
+
+### Fixed
+
+Four faults in 0.9.1's handling of attachments, the first two new in that release:
+
+- **Pages that swapped titles, or took over one another's, could end up holding each
+  other's attachment of the same name** — with no warning, and with the next `push`
+  ready to upload each file over the other page's. Neither page's sidecar can follow it
+  in that case, and 0.9.1 took whatever it found at the new path for the page's own
+  copy. A page whose sidecar cannot follow it now has all its attachments fetched
+  again, over whatever is there.
+- **A pull that stopped part-way — an error on a later page, or an interrupt — could
+  leave a renamed page at its new path without its attachments**, which the next `push`
+  read as their deletion, and `push --allow-delete` would have carried out. A renamed
+  page is now finished before the next one is started: its sidecar is moved ahead of
+  it, its attachments are seen to, and the file at its old path is removed, in that
+  order.
+- **`pull --force` or `--reset` could delete a file that was never an attachment's
+  copy**, in a workspace last synced by 0.9.0 or older that held an attachment named
+  like a path (`../Other.md`) or like one of confed's own sidecar files (`comments.md`).
+  Dropping such an entry no longer touches the file its name leads to.
+- An attachment whose name starts with a dot was pulled and then planned for deletion by
+  the next `push`, as if it had been removed locally.
+
+Also:
+
+- **A page renamed on the server lost the unsent comment drafts and queued resolves in
+  its `comments.md`.** The sidecar now moves before anything is written to the new one.
+- The warning for a file `pull` will not overwrite said the server had "a newer
+  version" even when it was the local file that had changed. It now says what is known:
+  the server's version has not been downloaded here, and the file here is not a copy
+  confed downloaded.
+- Replacing a page's stored attachment list is one transaction, so an interruption
+  cannot leave confed without its record of which copies are its own.
+
 ## [0.9.1] - 2026-10-06
 
 ### Fixed
@@ -696,7 +732,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/hxmn/confed/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/hxmn/confed/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/hxmn/confed/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/hxmn/confed/compare/v0.8.1...v0.8.2

@@ -3487,7 +3487,7 @@ async fn a_locally_changed_attachment_is_not_overwritten_or_removed() {
     assert_eq!((outcome.attachments_downloaded, outcome.attachments_removed), (0, 0));
     assert_eq!(outcome.warnings.len(), 2, "{outcome:?}");
     let about = |file: &str| outcome.warnings.iter().find(|w| w.contains(file)).unwrap();
-    assert!(about("chart.png").contains("newer version"), "{outcome:?}");
+    assert!(about("chart.png").contains("has not been downloaded here"), "{outcome:?}");
     assert!(about("notes.txt").contains("deleted on the server"), "{outcome:?}");
     assert_eq!(listed_files(&h, "Diagrams.md"), ["chart.png"]);
 
@@ -3920,4 +3920,150 @@ async fn an_attachment_whose_name_is_not_a_file_name_is_left_out() {
     assert!(!h.path("Escaped.md").exists());
     assert!(h.read(".Diagrams/comments.md").contains("A comment."));
     assert_eq!(listed_files(&h, "Diagrams.md"), ["fine.txt"]);
+}
+
+/// Two pages that swap titles each want the sidecar the other still has, so
+/// neither can follow its page. A file there by the name of one of the page's
+/// own attachments is the other page's: it is replaced, not kept as local
+/// work to be pushed over the first page's file.
+#[tokio::test]
+async fn pages_that_swap_titles_do_not_swap_attachments_of_the_same_name() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Alpha", None, "<p>First.</p>");
+    h.mock.seed_page("1002", "Beta", None, "<p>Second.</p>");
+    h.mock.attach_directly("1001", "image.png", b"of the first page");
+    h.mock.attach_directly("1002", "image.png", b"of the second page");
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+
+    h.mock.rename_page("1001", "Temporary");
+    h.mock.rename_page("1002", "Alpha");
+    h.mock.rename_page("1001", "Beta");
+    let outcome = h.pull().await;
+    assert_eq!(outcome.moved.len(), 2, "{outcome:?}");
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Beta/image.png")).unwrap(), b"of the first page");
+    assert_eq!(std::fs::read(h.path(".Alpha/image.png")).unwrap(), b"of the second page");
+    let plan = h.engine.plan_push(&h.ws, &push_attachments()).unwrap();
+    assert!(plan.attachment_ops.is_empty(), "nothing to push over anything: {plan:?}");
+}
+
+/// The same when one page takes over the title another has just left.
+#[tokio::test]
+async fn a_page_taking_over_anothers_title_keeps_its_own_attachments() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Alpha", None, "<p>First.</p>");
+    h.mock.seed_page("1002", "Beta", None, "<p>Second.</p>");
+    h.mock.attach_directly("1001", "image.png", b"of the first page");
+    h.mock.attach_directly("1002", "image.png", b"of the second page");
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+
+    h.mock.rename_page("1002", "Gamma");
+    h.mock.rename_page("1001", "Beta");
+    let outcome = h.pull().await;
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Beta/image.png")).unwrap(), b"of the first page");
+    assert_eq!(std::fs::read(h.path(".Gamma/image.png")).unwrap(), b"of the second page");
+    assert!(h.engine.plan_push(&h.ws, &push_attachments()).unwrap().attachment_ops.is_empty());
+}
+
+/// A pull that fails part-way must leave every page it did write whole. A
+/// renamed page without its attachments would read as their deletion.
+#[tokio::test]
+async fn a_pull_that_fails_after_a_rename_leaves_that_page_its_attachments() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Before", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "kept.png", b"stays");
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+
+    // The page is renamed, and a second page appears whose file cannot be
+    // written: a directory is in its way.
+    h.mock.rename_page("1001", "After");
+    h.mock.seed_page("1002", "Blocked", None, "<p>Body.</p>");
+    std::fs::create_dir_all(h.path("Blocked.md/in-the-way")).unwrap();
+    let failed = h.engine.pull(&mut h.ws, &PullOptions::everything()).await;
+    assert!(failed.is_err(), "the pull cannot finish: {failed:?}");
+
+    assert!(h.path("After.md").exists(), "the renamed page was written before the failure");
+    assert_eq!(std::fs::read(h.path(".After/kept.png")).unwrap(), b"stays");
+    let plan = h.engine.plan_push(&h.ws, &push_attachments()).unwrap();
+    assert!(plan.attachment_ops.is_empty(), "no attachment reads as removed: {plan:?}");
+
+    std::fs::remove_dir_all(h.path("Blocked.md")).unwrap();
+    let outcome = h.pull().await;
+    assert_eq!(outcome.attachments_downloaded, 0, "{outcome:?}");
+    assert!(h.path("Blocked.md").is_file());
+    assert_eq!(std::fs::read(h.path(".After/kept.png")).unwrap(), b"stays");
+}
+
+/// Unsent comment work goes with a renamed page: its sidecar is moved before
+/// anything is written into the new one.
+#[tokio::test]
+async fn a_renamed_page_keeps_its_comment_drafts() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Before", None, "<p>Body.</p>");
+    h.mock.seed_comment("1001", "<p>A comment.</p>", CommentKind::Footer);
+    h.pull().await;
+    let mut sidecar = h.read(".Before/comments.md");
+    sidecar.push_str("\n<!-- confed:new -->\nA draft of mine.\n");
+    h.write(".Before/comments.md", &sidecar);
+
+    h.mock.rename_page("1001", "After");
+    h.pull().await;
+    let sidecar = h.read(".After/comments.md");
+    assert!(sidecar.contains("A comment."), "{sidecar}");
+    assert!(sidecar.contains("A draft of mine."), "{sidecar}");
+    assert!(!h.path(".Before").exists());
+}
+
+/// A workspace written before names were checked can hold an attachment whose
+/// name is a path out of the sidecar, or one of confed's own files in it.
+/// Dropping that entry must not turn into removing what the name points at —
+/// not even when the pull is told to discard local changes.
+#[tokio::test]
+async fn an_unstorable_name_from_an_older_workspace_is_dropped_without_removing_anything() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Another page.</p>");
+    h.mock.seed_comment("1001", "<p>A comment.</p>", CommentKind::Footer);
+    h.pull().await;
+    let hash = |file: &str| confed_core::attachments::file_sha256(&h.path(file)).unwrap();
+    for (id, name, file) in
+        [("9001", "comments.md", ".Diagrams/comments.md"), ("9002", "../Other.md", "Other.md")]
+    {
+        h.ws.state()
+            .upsert_attachment(&confed_core::state::AttachmentRecord {
+                attachment_id: id.into(),
+                page_id: "1001".into(),
+                filename: name.into(),
+                media_type: None,
+                file_size: Some(1),
+                version: 1,
+                sha256: Some(hash(file)),
+                downloaded: true,
+            })
+            .unwrap();
+    }
+
+    let forced = pull_with(&mut h, PullOptions { force: true, ..PullOptions::everything() }).await;
+    assert_eq!(forced.attachments_removed, 0, "{forced:?}");
+    assert!(h.read(".Diagrams/comments.md").contains("A comment."));
+    assert!(h.read("Other.md").contains("Another page."));
+    assert!(h.ws.state().page_attachments("1001").unwrap().is_empty());
+    assert!(h.ws.state().removed_attachments("1001").unwrap().is_empty());
+}
+
+/// A dot-named attachment is a file like any other: once pulled, it is there,
+/// and nothing about it is left to push.
+#[tokio::test]
+async fn a_dot_named_attachment_is_pulled_and_not_taken_for_removed() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", ".editorconfig", b"root = true");
+    let outcome = h.pull().await;
+    assert_eq!(outcome.attachments_downloaded, 1, "{outcome:?}");
+    assert!(h.path(".Diagrams/.editorconfig").exists());
+    assert!(h.engine.plan_push(&h.ws, &push_attachments()).unwrap().is_empty());
 }

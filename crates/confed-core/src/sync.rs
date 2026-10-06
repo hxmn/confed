@@ -1085,14 +1085,21 @@ impl SyncEngine {
             });
         }
 
+        // All or nothing: half of this would lose which copies are confed's.
+        let tx = state.conn().unchecked_transaction()?;
         state.clear_page_attachments(id)?;
         for record in &after {
             state.upsert_attachment(record)?;
             state.forget_removed_attachment(id, &record.filename)?;
         }
-        for gone in before.iter().filter(|b| !after.iter().any(|a| a.filename == b.filename)) {
+        // A name that could never be a file in the sidecar has no copy there
+        // to remove: what it points at is something else's.
+        for gone in before.iter().filter(|b| {
+            attachments::is_storable(&b.filename) && !after.iter().any(|a| a.filename == b.filename)
+        }) {
             state.note_removed_attachment(id, &gone.filename, gone.sha256.as_deref())?;
         }
+        tx.commit()?;
         Ok(!same_attachments(&before, &after))
     }
 
@@ -1352,11 +1359,12 @@ impl SyncEngine {
         // Pass two: apply.
         self.progress.stage(if opts.dry_run { "Checking" } else { "Writing" }, Some(plan.len()));
         let mut handled: Vec<String> = Vec::new();
-        // (path a rename left behind, path the page moved to)
-        let mut vacated: Vec<(String, String)> = Vec::new();
-        // (page, its path, whether that path is new) for the pages written,
-        // whose attachments are seen to once every sidecar is where it belongs.
-        let mut written: Vec<(String, String, bool)> = Vec::new();
+        // What every page in the space lays claim to. A rename leaves a file
+        // and a sidecar behind, and they are removed — but never one that
+        // another page is taking over: when two pages swap titles, one page's
+        // old path is the other's new one.
+        let claimed: Vec<&str> = placements.values().map(|p| p.path.as_str()).collect();
+        let claimed_sidecars: Vec<&str> = placements.values().map(|p| p.sidecar.as_str()).collect();
         for (remote_page, action) in plan {
             handled.push(remote_page.page_id.clone());
             let local = files_by_id.get(remote_page.page_id.as_str()).copied();
@@ -1395,11 +1403,46 @@ impl SyncEngine {
             }
 
             let Some(placement) = placements.get(&remote_page.page_id) else { continue };
+            let writes = match &action {
+                PullAction::Nothing | PullAction::Delete => false,
+                PullAction::Blocked(_) => opts.force || opts.reset,
+                _ => true,
+            };
+            if !writes {
+                continue;
+            }
+
+            // A page renamed on the server moves its file, and its sidecar goes
+            // ahead of it: the attachments and unsent comment work in it are
+            // then where everything below looks for them, and a pull cut short
+            // right here is finished by the next one. Unless the sidecar cannot
+            // simply follow — pages that swap titles, or take over one
+            // another's, each want a directory another still has. Whatever such
+            // a page finds at its new path is not its own, so nothing there is
+            // taken for its attachments: they are all fetched again.
+            let moved_from = base_record
+                .map(|b| b.local_path.as_str())
+                .filter(|old| *old != placement.path && !opts.dry_run);
+            let mut displaced = false;
+            if let Some(old) = moved_from {
+                let page = remote_page.page_id.as_str();
+                let old_sidecar = paths::sidecar_for(old);
+                let new_sidecar = paths::sidecar_for(&placement.path);
+                displaced = placements.iter().any(|(id, p)| id != page && p.sidecar == old_sidecar)
+                    || base.iter().any(|b| {
+                        b.page_id != page && paths::sidecar_for(&b.local_path) == new_sidecar
+                    });
+                if displaced {
+                    for mut record in ws.state().page_attachments(page)? {
+                        record.downloaded = false;
+                        ws.state().upsert_attachment(&record)?;
+                    }
+                } else {
+                    move_sidecar(&ws.absolute(&old_sidecar), &ws.absolute(&new_sidecar));
+                }
+            }
 
             match action {
-                PullAction::Nothing | PullAction::Blocked(_) if !opts.force && !opts.reset => {
-                    continue
-                }
                 PullAction::Nothing | PullAction::Delete => continue,
                 PullAction::Create | PullAction::Overwrite | PullAction::Blocked(_) => {
                     let change =
@@ -1428,17 +1471,19 @@ impl SyncEngine {
                 }
             }
 
-            // A page renamed on the server moves its file. The old path is not
-            // removed yet: when two pages swap titles, one page's old path is
-            // another page's new one.
-            let moved = base_record.is_some_and(|b| b.local_path != placement.path);
-            if let (Some(base_record), true, false) = (base_record, moved, opts.dry_run) {
+            // The page is at its new path, so the file at the old one goes
+            // now: two files naming one page is not a state to leave behind,
+            // should the rest of this pull not happen.
+            if let Some(old) = moved_from {
                 outcome.moved.push(MovedPage {
                     page_id: remote_page.page_id.clone(),
-                    from: base_record.local_path.clone(),
+                    from: old.to_string(),
                     to: placement.path.clone(),
                 });
-                vacated.push((base_record.local_path.clone(), placement.path.clone()));
+                let left = ws.absolute(old);
+                if !claimed.contains(&old) && left.exists() {
+                    let _ = std::fs::remove_file(&left);
+                }
             }
 
             // Say what was thrown away. A destructive flag is not a licence to
@@ -1459,7 +1504,12 @@ impl SyncEngine {
             self.progress.item(&placement.path);
 
             if opts.with_attachments && !opts.dry_run {
-                written.push((remote_page.page_id.clone(), placement.path.clone(), moved));
+                let synced = self
+                    .sync_attachments(ws, &remote_page.page_id, &placement.path, opts, displaced)
+                    .await?;
+                outcome.attachments_downloaded += synced.downloaded;
+                outcome.attachments_removed += synced.removed;
+                outcome.warnings.extend(synced.warnings);
             }
             if opts.with_comments && !opts.dry_run {
                 self.write_comments_sidecar(
@@ -1470,42 +1520,19 @@ impl SyncEngine {
                     !opts.reset,
                 )?;
             }
-        }
 
-        // Now that every page has been written, remove the files left behind by
-        // renames — but never one that another page has just claimed.
-        let claimed: Vec<&str> = placements.values().map(|p| p.path.as_str()).collect();
-        let claimed_sidecars: Vec<String> =
-            placements.values().map(|p| p.sidecar.clone()).collect();
-
-        for (old_path, new_path) in vacated {
-            // The page's attachments and comments move with it — unless another
-            // page now owns that sidecar, in which case it is not ours to move.
-            let old_sidecar_rel = paths::sidecar_for(&old_path);
-            if !claimed_sidecars.contains(&old_sidecar_rel) {
-                move_sidecar(
-                    &ws.absolute(&old_sidecar_rel),
-                    &ws.absolute(&paths::sidecar_for(&new_path)),
-                );
+            // A sidecar that could not go ahead of its page is folded into the
+            // new one now, where nobody else is taking it over: what the page
+            // just wrote and downloaded stays, the rest comes along.
+            if let (Some(old), true) = (moved_from, displaced) {
+                let old_sidecar = paths::sidecar_for(old);
+                if !claimed_sidecars.contains(&old_sidecar.as_str()) {
+                    move_sidecar(
+                        &ws.absolute(&old_sidecar),
+                        &ws.absolute(&paths::sidecar_for(&placement.path)),
+                    );
+                }
             }
-
-            if claimed.contains(&old_path.as_str()) {
-                continue;
-            }
-            let old = ws.absolute(&old_path);
-            if old.exists() {
-                let _ = std::fs::remove_file(&old);
-            }
-        }
-
-        // The attachments of the pages just written, now that a renamed page's
-        // sidecar has followed it: the copies already here are found where
-        // they are looked for, and only what is new comes down.
-        for (page_id, path, moved) in written {
-            let synced = self.sync_attachments(ws, &page_id, &path, opts, moved).await?;
-            outcome.attachments_downloaded += synced.downloaded;
-            outcome.attachments_removed += synced.removed;
-            outcome.warnings.extend(synced.warnings);
         }
 
         // Pages pull had nothing to write still need their sidecar looked after:
@@ -1918,20 +1945,20 @@ impl SyncEngine {
     /// local work. It is neither overwritten nor removed — the page's warning
     /// says so — unless the pull was told to discard local changes.
     ///
-    /// `moved` is for a page whose file this pull put somewhere else: a copy
-    /// that did not come along with the sidecar is downloaded, not taken for
-    /// one somebody removed.
+    /// `displaced` is for a page this pull moved to a path where its sidecar
+    /// could not follow: what is there belongs to whichever page had the path
+    /// before, so it is replaced rather than taken for this page's local work.
     async fn sync_attachments(
         &self,
         ws: &mut Workspace,
         page_id: &str,
         page_path: &str,
         opts: &PullOptions,
-        moved: bool,
+        displaced: bool,
     ) -> Result<AttachmentSync> {
         let mut sync = AttachmentSync::default();
-        let discard = opts.force || opts.reset;
-        let restore = if opts.reset { Restore::Changed } else { Restore::from_moved(moved) };
+        let discard = opts.force || opts.reset || displaced;
+        let restore = opts.reset;
         let sidecar = paths::sidecar_for(page_path);
         let dir = ws.absolute(&sidecar);
         // Scratch from a download this or an earlier pull gave up on. Sweeping
@@ -1975,7 +2002,8 @@ impl SyncEngine {
             // Only a copy confed wrote is confed's to remove: untouched, or —
             // when told to discard local changes — edited since. A file it
             // never wrote merely shares the name, and stays without a word.
-            if let (Some(written), true) = (gone.sha256.as_deref(), dest.is_file()) {
+            let ours = gone.sha256.as_deref().filter(|_| attachments::is_storable(&gone.filename));
+            if let (Some(written), true) = (ours, dest.is_file()) {
                 let untouched = attachments::file_sha256(&dest).ok().as_deref() == Some(written);
                 if untouched || discard {
                     std::fs::remove_file(&dest)
@@ -2000,9 +2028,10 @@ impl SyncEngine {
             }
             if !would_download(&record, &dest, restore, discard) {
                 sync.warnings.push(format!(
-                    "{sidecar}/{}: the server has a newer version, but the file here is not \
-                     the copy confed downloaded, so it is kept — `confed pull --force` on the \
-                     page takes the server's, `confed push` uploads this one over it",
+                    "{sidecar}/{}: the server's version has not been downloaded here, and the \
+                     file here is not a copy confed downloaded, so it is kept — `confed pull \
+                     --force` on the page takes the server's, `confed push` uploads this one \
+                     over it",
                     record.filename
                 ));
                 continue;
@@ -2047,7 +2076,7 @@ impl SyncEngine {
     ) -> Result<bool> {
         let dir = ws.absolute(&paths::sidecar_for(page_path));
         let records = ws.state().page_attachments(page_id)?;
-        let restore = if opts.reset { Restore::Changed } else { Restore::Nothing };
+        let restore = opts.reset;
         let discard = opts.force || opts.reset;
         let removable = |gone: &crate::state::RemovedAttachment| {
             gone.sha256.is_some() && dir.join(&gone.filename).is_file()
@@ -3686,29 +3715,6 @@ struct AttachmentSync {
     warnings: Vec<String>,
 }
 
-/// How much of a sidecar that no longer matches what confed wrote there a
-/// pull puts back.
-#[derive(Clone, Copy, PartialEq)]
-enum Restore {
-    /// Nothing: what differs is local work.
-    Nothing,
-    /// A file that is not there, for a page whose sidecar may not have
-    /// followed it to a new path.
-    Missing,
-    /// Whatever differs, which is what a reset is for.
-    Changed,
-}
-
-impl Restore {
-    fn from_moved(moved: bool) -> Self {
-        if moved {
-            Restore::Missing
-        } else {
-            Restore::Nothing
-        }
-    }
-}
-
 /// Does this attachment have to come down?
 ///
 /// It does while the server has a file, or a version of one, that confed has
@@ -3717,16 +3723,12 @@ impl Restore {
 /// work, and only a reset undoes that. A reset still downloads no more than
 /// what differs: re-fetching a file that already matches the server is pure
 /// waste, and on a page full of images it is the slowest part of the reset.
-fn needs_download(record: &AttachmentRecord, dest: &Path, restore: Restore) -> bool {
+fn needs_download(record: &AttachmentRecord, dest: &Path, reset: bool) -> bool {
     let Some(recorded) = record.sha256.as_deref().filter(|_| record.downloaded) else {
         return true;
     };
-    match restore {
-        Restore::Nothing => false,
-        Restore::Missing => !dest.exists(),
-        // Compare the bytes on disk, since a reset exists to undo local changes.
-        Restore::Changed => attachments::file_sha256(dest).ok().as_deref() != Some(recorded),
-    }
+    // Compare the bytes on disk, since a reset exists to undo local changes.
+    reset && attachments::file_sha256(dest).ok().as_deref() != Some(recorded)
 }
 
 /// Whether the file at `dest` is the copy of this attachment confed last
@@ -3738,9 +3740,8 @@ fn is_our_copy(record: &AttachmentRecord, dest: &Path) -> bool {
 
 /// Whether a pull would download this attachment: it has to come down, and
 /// nothing local is in the way — or the pull was told to discard what is.
-fn would_download(record: &AttachmentRecord, dest: &Path, restore: Restore, discard: bool) -> bool {
-    needs_download(record, dest, restore)
-        && (discard || !dest.exists() || is_our_copy(record, dest))
+fn would_download(record: &AttachmentRecord, dest: &Path, reset: bool, discard: bool) -> bool {
+    needs_download(record, dest, reset) && (discard || !dest.exists() || is_our_copy(record, dest))
 }
 
 /// The attachments a page file lists in its frontmatter, if it can be read.

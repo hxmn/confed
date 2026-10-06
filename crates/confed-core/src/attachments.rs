@@ -153,7 +153,9 @@ pub fn diff_attachments(
     }
 
     for record in recorded {
-        if record.downloaded && !local.iter().any(|(name, _)| name == &record.filename) {
+        // Asked of the disk, not of the scan above: a file the scan leaves out
+        // — a dot-file — is there all the same.
+        if record.downloaded && !sidecar_dir.join(&record.filename).is_file() {
             actions.push(AttachmentAction::Delete {
                 attachment_id: record.attachment_id.clone(),
                 filename: record.filename.clone(),
@@ -273,6 +275,20 @@ mod tests {
 
         let actions = diff_attachments(dir.path(), &[unseen, replaced]).unwrap();
         assert!(actions.is_empty(), "neither is a deletion to push: {actions:?}");
+    }
+
+    #[test]
+    fn a_dot_named_attachment_that_is_here_is_not_one_somebody_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".editorconfig"), b"root = true").unwrap();
+        let actions =
+            diff_attachments(dir.path(), &[record("att1", ".editorconfig", "h")]).unwrap();
+        assert!(actions.is_empty(), "{actions:?}");
+
+        std::fs::remove_file(dir.path().join(".editorconfig")).unwrap();
+        let actions =
+            diff_attachments(dir.path(), &[record("att1", ".editorconfig", "h")]).unwrap();
+        assert!(matches!(actions[..], [AttachmentAction::Delete { .. }]), "{actions:?}");
     }
 
     #[test]

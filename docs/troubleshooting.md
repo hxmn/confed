@@ -378,7 +378,7 @@ confed pull "Team Handbook/Onboarding.md"
 confed pull --page 1001
 ```
 
-If the pull instead warns that a file `is not the copy confed downloaded, so it is kept`,
+If the pull instead warns that a file in the sidecar `… is kept`,
 the file was changed locally and confed will not overwrite or remove it on its own:
 `confed pull --force <page>` takes the server's version, `confed push` uploads yours.
 See [sync.md](sync.md#attachments-change-without-their-page).
