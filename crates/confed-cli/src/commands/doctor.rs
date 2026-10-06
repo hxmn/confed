@@ -9,7 +9,7 @@ use crate::output::Output;
 use confed_core::error::{ExitCode, Result};
 use confed_core::session::{keyring_available, SecretBackend};
 use confed_core::state::STATE_DB_FILENAME;
-use confed_core::workspace;
+use confed_core::workspace::{self, Workspace};
 use confed_core::worktree;
 use serde::Serialize;
 use serde_json::json;
@@ -203,11 +203,15 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
             let base_url = ctx.workspace()?.base_url()?.unwrap_or_default();
             let flavor = ctx.workspace()?.flavor()?.unwrap_or(confed_api::Flavor::Cloud);
             let space = ctx.workspace()?.space_key().unwrap_or_default();
-            agent_docs::write(&root, &base_url, flavor, &space)?;
+            let rules = agent_docs::current_rules(ctx.workspace()?).unwrap_or(None);
+            agent_docs::write(&root, &base_url, flavor, &space, rules.as_ref())?;
             checks.push(Check::warn("agent docs", detail).fixed());
         } else {
             checks.push(Check::warn("agent docs", format!("{detail} (run with --fix)")));
         }
+    }
+    if let Some(check) = agent_rules_check(ctx.workspace()?, args.fix) {
+        checks.push(check);
     }
 
     // --- orphan inline markers --------------------------------------------
@@ -261,6 +265,69 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
     }
 
     Ok(report(ctx, checks))
+}
+
+/// Whether `CLAUDE.md` and `AGENTS.md` carry the rules the workspace asks for.
+/// `None` when it asks for none and the files carry none: nothing to report.
+fn agent_rules_check(ws: &Workspace, fix: bool) -> Option<Check> {
+    use crate::commands::agent_docs;
+    const NAME: &str = "agent rules";
+
+    let page_id = match ws.rules_page_id() {
+        Ok(page_id) => page_id,
+        Err(e) => return Some(Check::fail(NAME, e.to_string())),
+    };
+    let rules = match agent_docs::current_rules(ws) {
+        Ok(rules) => rules,
+        Err(e) => return Some(Check::fail(NAME, format!("could not read the rules page: {e}"))),
+    };
+    let drift = agent_docs::rules_drift(ws.root(), rules.as_ref());
+
+    let detail = match (&page_id, &rules) {
+        (None, _) if drift.is_empty() => return None,
+        (None, _) => format!("rules are still in {}, and no rules page is set", drift.join(", ")),
+        (Some(id), None) => {
+            // Nothing to copy yet, so nothing `--fix` could do about it.
+            let fetched = ws.state().get_remote(id).ok().flatten().is_some_and(|r| !r.deleted);
+            return Some(Check::warn(
+                NAME,
+                if fetched {
+                    format!("rules_page_id is {id}, which has not been pulled; run `confed pull`")
+                } else {
+                    format!(
+                        "rules_page_id is {id}, and this workspace has no such page; choose \
+                         another with `confed config --set rules_page_id`"
+                    )
+                },
+            ));
+        }
+        (Some(id), Some(rules)) if drift.is_empty() => {
+            return Some(Check::pass(
+                NAME,
+                format!(
+                    "\"{}\" (page {id}, version {}) heads {}",
+                    rules.title,
+                    rules.version,
+                    agent_docs::FILENAMES.join(" and ")
+                ),
+            ));
+        }
+        (Some(id), Some(rules)) => format!(
+            "the rules in {} are not version {} of \"{}\" (page {id})",
+            drift.join(", "),
+            rules.version,
+            rules.title
+        ),
+    };
+
+    Some(if !fix {
+        Check::warn(NAME, format!("{detail} (run with --fix)"))
+    } else {
+        match agent_docs::sync_rules(ws) {
+            Ok(_) => Check::warn(NAME, detail).fixed(),
+            Err(e) => Check::fail(NAME, format!("{detail}; rewriting them failed: {e}")),
+        }
+    })
 }
 
 /// Round-trip a small document so a broken converter is caught here rather than

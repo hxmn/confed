@@ -623,8 +623,8 @@ pub struct ConfigArgs {
     #[arg(long, value_name = "KEY")]
     pub get: Option<String>,
 
-    /// Write one value.
-    #[arg(long, num_args = 2, value_names = ["KEY", "VALUE"])]
+    /// Write one value. `--set rules_page_id` with no value opens a page picker.
+    #[arg(long, num_args = 1..=2, value_names = ["KEY", "VALUE"])]
     pub set: Vec<String>,
 
     /// Remove one value.

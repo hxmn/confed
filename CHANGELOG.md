@@ -20,6 +20,30 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-06
+
+### Added
+
+- **Rules for agents, kept on a Confluence page.** `confed config --set rules_page_id
+  <page id or path>` names a page of the space, and confed copies its content to the top
+  of `CLAUDE.md` and `AGENTS.md`, above the generated contract — so Claude Code and Codex
+  both start every session in the workspace with the team's own rules. The copy is the
+  page as last synced with the server, never an unpushed edit; `pull` and `push` refresh
+  it when the page moves and say so in their warnings, so an agent already at work knows
+  to read the file again. `confed config --unset rules_page_id` takes the rules out, and
+  `confed doctor` has an "agent rules" check that `--fix` repairs.
+- **A page picker.** `confed config --set rules_page_id` with no value opens the page
+  tree with a preview and a search box: type to narrow the list to the pages whose title
+  contains every word, `Enter` to choose, `Esc` to clear the search or cancel. It needs
+  a terminal; without one the command exits 2 and asks for the page id.
+
+### Changed
+
+- `confed config --set <key>` with no value is now reported as "needs a value" by confed
+  (exit 2, as before) rather than by the argument parser.
+- For crate users: `confed_cli::main` takes a `confed_cli::Views` — the TUI's two entry
+  points, `confed_tui::run` and the new `confed_tui::pick_page` — instead of a single
+  function, and `agent_docs::write` takes the rules to put at the top.
 ## [0.8.2] - 2026-10-06
 
 ### Fixed
@@ -592,7 +616,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/hxmn/confed/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/hxmn/confed/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/hxmn/confed/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/hxmn/confed/compare/v0.7.5...v0.8.0

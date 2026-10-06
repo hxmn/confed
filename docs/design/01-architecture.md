@@ -40,9 +40,9 @@ Why a workspace and not one crate:
   ```
 
   The engine (`confed-core`) knows only the `ConfluenceClient` trait; the CLI picks the
-  concrete client. `confed-cli` does not depend on the TUI: the app hands it
-  `confed_tui::run` to start `confed tui`, because the TUI builds on the CLI's context
-  and commands. `confed-api` and `confed-converter` know nothing of each other or of
+  concrete client. `confed-cli` does not depend on the TUI: the app hands it the
+  TUI's entry points (`confed_tui::run` for `confed tui`, `confed_tui::pick_page` for
+  the page picker), because the TUI builds on the CLI's context and commands. `confed-api` and `confed-converter` know nothing of each other or of
   SQLite.
 
 ### Module map

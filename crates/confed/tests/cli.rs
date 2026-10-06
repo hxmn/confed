@@ -1721,3 +1721,276 @@ async fn queueing_a_reply_keeps_a_resolve_queued_before_it() {
     assert!(text.contains("Agreed."), "{text}");
     assert!(text.contains("<!-- confed:resolve id=2001 -->"), "{text}");
 }
+
+// ------------------------------------------------------- the rules page ---
+
+/// The top of an agent file: everything above the generated contract.
+fn above_the_contract(file: &str) -> &str {
+    file.split("# confed workspace").next().unwrap_or_default()
+}
+
+/// `rules_page_id` names a page whose content heads both agent files, so
+/// Claude Code (`CLAUDE.md`) and Codex (`AGENTS.md`) start with the same rules.
+#[tokio::test]
+async fn a_rules_page_heads_both_agent_files_and_unsetting_it_takes_it_out() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let plain = read(dir.path(), "CLAUDE.md");
+
+    // Purely local: no credentials in the environment, nothing sent.
+    let output =
+        run(confed(dir.path(), &["config", "--set", "rules_page_id", CHILD_PAGE, "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "config");
+    assert_eq!(value["result"]["value"], json!(CHILD_PAGE));
+    assert_eq!(value["result"]["title"], json!("Onboarding"));
+    assert_eq!(value["result"]["path"], json!(CHILD_FILE));
+    assert_eq!(value["result"]["agent_docs"], json!(["CLAUDE.md", "AGENTS.md"]));
+    assert_eq!(value["warnings"], json!([]), "{value}");
+
+    let claude = read(dir.path(), "CLAUDE.md");
+    assert_eq!(claude, read(dir.path(), "AGENTS.md"), "both agents are told the same thing");
+    assert!(
+        claude.starts_with(&format!(
+            "<!-- confed:agent-docs version={} -->\n<!-- confed:rules page_id={CHILD_PAGE} version=1 -->\n# Onboarding\n",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "the rules come straight after the stamp:\n{}",
+        claude.lines().take(4).collect::<Vec<_>>().join("\n")
+    );
+    assert!(above_the_contract(&claude).contains("First week checklist."), "{claude}");
+
+    // The setting reads back, the rest of confed is unbothered, and doctor agrees.
+    let value = envelope(
+        &run(confed(dir.path(), &["config", "--get", "rules_page_id", "--json"])),
+        "config",
+    );
+    assert_eq!(value["result"]["value"], json!(CHILD_PAGE));
+    assert_eq!(value["result"]["source"], json!("stored"));
+    let value = envelope(&run(confed(dir.path(), &["status", "--json"])), "status");
+    assert_eq!(value["warnings"], json!([]), "the files are still current: {value}");
+    assert_eq!(value["result"]["clean"], json!(true), "agent files are not pages: {value}");
+
+    let value = envelope(&run(confed_authed(dir.path(), &["doctor", "--json"])), "doctor");
+    let check = value["result"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == json!("agent rules"))
+        .expect("doctor checks the rules once a rules page is set");
+    assert_eq!(check["status"], json!("pass"), "{check}");
+    assert!(check["detail"].as_str().unwrap().contains("\"Onboarding\""), "{check}");
+
+    // A path names the page as well as its id does.
+    let output =
+        run(confed(dir.path(), &["config", "--set", "rules_page_id", ROOT_FILE, "--json"]));
+    let value = envelope(&output, "config");
+    assert_eq!(value["result"]["value"], json!(ROOT_PAGE), "{value}");
+    let claude = read(dir.path(), "CLAUDE.md");
+    assert!(above_the_contract(&claude).contains("Welcome to the team."));
+    assert!(!claude.contains("First week checklist."), "the old rules are replaced: {claude}");
+
+    let output = run(confed(dir.path(), &["config", "--unset", "rules_page_id", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    assert_eq!(read(dir.path(), "CLAUDE.md"), plain, "exactly as it was before");
+    assert_eq!(read(dir.path(), "AGENTS.md"), plain);
+}
+
+/// The rules are the page as last synced, so a pull that brings a new version
+/// rewrites them — and says so, because an agent already at work has the old
+/// ones in its context.
+#[tokio::test]
+async fn a_pull_that_changes_the_rules_page_refreshes_the_copy_and_says_so() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let server = dc_server().await;
+    let edited = Arc::new(AtomicBool::new(false));
+
+    let seen = edited.clone();
+    Mock::given(method("GET"))
+        .and(path("/rest/api/content"))
+        .and(query_param("spaceKey", SPACE))
+        .and(query_param("type", "page"))
+        .respond_with(move |_: &Request| {
+            let version = if seen.load(Ordering::SeqCst) { 2 } else { 1 };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    summary(ROOT_PAGE, "Team Handbook", None, 3),
+                    summary(CHILD_PAGE, "Onboarding", Some(ROOT_PAGE), version),
+                ],
+                "start": 0, "limit": 100, "size": 2, "_links": {}
+            }))
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let seen = edited.clone();
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{CHILD_PAGE}")))
+        .respond_with(move |_: &Request| {
+            let (version, body) = if seen.load(Ordering::SeqCst) {
+                (2, "<p>First week checklist.</p><p>Ask before deleting a page.</p>")
+            } else {
+                (1, "<p>First week checklist.</p>")
+            };
+            let mut page = summary(CHILD_PAGE, "Onboarding", Some(ROOT_PAGE), version);
+            page["body"] = json!({ "storage": { "value": body, "representation": "storage" } });
+            ResponseTemplate::new(200).set_body_json(page)
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let output = run(confed(dir.path(), &["config", "--set", "rules_page_id", CHILD_PAGE]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(
+        stdout(&output).contains("Set rules_page_id = 1002 (\"Onboarding\")"),
+        "{}",
+        stdout(&output)
+    );
+
+    // Nothing moved on the server: nothing to say.
+    let value = envelope(&run(confed_authed(dir.path(), &["pull", "--json"])), "pull");
+    assert_eq!(value["warnings"], json!([]), "{value}");
+
+    // An unpushed edit of the working file is not a rule yet.
+    let file = dir.path().join(CHILD_FILE);
+    let local = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("{local}\nA local draft.\n")).unwrap();
+    let value = envelope(&run(confed(dir.path(), &["status", "--json"])), "status");
+    assert_eq!(value["warnings"], json!([]), "{value}");
+    assert!(!read(dir.path(), "CLAUDE.md").contains("A local draft."));
+    std::fs::write(&file, local).unwrap();
+
+    edited.store(true, Ordering::SeqCst);
+    let dry = envelope(&run(confed_authed(dir.path(), &["pull", "--dry-run", "--json"])), "pull");
+    assert_eq!(dry["warnings"], json!([]), "a dry run writes nothing: {dry}");
+    assert!(!read(dir.path(), "CLAUDE.md").contains("Ask before deleting"));
+
+    let output = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "pull");
+    let warnings = value["warnings"].to_string();
+    assert!(
+        warnings.contains("version 2 of \\\"Onboarding\\\"") && warnings.contains("AGENTS.md"),
+        "{value}"
+    );
+    for name in ["CLAUDE.md", "AGENTS.md"] {
+        let file = read(dir.path(), name);
+        assert!(
+            above_the_contract(&file).contains("Ask before deleting a page."),
+            "{name}:\n{file}"
+        );
+        assert!(file.contains(&format!("<!-- confed:rules page_id={CHILD_PAGE} version=2 -->")));
+    }
+}
+
+/// A hand edit of the copy is drift like any other: doctor finds it and
+/// `--fix` puts the page's text back.
+#[tokio::test]
+async fn doctor_restores_rules_that_were_edited_in_the_agent_file() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    assert_eq!(
+        exit_code(&run(confed(dir.path(), &["config", "--set", "rules_page_id", CHILD_PAGE]))),
+        0
+    );
+    let good = read(dir.path(), "AGENTS.md");
+    std::fs::write(
+        dir.path().join("AGENTS.md"),
+        good.replace("First week checklist.", "Do whatever you like."),
+    )
+    .unwrap();
+
+    let find = |value: &Value| -> Value {
+        value["result"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == json!("agent rules"))
+            .expect("an agent rules check")
+            .clone()
+    };
+    let check = find(&envelope(&run(confed_authed(dir.path(), &["doctor", "--json"])), "doctor"));
+    assert_eq!(check["status"], json!("warn"), "{check}");
+    let detail = check["detail"].as_str().unwrap();
+    assert!(
+        detail.starts_with("the rules in AGENTS.md are not") && detail.contains("--fix"),
+        "{detail}"
+    );
+
+    let fixed =
+        find(&envelope(&run(confed_authed(dir.path(), &["doctor", "--fix", "--json"])), "doctor"));
+    assert_eq!(fixed["fix_applied"], json!(true), "{fixed}");
+    assert_eq!(read(dir.path(), "AGENTS.md"), good);
+}
+
+/// A page nobody fetched cannot be the rules page; one that is fetched but
+/// not yet written to disk can, and its rules arrive with the pull.
+#[tokio::test]
+async fn the_rules_page_has_to_be_a_page_of_this_workspace() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    let plain = read(dir.path(), "CLAUDE.md");
+
+    let output = run(confed(dir.path(), &["config", "--set", "rules_page_id", "4040", "--json"]));
+    assert_eq!(exit_code(&output), 6, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "config");
+    let message = value["errors"][0]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("page 4040 is not in this workspace"), "{value}");
+    let value = envelope(
+        &run(confed(dir.path(), &["config", "--get", "rules_page_id", "--json"])),
+        "config",
+    );
+    assert_eq!(value["result"]["value"], json!(null), "a refused value is not stored: {value}");
+
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["fetch"]))), 0);
+    let output =
+        run(confed(dir.path(), &["config", "--set", "rules_page_id", CHILD_PAGE, "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "config");
+    assert!(value["warnings"].to_string().contains("has not been pulled"), "{value}");
+    assert_eq!(read(dir.path(), "CLAUDE.md"), plain, "there is nothing to copy yet");
+
+    let value = envelope(&run(confed_authed(dir.path(), &["pull", "--json"])), "pull");
+    assert!(value["warnings"].to_string().contains("version 1 of"), "{value}");
+    assert!(above_the_contract(&read(dir.path(), "CLAUDE.md")).contains("First week checklist."));
+}
+
+/// With no page id, `--set rules_page_id` opens the picker — which a script or
+/// an agent cannot use, so it is told to pass the id rather than left hanging.
+#[tokio::test]
+async fn choosing_the_rules_page_from_a_list_needs_a_terminal() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    for args in [
+        &["config", "--set", "rules_page_id", "--json"][..],
+        &["config", "--set", "rules_page_id"][..],
+    ] {
+        let output = run(confed(dir.path(), args));
+        assert_eq!(exit_code(&output), 2, "{args:?}: {}", stderr(&output));
+        let text = format!("{}{}", stdout(&output), stderr(&output));
+        assert!(text.contains("needs a terminal"), "{args:?}: {text}");
+        assert!(text.contains("confed config --set rules_page_id <PAGE ID>"), "{args:?}: {text}");
+    }
+
+    // Every other setting still needs its value, and says which.
+    let output = run(confed(dir.path(), &["config", "--set", "concurrency", "--json"]));
+    assert_eq!(exit_code(&output), 2);
+    let value = envelope(&output, "config");
+    assert!(
+        value["errors"][0]["message"].as_str().unwrap_or_default().contains("needs a value"),
+        "{value}"
+    );
+}

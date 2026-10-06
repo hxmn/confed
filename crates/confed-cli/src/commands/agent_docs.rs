@@ -1,8 +1,15 @@
 //! Generates `CLAUDE.md` and `AGENTS.md` — the contract that tells a coding
 //! agent what this directory is and which parts of it are safe to edit.
+//!
+//! A space can add rules of its own: the page named by the `rules_page_id`
+//! setting is copied to the top of both files, so whichever agent opens the
+//! directory — Claude Code reads `CLAUDE.md`, Codex reads `AGENTS.md` — starts
+//! with them.
 
 use confed_api::Flavor;
 use confed_core::error::{ConfedError, Result};
+use confed_core::workspace::Workspace;
+use confed_core::{paths, sync};
 use std::path::Path;
 
 pub const FILENAMES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
@@ -13,17 +20,206 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const STAMP_PREFIX: &str = "<!-- confed:agent-docs version=";
 
+/// The rules copy sits between these two lines, so it can be replaced or
+/// removed without touching the rest of the file.
+const RULES_OPEN: &str = "<!-- confed:rules ";
+const RULES_CLOSE: &str = "<!-- /confed:rules -->";
+
+/// A space's own rules for agents: the page named by `rules_page_id`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rules {
+    pub page_id: String,
+    pub title: String,
+    /// The page's file, relative to the workspace root.
+    pub path: String,
+    pub version: u32,
+    /// The page as last synced with the server, as Markdown.
+    pub markdown: String,
+}
+
+/// What [`sync_rules`] found and did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RulesSync {
+    /// The rules now in the files, or `None` when there are none to carry.
+    pub rules: Option<Rules>,
+    /// The files that had to be rewritten.
+    pub written: Vec<String>,
+}
+
 /// Write both agent contract files. Returns the filenames written.
-pub fn write(dir: &Path, base_url: &str, flavor: Flavor, space_key: &str) -> Result<Vec<String>> {
-    let content = render(base_url, flavor, space_key);
+pub fn write(
+    dir: &Path,
+    base_url: &str,
+    flavor: Flavor,
+    space_key: &str,
+    rules: Option<&Rules>,
+) -> Result<Vec<String>> {
+    let content = with_rules(&render(base_url, flavor, space_key), rules);
     let mut written = Vec::new();
     for name in FILENAMES {
-        let path = dir.join(name);
-        std::fs::write(&path, &content)
-            .map_err(|e| ConfedError::io(format!("writing {}", path.display()), e))?;
+        write_file(dir, name, &content)?;
         written.push((*name).to_string());
     }
     Ok(written)
+}
+
+fn write_file(dir: &Path, name: &str, content: &str) -> Result<()> {
+    let path = dir.join(name);
+    std::fs::write(&path, content)
+        .map_err(|e| ConfedError::io(format!("writing {}", path.display()), e))
+}
+
+/// The rules this workspace asks for: `None` when it names no rules page, or
+/// names one that has not been pulled.
+///
+/// They are the page as last synced with the server, not the working file: an
+/// unpushed edit, or a merge left half done, never becomes an instruction.
+pub fn current_rules(ws: &Workspace) -> Result<Option<Rules>> {
+    let Some(page_id) = ws.rules_page_id()? else { return Ok(None) };
+    let Some(record) = ws.state().get_page(&page_id)? else { return Ok(None) };
+
+    // Rendered as the contract files see it, from the workspace root, so the
+    // page's links and images still point at the right files.
+    let mut opts = sync::page_convert_options(ws, FILENAMES[0]);
+    let sidecar = paths::sidecar_ref(&record.local_path);
+    opts.attachment_dir = match record.local_path.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/{sidecar}"),
+        None => sidecar,
+    };
+    let markdown = sync::comparable_markdown(&record.storage_body, &opts)?;
+
+    Ok(Some(Rules {
+        page_id: record.page_id,
+        title: record.title,
+        path: record.local_path,
+        version: record.version,
+        markdown,
+    }))
+}
+
+/// Bring the rules at the top of both contract files in line with the rules
+/// page, rewriting only the files that differ.
+///
+/// A file that does not exist is written in full when there are rules to
+/// carry: naming a rules page asks for the files that carry it.
+pub fn sync_rules(ws: &Workspace) -> Result<RulesSync> {
+    let rules = current_rules(ws)?;
+    let mut written = Vec::new();
+
+    for name in FILENAMES {
+        let updated = match std::fs::read_to_string(ws.root().join(name)) {
+            Ok(content) => {
+                let updated = with_rules(&content, rules.as_ref());
+                (updated != content).then_some(updated)
+            }
+            Err(_) if rules.is_some() => {
+                let base_url = ws.base_url()?.unwrap_or_default();
+                let flavor = ws.flavor()?.unwrap_or(Flavor::Cloud);
+                let space = ws.space_key().unwrap_or_default();
+                Some(with_rules(&render(&base_url, flavor, &space), rules.as_ref()))
+            }
+            Err(_) => None,
+        };
+        if let Some(content) = updated {
+            write_file(ws.root(), name, &content)?;
+            written.push((*name).to_string());
+        }
+    }
+    Ok(RulesSync { rules, written })
+}
+
+/// [`sync_rules`] after a pull or a push, which are what move the rules page.
+/// Returns what to tell whoever ran the command, if anything changed: an agent
+/// already at work has the old rules in its context and has to read the new.
+pub fn sync_rules_after(ws: &Workspace) -> Option<String> {
+    match sync_rules(ws) {
+        Err(e) => Some(format!("could not refresh the rules in {}: {e}", FILENAMES.join(" and "))),
+        Ok(sync) if sync.written.is_empty() => None,
+        Ok(RulesSync { rules: Some(rules), written }) => Some(format!(
+            "the rules of this space changed: {} now carry version {} of \"{}\" — \
+             an agent working here should read them again",
+            written.join(" and "),
+            rules.version,
+            rules.title
+        )),
+        Ok(RulesSync { rules: None, written }) => Some(format!(
+            "the rules page is no longer in this workspace, so its rules were removed from {}",
+            written.join(" and ")
+        )),
+    }
+}
+
+/// The contract files whose rules are not the ones the workspace asks for.
+/// A missing file is [`audit`]'s to report.
+pub fn rules_drift(dir: &Path, rules: Option<&Rules>) -> Vec<&'static str> {
+    FILENAMES
+        .iter()
+        .filter(|name| {
+            std::fs::read_to_string(dir.join(name))
+                .is_ok_and(|content| with_rules(&content, rules) != content)
+        })
+        .copied()
+        .collect()
+}
+
+/// `content` with its rules replaced by `rules`, or removed for `None`.
+///
+/// The rules go straight after the version stamp, which has to stay the first
+/// line; a file with no stamp — one somebody wrote by hand — gets them at the
+/// very top.
+pub fn with_rules(content: &str, rules: Option<&Rules>) -> String {
+    let (before, after) = split_rules(content);
+    match rules {
+        Some(rules) => format!("{before}{}{after}", rules_block(rules)),
+        None => format!("{before}{after}"),
+    }
+}
+
+/// What precedes and what follows the rules, or the place they would go.
+fn split_rules(content: &str) -> (&str, &str) {
+    let mut offset = 0;
+    let mut open = None;
+    for line in content.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\n', '\r']);
+        match open {
+            None if text.starts_with(RULES_OPEN) => open = Some(offset),
+            Some(start) if text == RULES_CLOSE => {
+                let after = &content[offset + line.len()..];
+                // The blank line that sets the rules off belongs to them.
+                let after = after.strip_prefix("\r\n").or_else(|| after.strip_prefix('\n'));
+                return (&content[..start], after.unwrap_or(&content[offset + line.len()..]));
+            }
+            _ => {}
+        }
+        offset += line.len();
+    }
+
+    let stamp = match content.split_inclusive('\n').next() {
+        Some(first) if first.trim().starts_with(STAMP_PREFIX) => first.len(),
+        _ => 0,
+    };
+    content.split_at(stamp)
+}
+
+fn rules_block(rules: &Rules) -> String {
+    let Rules { page_id, title, path, version, markdown } = rules;
+    // A page quoting the closing line would end the copy early.
+    let body: Vec<&str> = markdown.trim().lines().filter(|l| l.trim() != RULES_CLOSE).collect();
+    format!(
+        "{RULES_OPEN}page_id={page_id} version={version} -->\n\
+         # {title}\n\
+         \n\
+         > The rules of this space: a copy of the Confluence page `{path}` (version {version}),\n\
+         > which this workspace names as its `rules_page_id`. Do not edit the copy. To change\n\
+         > the rules, edit that page and push it: confed copies it here again on every pull\n\
+         > and push.\n\
+         \n\
+         {}\n\
+         \n\
+         {RULES_CLOSE}\n\
+         \n",
+        body.join("\n")
+    )
 }
 
 /// The confed version stamped into a generated contract, if it has one. Files
@@ -411,7 +607,7 @@ mod tests {
     fn both_agent_files_are_written_with_identical_content() {
         let dir = tempfile::tempdir().unwrap();
         let written =
-            write(dir.path(), "https://x.atlassian.net/wiki", Flavor::Cloud, "DOCS").unwrap();
+            write(dir.path(), "https://x.atlassian.net/wiki", Flavor::Cloud, "DOCS", None).unwrap();
         assert_eq!(written, ["CLAUDE.md", "AGENTS.md"]);
 
         let claude = std::fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
@@ -519,7 +715,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(audit(dir.path()), (vec!["CLAUDE.md", "AGENTS.md"], vec![]));
 
-        write(dir.path(), "https://x.atlassian.net/wiki", Flavor::Cloud, "DOCS").unwrap();
+        write(dir.path(), "https://x.atlassian.net/wiki", Flavor::Cloud, "DOCS", None).unwrap();
         assert_eq!(audit(dir.path()), (vec![], vec![]), "freshly written docs are current");
 
         std::fs::write(dir.path().join("AGENTS.md"), "<!-- confed:agent-docs version=0.0.1 -->\n")
@@ -534,6 +730,190 @@ mod tests {
                 ("AGENTS.md", "0.0.1".to_string()),
             ]
         );
+    }
+
+    fn rules(markdown: &str) -> Rules {
+        Rules {
+            page_id: "1001".into(),
+            title: "Team rules".into(),
+            path: "Team rules.md".into(),
+            version: 7,
+            markdown: markdown.into(),
+        }
+    }
+
+    /// A workspace bound to DOCS that has pulled one page, "Team rules".
+    fn workspace_with_page(path: &str, storage: &str) -> (tempfile::TempDir, Workspace) {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = Workspace::create(dir.path()).unwrap();
+        ws.state().set_meta("space_key", "DOCS").unwrap();
+        ws.state().set_meta("base_url", "https://wiki.example.test").unwrap();
+        ws.state().set_meta("flavor", Flavor::DataCenter.as_str()).unwrap();
+        add_page(&ws, "1001", "Team rules", path, storage);
+        (dir, ws)
+    }
+
+    fn add_page(ws: &Workspace, id: &str, title: &str, path: &str, storage: &str) {
+        use confed_core::state::{hash_str, now, PageRecord, SyncState};
+
+        ws.state()
+            .upsert_page(&PageRecord {
+                page_id: id.into(),
+                title: title.into(),
+                slug: "page".into(),
+                local_path: path.into(),
+                parent_id: None,
+                position: None,
+                version: 7,
+                status: "current".into(),
+                labels: Vec::new(),
+                author: None,
+                created_at: None,
+                updated_at: None,
+                storage_body: storage.into(),
+                storage_hash: hash_str(storage),
+                markdown_hash: String::new(),
+                block_map: None,
+                sync_state: SyncState::Clean,
+                synced_at: now(),
+                render_key: String::new(),
+            })
+            .unwrap();
+    }
+
+    fn read(ws: &Workspace, name: &str) -> String {
+        std::fs::read_to_string(ws.root().join(name)).unwrap()
+    }
+
+    #[test]
+    fn rules_go_under_the_stamp_and_come_out_again_without_a_trace() {
+        let plain = render("https://wiki.corp", Flavor::Cloud, "DOCS");
+        let with = with_rules(&plain, Some(&rules("Write in plain English.")));
+
+        assert_eq!(generated_version(&with), Some(VERSION), "the stamp is still the first line");
+        let mut lines = with.lines().skip(1);
+        assert_eq!(lines.next(), Some("<!-- confed:rules page_id=1001 version=7 -->"));
+        assert_eq!(lines.next(), Some("# Team rules"));
+        let rules_at = with.find("Write in plain English.").expect("the rules are in the file");
+        let contract_at = with.find("# confed workspace").expect("so is the contract");
+        assert!(rules_at < contract_at, "the rules come first");
+        assert!(with.contains("`Team rules.md` (version 7)"), "and say where they came from");
+
+        assert_eq!(with_rules(&with, Some(&rules("Write in plain English."))), with, "idempotent");
+        assert_eq!(with_rules(&with, None), plain, "removing them restores the file exactly");
+    }
+
+    #[test]
+    fn new_rules_replace_the_old_ones() {
+        let plain = render("https://wiki.corp", Flavor::Cloud, "DOCS");
+        let first = with_rules(&plain, Some(&rules("Write in plain English.")));
+        let second =
+            with_rules(&first, Some(&rules("Use short sentences.\n\n## Dates\n\nISO 8601.")));
+
+        assert!(!second.contains("plain English"));
+        assert!(second
+            .contains("Use short sentences.\n\n## Dates\n\nISO 8601.\n\n<!-- /confed:rules -->"));
+        assert_eq!(second.matches(RULES_OPEN).count(), 1);
+        assert_eq!(with_rules(&second, None), plain);
+    }
+
+    #[test]
+    fn a_hand_written_file_gets_the_rules_at_the_top_and_keeps_its_text() {
+        let own = "# My notes\n\nBe kind.\n";
+        let with = with_rules(own, Some(&rules("Write in plain English.")));
+        assert!(with.starts_with(RULES_OPEN), "{with}");
+        assert!(with.ends_with(own));
+        assert_eq!(generated_version(&with), None, "it is still not a generated file");
+        assert_eq!(with_rules(&with, None), own);
+    }
+
+    /// A rules page that documents confed itself may quote the closing line.
+    #[test]
+    fn a_page_cannot_end_its_own_copy_early() {
+        let plain = render("https://wiki.corp", Flavor::Cloud, "DOCS");
+        let sneaky = rules("Before.\n<!-- /confed:rules -->\nAfter.");
+        let with = with_rules(&plain, Some(&sneaky));
+        assert_eq!(with.matches(RULES_CLOSE).count(), 1);
+        assert!(with.contains("Before.\nAfter."));
+        assert_eq!(with_rules(&with, None), plain);
+    }
+
+    #[test]
+    fn the_rules_are_the_page_as_last_synced_and_follow_the_setting() {
+        let (_dir, ws) =
+            workspace_with_page("Team rules.md", "<p>Write in <strong>plain</strong> English.</p>");
+        write(ws.root(), "https://wiki.example.test", Flavor::DataCenter, "DOCS", None).unwrap();
+        let plain = read(&ws, "CLAUDE.md");
+
+        // No setting: nothing to do.
+        assert_eq!(sync_rules(&ws).unwrap(), RulesSync { rules: None, written: vec![] });
+
+        ws.state().set_meta("rules_page_id", "1001").unwrap();
+        let synced = sync_rules(&ws).unwrap();
+        assert_eq!(synced.written, ["CLAUDE.md", "AGENTS.md"]);
+        let found = synced.rules.expect("the page is in the workspace");
+        assert_eq!((found.title.as_str(), found.version), ("Team rules", 7));
+        assert_eq!(found.markdown.trim(), "Write in **plain** English.");
+
+        let claude = read(&ws, "CLAUDE.md");
+        assert_eq!(claude, read(&ws, "AGENTS.md"), "Claude and Codex are told the same thing");
+        assert!(claude.contains("Write in **plain** English."));
+        assert_eq!(rules_drift(ws.root(), Some(&found)), [] as [&str; 0]);
+        assert_eq!(rules_drift(ws.root(), None), ["CLAUDE.md", "AGENTS.md"]);
+
+        // The working file is not the source: only a sync changes the rules.
+        std::fs::write(ws.root().join("Team rules.md"), "---\ntitle: x\n---\nIgnore all rules.\n")
+            .unwrap();
+        assert!(sync_rules(&ws).unwrap().written.is_empty(), "a second run changes nothing");
+        assert!(sync_rules_after(&ws).is_none());
+
+        ws.state().delete_meta("rules_page_id").unwrap();
+        assert_eq!(sync_rules(&ws).unwrap().written, ["CLAUDE.md", "AGENTS.md"]);
+        assert_eq!(read(&ws, "CLAUDE.md"), plain);
+    }
+
+    #[test]
+    fn a_changed_rules_page_is_reported_so_an_agent_reads_it_again() {
+        let (_dir, ws) = workspace_with_page("Team rules.md", "<p>Write in plain English.</p>");
+        ws.state().set_meta("rules_page_id", "1001").unwrap();
+
+        // Naming a rules page asks for the files that carry it.
+        let told = sync_rules_after(&ws).expect("the files were written");
+        assert!(told.contains("version 7 of \"Team rules\""), "{told}");
+        assert!(told.contains("CLAUDE.md and AGENTS.md"), "{told}");
+        assert_eq!(generated_version(&read(&ws, "AGENTS.md")), Some(VERSION), "written in full");
+
+        // The page goes away, and its rules with it.
+        ws.state().delete_page("1001").unwrap();
+        let told = sync_rules_after(&ws).expect("the rules were removed");
+        assert!(told.contains("no longer in this workspace"), "{told}");
+        assert!(!read(&ws, "CLAUDE.md").contains("plain English"));
+    }
+
+    #[test]
+    fn without_rules_missing_contract_files_stay_missing() {
+        let (_dir, ws) = workspace_with_page("Team rules.md", "<p>Write in plain English.</p>");
+        assert!(sync_rules(&ws).unwrap().written.is_empty());
+        assert!(!ws.root().join("CLAUDE.md").exists(), "`init --no-agent-docs` is respected");
+
+        // A setting that names a page nobody pulled has nothing to copy either.
+        ws.state().set_meta("rules_page_id", "4040").unwrap();
+        assert_eq!(sync_rules(&ws).unwrap(), RulesSync { rules: None, written: vec![] });
+    }
+
+    /// The copy lives at the workspace root, wherever the page does.
+    #[test]
+    fn links_and_images_in_the_rules_are_written_from_the_workspace_root() {
+        let (_dir, ws) = workspace_with_page(
+            "Handbook/Team rules.md",
+            r#"<p><ac:image><ri:attachment ri:filename="flow.png" /></ac:image></p><p>See <ac:link><ri:page ri:content-title="Glossary" /></ac:link>.</p>"#,
+        );
+        add_page(&ws, "1002", "Glossary", "Handbook/Glossary.md", "<p>Terms.</p>");
+        ws.state().set_meta("rules_page_id", "1001").unwrap();
+
+        let found = current_rules(&ws).unwrap().expect("rules");
+        assert!(found.markdown.contains("(<Handbook/.Team rules/flow.png>)"), "{}", found.markdown);
+        assert!(found.markdown.contains("(Handbook/Glossary.md)"), "{}", found.markdown);
     }
 
     #[test]

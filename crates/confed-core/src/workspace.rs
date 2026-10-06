@@ -102,6 +102,11 @@ impl Workspace {
         Ok(self.state.get_meta("flavor")?.and_then(|f| f.parse().ok()))
     }
 
+    /// The page whose content heads `CLAUDE.md` and `AGENTS.md`, if one is set.
+    pub fn rules_page_id(&self) -> Result<Option<String>> {
+        Ok(self.state.get_meta(crate::config::RULES_PAGE.key)?.filter(|id| !id.is_empty()))
+    }
+
     /// Absolute path of a workspace-relative page path.
     pub fn absolute(&self, relative: &str) -> PathBuf {
         self.root.join(relative)
@@ -122,7 +127,8 @@ impl Workspace {
                 "space_key" => {
                     out.insert("space".to_string(), value);
                 }
-                "base_url" | "flavor" | "concurrency" | "editor" | "comments.marks" => {
+                "base_url" | "flavor" | "concurrency" | "editor" | "comments.marks"
+                | "rules_page_id" => {
                     out.insert(key, value);
                 }
                 _ => {}

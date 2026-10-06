@@ -34,6 +34,12 @@ impl Node {
     fn matches(&self, needle: &str) -> bool {
         self.title.to_lowercase().contains(needle) || self.path.to_lowercase().contains(needle)
     }
+
+    /// Whether the title holds every one of `words`, which are lowercase.
+    fn title_has(&self, words: &[String]) -> bool {
+        let title = self.label().to_lowercase();
+        words.iter().all(|word| title.contains(word))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -157,6 +163,28 @@ impl Tree {
     fn subtree_matches(&self, index: usize, needle: &str) -> bool {
         self.nodes[index].matches(needle)
             || self.nodes[index].children.iter().any(|&c| self.subtree_matches(c, needle))
+    }
+
+    /// Pages whose title holds every word of `query`, in tree order.
+    ///
+    /// Unlike [`rows`](Self::rows) this is a flat list with no ancestors: it is
+    /// a set of answers to choose from, so every row has to be one.
+    pub fn search_titles(&self, query: &str) -> Vec<Row> {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        let mut rows = Vec::new();
+        for &root in &self.roots {
+            self.collect_titles(root, &words, &mut rows);
+        }
+        rows
+    }
+
+    fn collect_titles(&self, index: usize, words: &[String], rows: &mut Vec<Row>) {
+        if self.nodes[index].title_has(words) {
+            rows.push(Row { node: index, depth: 0 });
+        }
+        for &child in &self.nodes[index].children {
+            self.collect_titles(child, words, rows);
+        }
     }
 
     pub fn has_children(&self, index: usize) -> bool {
@@ -334,6 +362,25 @@ mod tests {
         tree.set_all_expanded(false);
         assert_eq!(labels(&tree, "week"), ["Handbook", "  Onboarding", "    Week One"]);
         assert!(tree.rows("nothing here").is_empty());
+    }
+
+    #[test]
+    fn a_title_search_lists_only_the_matching_pages() {
+        let (scan, records) = sample();
+        let mut tree = Tree::build(&scan, &records, &[]);
+        tree.set_all_expanded(false);
+
+        // No ancestors, and no match on the path: `Handbook/Onboarding.md` is
+        // not a page called "handbook".
+        assert_eq!(labels(&tree, "book"), ["Handbook", "  Onboarding", "    Week One", "Runbook"]);
+        let found = |query: &str| -> Vec<&str> {
+            tree.search_titles(query).iter().map(|row| tree.nodes[row.node].label()).collect()
+        };
+        assert_eq!(found("book"), ["Handbook", "Runbook"]);
+        assert_eq!(found("WEEK"), ["Week One"], "case does not matter");
+        assert_eq!(found("one  week"), ["Week One"], "every word, in any order");
+        assert_eq!(found("week two"), [] as [&str; 0]);
+        assert!(tree.search_titles("on").iter().all(|row| row.depth == 0), "a flat list");
     }
 
     #[test]

@@ -113,6 +113,9 @@ confed was designed to be driven by coding agents as much as by people.
   work. They are stamped with the confed that wrote them, every command warns when they
   are stale, and `confed version --changelog --since <version>` tells an agent exactly
   what changed after an upgrade.
+- **Your rules, kept in Confluence.** `confed config --set rules_page_id <page>` copies
+  a page of the space to the top of both files, so Claude Code and Codex start every
+  session with the team's own rules — and get the new ones when the page changes.
 - **Dry runs show everything.** `push --dry-run --show-storage` prints the exact
   Confluence markup each page and comment would be sent as.
 

@@ -60,7 +60,9 @@ The `CLAUDE.md` / `AGENTS.md` files that `confed init` writes into a workspace a
 contract for coding agents working *inside* that directory: what is safe to edit, what is
 tool-managed, and which commands to run. They are generated per workspace (they name the
 space and the server), so they are not duplicated here — read the copy in your own
-workspace, or `crates/confed-cli/src/commands/agent_docs.rs` for the template.
+workspace, or `crates/confed-cli/src/commands/agent_docs.rs` for the template. A space
+can put rules of its own at the top of both files by naming a Confluence page:
+[`confed config --set rules_page_id`](commands.md#rules-for-agents-rules_page_id).
 
 ## Design documents
 

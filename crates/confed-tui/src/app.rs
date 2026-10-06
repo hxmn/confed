@@ -641,6 +641,18 @@ impl App {
                     Ok(message) => message,
                     Err(e) => format!("{label} failed: {e}"),
                 };
+                // A pull or a push may have moved the rules page, as it would
+                // have from the command line.
+                if let Some(ws) = &self.ws {
+                    match confed_cli::commands::agent_docs::sync_rules(ws) {
+                        Ok(sync) if sync.written.is_empty() => {}
+                        Ok(sync) => self.status.push_str(&format!(
+                            " The rules in {} were updated.",
+                            sync.written.join(" and ")
+                        )),
+                        Err(e) => self.status.push_str(&format!(" (rules not refreshed: {e})")),
+                    }
+                }
                 if let Err(e) = self.reload() {
                     self.status = format!("{} (refresh failed: {e})", self.status);
                 }
@@ -1023,6 +1035,31 @@ mod tests {
         harness.press(KeyCode::Enter);
         harness.settle();
         assert!(harness.mock.page_body("1001").unwrap().contains("Our addition"));
+    }
+
+    /// A pull from the TUI moves the rules page like one from the command
+    /// line, so the copy in the agent files follows it here too.
+    #[test]
+    fn pulling_a_new_version_of_the_rules_page_refreshes_the_agent_files() {
+        let mut harness = Harness::new();
+        let ws = harness.app.workspace().expect("workspace");
+        ws.state().set_meta("rules_page_id", "1001").unwrap();
+        confed_cli::commands::agent_docs::sync_rules(ws).expect("the first copy");
+        let agents = harness.path("AGENTS.md");
+        assert!(std::fs::read_to_string(&agents).unwrap().contains("Original text."));
+
+        harness.mock.remote_edit("1001", "<p>Original text.</p><p>Ask before deleting.</p>");
+        harness.select("Runbook.md");
+        harness.press(KeyCode::Char('p'));
+        harness.settle();
+
+        assert!(
+            harness.app.status.ends_with("The rules in CLAUDE.md and AGENTS.md were updated."),
+            "{}",
+            harness.app.status
+        );
+        assert!(std::fs::read_to_string(&agents).unwrap().contains("Ask before deleting."));
+        assert_eq!(harness.state_of("Runbook.md"), PageState::Unchanged, "they are not pages");
     }
 
     #[test]

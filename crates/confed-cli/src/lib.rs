@@ -1,8 +1,8 @@
 //! The commands of confed, the offline-first Confluence editor.
 //!
 //! [`main`] is the whole program: it parses the arguments, runs the command and
-//! reports it. The `confed` binary calls it with the TUI's entry point, which
-//! lives in `confed-tui` and builds on the [`context`], [`output`] and
+//! reports it. The `confed` binary calls it with the TUI's entry points, which
+//! live in `confed-tui` and build on the [`context`], [`output`] and
 //! [`commands`] here.
 
 pub mod changelog;
@@ -16,17 +16,32 @@ pub mod prompt;
 use clap::Parser;
 use cli::{Cli, Command, GlobalArgs};
 use confed_core::error::{ConfedError, Result};
+use confed_core::workspace::Workspace;
 use context::Context;
 use output::Output;
 use std::time::Instant;
 
-/// Starts the interactive views for `confed tui`. The app passes
-/// `confed_tui::run`; it is a parameter so this crate does not depend on the
-/// TUI, which itself builds on this crate's context and commands.
+/// The interactive views, which live in `confed-tui`. The app passes them in;
+/// they are parameters so this crate does not depend on the TUI, which itself
+/// builds on this crate's context and commands.
+#[derive(Clone, Copy)]
+pub struct Views {
+    /// `confed tui`.
+    pub tui: TuiLauncher,
+    /// The page picker behind `confed config --set rules_page_id`.
+    pub pick_page: PagePicker,
+}
+
+/// Starts the interactive views for `confed tui`: `confed_tui::run`.
 pub type TuiLauncher = fn(Context) -> Result<Output>;
 
+/// Lets the user choose one page of the workspace's space, starting on the
+/// page with the given id: `confed_tui::pick_page`. Returns the chosen page's
+/// id, or `None` when the user backs out.
+pub type PagePicker = fn(&Workspace, Option<&str>) -> Result<Option<String>>;
+
 /// Run confed for this process's arguments and return its exit code.
-pub fn main(tui: TuiLauncher) -> std::process::ExitCode {
+pub fn main(views: Views) -> std::process::ExitCode {
     let cli = Cli::parse();
     init_tracing(&cli.global);
 
@@ -34,7 +49,7 @@ pub fn main(tui: TuiLauncher) -> std::process::ExitCode {
     let command_name = cli.command.name();
     let json = cli.global.json;
 
-    let exit = match run(cli, tui) {
+    let exit = match run(cli, views) {
         Ok(out) => {
             output::emit(command_name, &out, json, started.elapsed().as_millis());
             out.exit
@@ -47,7 +62,7 @@ pub fn main(tui: TuiLauncher) -> std::process::ExitCode {
     std::process::ExitCode::from(exit.as_i32() as u8)
 }
 
-fn run(cli: Cli, tui: TuiLauncher) -> Result<Output> {
+fn run(cli: Cli, views: Views) -> Result<Output> {
     let Cli { global, command } = cli;
 
     // These describe the binary itself: no config, no workspace, no network.
@@ -59,7 +74,7 @@ fn run(cli: Cli, tui: TuiLauncher) -> Result<Output> {
 
     let ctx = Context::build(global)?;
     let guide = stale_guide_warning(&ctx, &command);
-    let output = run_in(ctx, command, tui)?;
+    let output = run_in(ctx, command, views)?;
     Ok(match guide {
         Some(warning) => output.warn(warning),
         None => output,
@@ -84,10 +99,10 @@ fn stale_guide_warning(ctx: &Context, command: &Command) -> Option<String> {
     ))
 }
 
-fn run_in(mut ctx: Context, command: Command, tui: TuiLauncher) -> Result<Output> {
+fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
     // Purely local commands never touch the network or the keyring.
     match &command {
-        Command::Config(args) => return commands::config::run(&mut ctx, args),
+        Command::Config(args) => return commands::config::run(&mut ctx, args, views.pick_page),
         Command::Status(args) if !args.fetch => return commands::status::run(&mut ctx, args),
         Command::Diff(args) if !args.remote => return commands::diff::run(&mut ctx, args),
         Command::Resolve(args) => return commands::resolve::run(&mut ctx, args),
@@ -100,7 +115,7 @@ fn run_in(mut ctx: Context, command: Command, tui: TuiLauncher) -> Result<Output
     // The TUI owns its own runtime: its event loop is synchronous and hands work
     // to tokio, rather than being driven by it.
     if matches!(command, Command::Tui) {
-        return tui(ctx);
+        return (views.tui)(ctx);
     }
 
     // Credentials are read here, outside the runtime: the OS keyring blocks.

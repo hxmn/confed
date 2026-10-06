@@ -4,8 +4,10 @@
 //! flag → env → stored → prompt precedence debuggable.
 
 use crate::cli::ConfigArgs;
+use crate::commands::agent_docs;
 use crate::context::Context;
 use crate::output::Output;
+use crate::PagePicker;
 use confed_api::Secret;
 use confed_core::config::{self, SETTABLE};
 use confed_core::error::{ConfedError, Result};
@@ -22,11 +24,12 @@ fn meta_key(key: &str) -> Option<&'static str> {
         "concurrency" => Some("concurrency"),
         "editor" => Some("editor"),
         "comments.marks" => Some(confed_core::sync::MARKS_MODE_KEY),
+        "rules_page_id" => Some(config::RULES_PAGE.key),
         _ => None,
     }
 }
 
-pub fn run(ctx: &mut Context, args: &ConfigArgs) -> Result<Output> {
+pub fn run(ctx: &mut Context, args: &ConfigArgs, pick_page: PagePicker) -> Result<Output> {
     if args.no_keychain || args.force_keychain {
         let target = if args.no_keychain { SecretBackend::Sqlite } else { SecretBackend::Keyring };
         return switch_credential_store(ctx, target);
@@ -35,12 +38,30 @@ pub fn run(ctx: &mut Context, args: &ConfigArgs) -> Result<Output> {
     if let Some(key) = &args.unset {
         let meta = meta_key(key).ok_or_else(|| unknown_key(key))?;
         ctx.workspace()?.state().delete_meta(meta)?;
-        return Ok(Output::new(json!({ "unset": key }), format!("Unset {key}.\n")));
+        let mut human = format!("Unset {key}.\n");
+        let mut result = json!({ "unset": key });
+        if meta == config::RULES_PAGE.key {
+            let written = agent_docs::sync_rules(ctx.workspace()?)?.written;
+            if !written.is_empty() {
+                let _ = writeln!(human, "Removed its rules from {}.", written.join(" and "));
+            }
+            result["agent_docs"] = json!(written);
+        }
+        return Ok(Output::new(result, human));
     }
 
     if !args.set.is_empty() {
-        let (key, value) = (&args.set[0], &args.set[1]);
+        let key = &args.set[0];
         let meta = meta_key(key).ok_or_else(|| unknown_key(key))?;
+        if meta == config::RULES_PAGE.key {
+            return set_rules_page(ctx, args.set.get(1).map(String::as_str), pick_page);
+        }
+        let Some(value) = args.set.get(1) else {
+            return Err(ConfedError::usage_with_hint(
+                format!("`--set {key}` needs a value"),
+                format!("confed config --set {key} <VALUE>"),
+            ));
+        };
         if key == "comments.marks" && confed_core::sync::MarksMode::parse(value).is_none() {
             return Err(ConfedError::usage_with_hint(
                 format!("`{value}` is not a marks mode"),
@@ -98,6 +119,86 @@ pub fn run(ctx: &mut Context, args: &ConfigArgs) -> Result<Output> {
     }
 
     Ok(Output::new(json!({ "entries": entries }), human))
+}
+
+/// Name the page whose content heads `CLAUDE.md` and `AGENTS.md`, and copy it
+/// there. With no `reference`, the user chooses the page from the space.
+fn set_rules_page(ctx: &Context, reference: Option<&str>, pick_page: PagePicker) -> Result<Output> {
+    let key = config::RULES_PAGE.key;
+    let ws = ctx.workspace()?;
+
+    let page_id = match reference {
+        Some("") => {
+            return Err(ConfedError::usage_with_hint(
+                format!("`--set {key}` was given an empty page id"),
+                format!("to stop using a rules page: confed config --unset {key}"),
+            ))
+        }
+        Some(reference) => ctx.resolve_page(reference).map_err(|e| match e {
+            ConfedError::NotFound(_) if reference.chars().all(|c| c.is_ascii_digit()) => {
+                ConfedError::NotFound(format!(
+                    "page {reference} is not in this workspace: run `confed fetch` if it is new \
+                     on the server, or `confed config --set {key}` to choose from the pages here"
+                ))
+            }
+            other => other,
+        })?,
+        None => {
+            if !ctx.is_interactive() {
+                return Err(ConfedError::usage_with_hint(
+                    format!("`--set {key}` with no page id opens a picker, which needs a terminal"),
+                    format!("pass the page: confed config --set {key} <PAGE ID>"),
+                ));
+            }
+            match pick_page(ws, ws.rules_page_id()?.as_deref())? {
+                Some(page_id) => page_id,
+                None => {
+                    return Ok(Output::new(
+                        json!({ "cancelled": true }),
+                        format!("Cancelled; {key} is unchanged.\n"),
+                    ))
+                }
+            }
+        }
+    };
+
+    ws.state().set_meta(key, &page_id)?;
+    let synced = agent_docs::sync_rules(ws)?;
+
+    let mut human = String::new();
+    let mut output = match &synced.rules {
+        Some(rules) => {
+            let _ = writeln!(human, "Set {key} = {page_id} (\"{}\")", rules.title);
+            let files = agent_docs::FILENAMES.join(" and ");
+            let _ = if synced.written.is_empty() {
+                writeln!(human, "{files} already start with it.")
+            } else {
+                writeln!(human, "Copied version {} of it to the top of {files}.", rules.version)
+            };
+            Output::new(
+                json!({
+                    "key": key, "value": page_id, "title": rules.title, "path": rules.path,
+                    "version": rules.version, "agent_docs": synced.written,
+                }),
+                String::new(),
+            )
+        }
+        // Fetched but not written to disk: there is no content to copy yet.
+        None => {
+            let _ = writeln!(human, "Set {key} = {page_id}");
+            Output::new(
+                json!({ "key": key, "value": page_id, "agent_docs": synced.written }),
+                String::new(),
+            )
+            .warn(format!(
+                "page {page_id} has not been pulled, so there are no rules to copy yet; \
+                 `confed pull` adds them to {}",
+                agent_docs::FILENAMES.join(" and ")
+            ))
+        }
+    };
+    output.human = human;
+    Ok(output)
 }
 
 /// Move the stored credential between the OS keychain and `.session.db`.

@@ -2,6 +2,7 @@
 //! its outcomes into human text and JSON.
 
 use crate::cli::{FetchArgs, PullArgs, PushArgs};
+use crate::commands::agent_docs;
 use crate::context::Context;
 use crate::output::{plural, Output};
 use confed_core::error::{ConfedError, ExitCode, Result};
@@ -183,6 +184,9 @@ pub mod pull {
         let mut output = Output::from_data(&outcome, human)
             .warn_all(skipped)
             .warn_all(outcome.warnings.iter().cloned());
+        if !args.dry_run {
+            output = output.warn_all(agent_docs::sync_rules_after(ctx.workspace()?));
+        }
         if conflicts > 0 {
             output.exit = ExitCode::Conflict;
         }
@@ -329,6 +333,9 @@ pub mod push {
         }
 
         let mut output = Output::from_data(&outcome, human);
+        if !args.dry_run {
+            output = output.warn_all(agent_docs::sync_rules_after(ctx.workspace()?));
+        }
         if !outcome.failed.is_empty() {
             output.exit = ExitCode::Partial;
         } else if outcome

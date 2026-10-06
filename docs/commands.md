@@ -543,13 +543,14 @@ confed whoami --json | jq -e '.result.capabilities.inline_comment_create'  # 1 o
 
 Inspect and change stored settings. Writable keys are `space`, `concurrency`, `editor`,
 `comments.marks` (`full`, `ids` or `off` — how inline comments are shown in page bodies),
-`base_url` and `flavor`.
+`base_url`, `flavor` and `rules_page_id` (the page that holds the space's
+[rules for agents](#rules-for-agents-rules_page_id)).
 
 | Flag | Meaning |
 |---|---|
 | `--list` | Show every resolved value and where it came from. Secrets show as `***`. |
 | `--get <KEY>` | Read one value. |
-| `--set <KEY> <VALUE>` | Write one value. |
+| `--set <KEY> <VALUE>` | Write one value. `--set rules_page_id` with no value opens a page picker. |
 | `--no-keychain` | Move the credential into `.session.db` so reading it never prompts. |
 | `--force-keychain` | Move the credential back into the OS keychain. |
 | `--unset <KEY>` | Remove one value. |
@@ -560,11 +561,49 @@ confed config --set concurrency 4
 confed config --list --json | jq -r '.result.entries[] | "\(.key)=\(.value) (\(.source))"'
 ```
 
+### Rules for agents: `rules_page_id`
+
+A space can keep its own rules for coding agents — house style, what not to touch, who to
+ask — on an ordinary Confluence page. Name that page and confed copies its content, as
+Markdown, to the top of `CLAUDE.md` and `AGENTS.md`, above the generated contract. Claude
+Code reads the first file and Codex the second, so either agent starts every session in
+the workspace with the same rules, and the team edits them in one place.
+
+```bash
+confed config --set rules_page_id 163842             # by page id
+confed config --set rules_page_id "Agent rules.md"   # or by the page's path
+confed config --set rules_page_id                    # or choose it from a list
+confed config --unset rules_page_id                  # take the rules out again
+```
+
+With no value, `--set rules_page_id` opens a picker over every page of the space: the
+page tree, a preview of the page under the cursor, and a search box. Type to narrow the
+list to the pages whose **title** contains every word you typed, in any order and any
+case; `↑` `↓` move, `Enter` chooses, `Esc` clears the search and then cancels. The picker
+needs a terminal; without one (or with `--json`) the command exits 2 and asks for the id.
+
+The page has to be one this workspace knows (exit 6 otherwise — `confed fetch` first if it
+is new on the server). A page that has been fetched but not pulled is accepted with a
+warning, and its rules arrive with the next `confed pull`.
+
+What is copied is the page **as last synced with the server**, not the working file: an
+unpushed edit, or a merge left half done, never becomes an instruction. So the copy
+changes only when `pull` or `push` moves the page (or the setting changes), and when it
+does the command says so in its warnings — an agent already at work has the old rules in
+its context and should read the file again. Links and images in the page are rewritten to
+work from the workspace root. The copy sits between `<!-- confed:rules … -->` and
+`<!-- /confed:rules -->`; do not edit it there — `confed doctor` reports a copy that has
+drifted from the page, and `--fix` restores it.
+
+The setting is stored in the workspace only (it has no flag or environment variable), and
+`.state.db` is not committed, so each clone sets it once. Bear in mind what it means:
+anyone who can edit that page can change what agents in this workspace are told to do.
+
 ## confed doctor
 
 Check connectivity, credentials, and local state. Each check reports `pass`, `warn` or
 `fail` with a specific next step; any failure exits 1. `--fix` applies the safe repairs:
-`.gitignore` entries and missing agent docs.
+`.gitignore` entries, missing or stale agent docs, and a rules copy that has drifted.
 
 Checks cover the workspace root, `.state.db` integrity and schema version, `.gitignore`
 coverage, the stored credential and its backend, keyring availability, `.session.db`
@@ -575,6 +614,11 @@ The agent-docs check warns both when `CLAUDE.md` / `AGENTS.md` are missing and w
 they were written by a different confed than the one running — the version is stamped
 into the first line of each file. `--fix` rewrites them in either case; see
 [`confed version`](#confed-version) for reading what changed first.
+
+Once a [rules page](#rules-for-agents-rules_page_id) is set, an "agent rules" check
+compares the copy at the top of both files with that page: it warns when they differ
+(`--fix` copies the page again), when the page has not been pulled, and when the
+workspace has no such page.
 
 ```bash
 confed doctor

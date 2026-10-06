@@ -4,10 +4,14 @@
 //! [`SyncEngine`](confed_core::sync::SyncEngine) calls and the same resolution
 //! helper the headless commands use, and renders what they return. Anything the
 //! TUI can do, a script can do without it.
+//!
+//! [`run`] is `confed tui`; [`pick_page`] is the page picker a command opens
+//! when it needs the user to choose a page.
 
 mod app;
 mod conflict;
 mod pane;
+mod picker;
 mod term;
 mod tree;
 mod ui;
@@ -16,6 +20,7 @@ use app::App;
 use confed_cli::context::Context;
 use confed_cli::output::Output;
 use confed_core::error::{ConfedError, Result};
+use confed_core::workspace::Workspace;
 use crossterm::event::{self, Event, KeyEventKind};
 use serde_json::json;
 use std::io::IsTerminal;
@@ -27,7 +32,11 @@ use std::time::Duration;
 const TICK: Duration = Duration::from_millis(100);
 
 pub fn run(mut ctx: Context) -> Result<Output> {
-    require_terminal()?;
+    require_terminal(
+        "`confed tui`",
+        "run it from a terminal; every action it offers is also a command \
+         (status, diff, pull, push, resolve)",
+    )?;
     ctx.workspace()?; // fail early with "run confed init" rather than on a blank screen
 
     // Credentials are resolved out here: the OS keyring blocks, and the TUI must
@@ -58,6 +67,40 @@ pub fn run(mut ctx: Context) -> Result<Output> {
     outcome?;
 
     Ok(Output::new(json!({ "space": app.space }), String::new()))
+}
+
+/// Let the user choose one page of the space, from the page tree or by
+/// searching its titles. `current` is the page to start on. Returns the chosen
+/// page's id, or `None` when the user backs out.
+///
+/// It reads the workspace only, so it offers the pages the last fetch saw.
+pub fn pick_page(ws: &Workspace, current: Option<&str>) -> Result<Option<String>> {
+    require_terminal("choosing a page from a list", "name the page on the command line instead")?;
+    let mut picker = picker::Picker::new(ws, current)?;
+
+    let (mut guard, mut terminal) = term::TerminalGuard::enter()?;
+    let outcome = picker_loop(&mut terminal, &mut picker);
+    guard.restore();
+    outcome
+}
+
+/// Nothing runs in the background here, so the loop simply waits for a key.
+fn picker_loop(terminal: &mut term::Tui, picker: &mut picker::Picker) -> Result<Option<String>> {
+    loop {
+        terminal
+            .draw(|frame| picker::draw(frame, picker))
+            .map_err(|e| ConfedError::io("drawing the screen", e))?;
+
+        match event::read().map_err(|e| ConfedError::io("reading input", e))? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => picker.on_key(key),
+            _ => {}
+        }
+        match picker.outcome.take() {
+            Some(picker::Outcome::Chosen(page_id)) => return Ok(Some(page_id)),
+            Some(picker::Outcome::Cancelled) => return Ok(None),
+            None => {}
+        }
+    }
 }
 
 type Connection =
@@ -93,16 +136,13 @@ fn event_loop(terminal: &mut term::Tui, app: &mut App) -> Result<()> {
     Ok(())
 }
 
-/// The TUI is the one command that cannot fall back to plain output.
-fn require_terminal() -> Result<()> {
+/// The interactive views are the one thing that cannot fall back to plain
+/// output. `hint` says what to do instead.
+fn require_terminal(what: &str, hint: &str) -> Result<()> {
     if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         return Ok(());
     }
-    Err(ConfedError::usage_with_hint(
-        "`confed tui` needs an interactive terminal",
-        "run it from a terminal; every action it offers is also a command \
-         (status, diff, pull, push, resolve)",
-    ))
+    Err(ConfedError::usage_with_hint(format!("{what} needs an interactive terminal"), hint))
 }
 
 #[cfg(test)]
@@ -113,9 +153,19 @@ mod tests {
     #[test]
     fn without_a_terminal_the_tui_exits_with_the_usage_code() {
         // The test harness never has a TTY on stdin, so this is the real path.
-        let error = require_terminal().expect_err("no terminal in a test process");
+        let error = require_terminal("`confed tui`", "use `confed resolve` instead")
+            .expect_err("no terminal in a test process");
         assert_eq!(error.exit_code(), ExitCode::Usage);
-        assert!(error.to_string().contains("interactive terminal"));
+        assert!(error.to_string().contains("`confed tui` needs an interactive terminal"));
         assert!(error.hint().unwrap().contains("resolve"));
+    }
+
+    #[test]
+    fn without_a_terminal_the_picker_says_to_name_the_page_instead() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ws = Workspace::create(dir.path()).expect("workspace");
+        let error = pick_page(&ws, None).expect_err("no terminal in a test process");
+        assert_eq!(error.exit_code(), ExitCode::Usage);
+        assert!(error.hint().unwrap().contains("command line"));
     }
 }

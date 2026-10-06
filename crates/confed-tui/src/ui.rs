@@ -274,7 +274,7 @@ fn draw_resolver(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn pane_line(line: &PaneLine) -> Line<'static> {
+pub(crate) fn pane_line(line: &PaneLine) -> Line<'static> {
     let style = match line.kind {
         LineKind::Plain => Style::default(),
         LineKind::Heading => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),

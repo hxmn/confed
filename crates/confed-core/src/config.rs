@@ -118,8 +118,22 @@ pub const COMMENT_MARKS: ValueSpec = ValueSpec {
     secret: false,
 };
 
+/// The page whose content is copied to the top of `CLAUDE.md` and `AGENTS.md`.
+///
+/// It has no flag and no environment variable: it decides what is written into
+/// files every session in the workspace shares, so it is only ever what the
+/// workspace stores.
+pub const RULES_PAGE: ValueSpec = ValueSpec {
+    name: "page holding this space's rules for agents",
+    flag: "",
+    env: "",
+    key: "rules_page_id",
+    secret: false,
+};
+
 /// Every value `confed config --set` accepts.
-pub const SETTABLE: &[ValueSpec] = &[SPACE, CONCURRENCY, EDITOR, BASE_URL, FLAVOR, COMMENT_MARKS];
+pub const SETTABLE: &[ValueSpec] =
+    &[SPACE, CONCURRENCY, EDITOR, BASE_URL, FLAVOR, COMMENT_MARKS, RULES_PAGE];
 
 /// Asks the user for a value. The CLI supplies a TTY implementation; tests and
 /// non-interactive runs supply [`NoPrompt`].

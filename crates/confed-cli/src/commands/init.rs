@@ -151,7 +151,15 @@ pub async fn initialize(
     let agent_docs = if args.no_agent_docs {
         Vec::new()
     } else {
-        crate::commands::agent_docs::write(dir, &input.base_url, flavor, &space.id.key)?
+        // A directory being re-initialized may already name a rules page.
+        let rules = crate::commands::agent_docs::current_rules(&ws).unwrap_or(None);
+        crate::commands::agent_docs::write(
+            dir,
+            &input.base_url,
+            flavor,
+            &space.id.key,
+            rules.as_ref(),
+        )?
     };
 
     let mut created = vec![".state.db".to_string(), ".session.db".to_string()];
