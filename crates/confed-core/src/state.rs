@@ -659,6 +659,20 @@ impl StateDb {
         Ok(())
     }
 
+    /// A page's comments were read: settle its entry if comments were all it
+    /// asked for. An entry still waiting for the body stays, or the page
+    /// would never be fetched.
+    pub fn mark_comments_fetched(&self, page_id: &str) -> Result<()> {
+        let comments_only = self
+            .pending_fetches()?
+            .into_iter()
+            .any(|(id, needs)| id == page_id && !needs.iter().any(|n| n == "body"));
+        if comments_only {
+            self.mark_fetch_done(page_id)?;
+        }
+        Ok(())
+    }
+
     pub fn clear_fetch_queue(&self) -> Result<()> {
         self.conn.execute("DELETE FROM fetch_queue", [])?;
         Ok(())
@@ -1017,6 +1031,14 @@ mod tests {
         // Re-enqueueing a done page resets it (its version changed again).
         db.enqueue_fetch("1", &["body"]).unwrap();
         assert_eq!(db.pending_fetches().unwrap().len(), 2);
+
+        // Reading a page's comments settles only an entry that wanted no more.
+        db.enqueue_fetch("3", &["comments"]).unwrap();
+        db.mark_comments_fetched("1").unwrap();
+        db.mark_comments_fetched("3").unwrap();
+        let pending: Vec<String> =
+            db.pending_fetches().unwrap().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(pending, ["1", "2"], "the body of page 1 is still owed");
     }
 
     #[test]

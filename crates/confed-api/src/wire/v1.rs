@@ -509,9 +509,111 @@ impl SearchResult {
     }
 }
 
+/// What a comment search must expand for a hit to name the page it is on.
+pub const COMMENT_SEARCH_EXPAND: &str = "content.container";
+
+/// Hits a comment search is followed for. Past this many, the answer is
+/// "comments changed all over the space" rather than a list.
+const MAX_COMMENT_HITS: usize = 2_000;
+
+/// CQL for the comments of a space added or edited in the last `minutes`.
+///
+/// The age is relative to the server's own clock (`now("-90m")`). A date
+/// literal would be read in the time zone of whoever is searching, which the
+/// client has no way to know.
+pub fn recent_comments_cql(space_key: &str, minutes: u64) -> String {
+    let minutes = minutes.max(1);
+    let age = match minutes {
+        m if m <= 2 * 24 * 60 => format!("-{m}m"),
+        m if m <= 60 * 24 * 60 => format!("-{}h", m.div_ceil(60)),
+        m => format!("-{}d", m.div_ceil(24 * 60)),
+    };
+    let space = space_key.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("space = \"{space}\" and type = comment and lastmodified >= now(\"{age}\")")
+}
+
+/// The pages of a space with a comment added or edited in the last `minutes`,
+/// through CQL — the one place both flavors report a comment's own changes
+/// without being asked page by page.
+///
+/// A hit that does not name its container is looked up through the content
+/// endpoint, and one that cannot be placed at all makes the answer "anywhere":
+/// an unattributed comment must not read as "nothing changed".
+pub async fn recent_comment_activity(
+    http: &crate::http::Http,
+    space_key: &str,
+    minutes: u64,
+) -> ApiResult<CommentActivity> {
+    let hits: Vec<SearchResult> = crate::paginate::collect_offset(
+        http,
+        "rest/api/search",
+        &[
+            ("cql", recent_comments_cql(space_key, minutes)),
+            ("expand", COMMENT_SEARCH_EXPAND.to_string()),
+        ],
+        100,
+        Some(MAX_COMMENT_HITS + 1),
+    )
+    .await?;
+    if hits.len() > MAX_COMMENT_HITS {
+        return Ok(CommentActivity::Unbounded);
+    }
+
+    let mut pages: Vec<PageId> = Vec::new();
+    for content in hits.into_iter().filter_map(|hit| hit.content) {
+        // A server that ignores the `type` clause must not have its pages
+        // mistaken for comments.
+        if content.kind.as_deref().is_some_and(|k| k != "comment") {
+            continue;
+        }
+        let container = match content.container {
+            Some(container) => container,
+            None => {
+                let id = content.id.as_string();
+                let looked_up: ApiResult<Content> = http
+                    .get_json(
+                        &format!("rest/api/content/{id}"),
+                        &[("expand", "container".to_string())],
+                    )
+                    .await;
+                match looked_up {
+                    Ok(Content { container: Some(container), .. }) => container,
+                    // It changed somewhere, and nothing says where.
+                    Ok(_) => return Ok(CommentActivity::Unbounded),
+                    // Deleted since the search listed it.
+                    Err(ApiError::NotFound(_)) => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        // Comments on blog posts and attachments are not page comments.
+        if container.kind.as_deref().is_some_and(|k| k != "page") {
+            continue;
+        }
+        let Some(page) = container.id.map(|i| PageId::new(i.as_string())) else { continue };
+        if !pages.contains(&page) {
+            pages.push(page);
+        }
+    }
+    Ok(CommentActivity::Pages(pages))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_comment_search_asks_by_age_on_the_servers_clock() {
+        assert_eq!(
+            recent_comments_cql("DOCS", 90),
+            r#"space = "DOCS" and type = comment and lastmodified >= now("-90m")"#
+        );
+        // Long gaps use coarser units, always rounded towards "further back".
+        assert!(recent_comments_cql("DOCS", 3 * 24 * 60 + 1).ends_with(r#"now("-73h")"#));
+        assert!(recent_comments_cql("DOCS", 90 * 24 * 60 + 1).ends_with(r#"now("-91d")"#));
+        assert!(recent_comments_cql("DOCS", 0).ends_with(r#"now("-1m")"#));
+        assert!(recent_comments_cql("~alice.ng", 5).starts_with(r#"space = "~alice.ng" and"#));
+    }
 
     fn page_json() -> serde_json::Value {
         serde_json::json!({

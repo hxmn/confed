@@ -5,7 +5,7 @@
 //! survives everything that rebuilds sync state — a fresh clone of a repository
 //! that tracks the Markdown but not the state, a `confed init` over an existing
 //! tree, a version that goes back to one seen before — and `fetch` degenerates
-//! to a single request that asks which versions exist.
+//! to asking which versions exist and which comments changed.
 //!
 //! Nothing here is authoritative. Deleting the file costs bandwidth, not
 //! correctness.
@@ -42,7 +42,17 @@ CREATE TABLE IF NOT EXISTS page_extras (
   comments    TEXT NOT NULL,
   fetched_at  TEXT NOT NULL
 );
+
+-- What the cache knows about itself. `comments_checked_at` is when the comments
+-- in `page_extras` were last known to be current, so a state rebuilt from the
+-- cache can ask the server for what changed since, instead of for everything.
+CREATE TABLE IF NOT EXISTS cache_meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 "#;
+
+const COMMENTS_CHECKED_AT: &str = "comments_checked_at";
 
 /// Attachment and comment snapshots for one page, as JSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,6 +158,55 @@ impl PageStore {
         Ok(())
     }
 
+    /// Replace the comment snapshot taken at this version, leaving the
+    /// attachments beside it alone. Without a snapshot at this version there is
+    /// nothing to bring up to date, and nothing is written: half a snapshot
+    /// would restore as "this page has no attachments".
+    pub fn put_comments(&self, page_id: &str, version: u32, comments: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE page_extras SET comments = ?3, fetched_at = ?4
+             WHERE page_id = ?1 AND version = ?2",
+            params![page_id, version, comments, crate::state::now()],
+        )?;
+        Ok(())
+    }
+
+    /// Record the attachments seen at this version when the comments beside
+    /// them could not be read: the comments already cached are kept, as the
+    /// ones in the state are, until [`Self::put_comments`] replaces them.
+    pub fn put_attachments(&self, page_id: &str, version: u32, attachments: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO page_extras (page_id, version, attachments, comments, fetched_at)
+             VALUES (?1, ?2, ?3, '[]', ?4)
+             ON CONFLICT(page_id) DO UPDATE SET
+                version = excluded.version, attachments = excluded.attachments,
+                fetched_at = excluded.fetched_at",
+            params![page_id, version, attachments, crate::state::now()],
+        )?;
+        Ok(())
+    }
+
+    /// When the cached comments were last known to be current, if ever.
+    pub fn comments_checked_at(&self) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM cache_meta WHERE key = ?1",
+                params![COMMENTS_CHECKED_AT],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_comments_checked_at(&self, when: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO cache_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![COMMENTS_CHECKED_AT, when],
+        )?;
+        Ok(())
+    }
+
     /// How many page versions are cached, for `doctor` and tests.
     pub fn len(&self) -> Result<usize> {
         let count: i64 =
@@ -163,6 +222,7 @@ impl PageStore {
     pub fn clear(&self) -> Result<()> {
         self.conn.execute("DELETE FROM page_versions", [])?;
         self.conn.execute("DELETE FROM page_extras", [])?;
+        self.conn.execute("DELETE FROM cache_meta", [])?;
         Ok(())
     }
 }
@@ -225,6 +285,46 @@ mod tests {
             store.extras("1", 8).unwrap().is_none(),
             "a newer page version means they must be looked up again"
         );
+    }
+
+    #[test]
+    fn comments_are_refreshed_only_beside_the_attachments_of_the_same_version() {
+        let store = PageStore::open_in_memory().unwrap();
+        let extras = PageExtras { attachments: "[\"a\"]".into(), comments: "[1]".into() };
+        store.put_extras("1", 7, &extras).unwrap();
+
+        store.put_comments("1", 7, "[1,2]").unwrap();
+        let stored = store.extras("1", 7).unwrap().unwrap();
+        assert_eq!(stored.comments, "[1,2]");
+        assert_eq!(stored.attachments, "[\"a\"]", "the attachments are left alone");
+
+        // Attachments seen at a new version, the comments unread: those stay.
+        store.put_attachments("1", 8, "[\"a\",\"b\"]").unwrap();
+        let stored = store.extras("1", 8).unwrap().unwrap();
+        assert_eq!(
+            (stored.attachments.as_str(), stored.comments.as_str()),
+            ("[\"a\",\"b\"]", "[1,2]")
+        );
+        store.put_extras("1", 7, &extras).unwrap();
+        store.put_comments("1", 7, "[1,2]").unwrap();
+
+        // No snapshot at that version, or none at all: nothing to update.
+        store.put_comments("1", 8, "[9]").unwrap();
+        store.put_comments("2", 1, "[9]").unwrap();
+        assert_eq!(store.extras("1", 7).unwrap().unwrap().comments, "[1,2]");
+        assert!(store.extras("2", 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn the_cache_remembers_when_its_comments_were_current() {
+        let store = PageStore::open_in_memory().unwrap();
+        assert_eq!(store.comments_checked_at().unwrap(), None);
+        store.set_comments_checked_at("2026-01-01T00:00:00Z").unwrap();
+        store.set_comments_checked_at("2026-02-02T00:00:00Z").unwrap();
+        assert_eq!(store.comments_checked_at().unwrap().as_deref(), Some("2026-02-02T00:00:00Z"));
+
+        store.clear().unwrap();
+        assert_eq!(store.comments_checked_at().unwrap(), None, "an empty cache knows nothing");
     }
 
     #[test]

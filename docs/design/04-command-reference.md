@@ -104,9 +104,13 @@ touching working files. Resumable (`fetch_queue`); re-run continues after interr
 
 - Flags: `--page <path|id>…`, `--since <ISO8601>` (CQL `lastmodified >=` narrowing),
   `--prune` is implicit (deletions are recorded, files untouched).
+- Comments have their own versions, so fetch also asks which pages were commented on
+  since its last check (CQL) and re-reads those pages' comments; `--page` re-reads the
+  named pages' regardless.
 - Exit: 0; 5 network; 8 if some pages failed after retries.
 - JSON `result`: `{ "fetched": 42, "unchanged": 310, "deleted_on_remote": 2,
-  "failed": [], "resumed": false, "duration_ms": … }`
+  "failed": [], "resumed": false, "comments_refreshed": 3, "comments_changed": ["1001"],
+  "duration_ms": … }`
 
 ```bash
 confed fetch
@@ -243,7 +247,9 @@ JSON: `{ "page_id", "attached": [{"file","size","sha256"}…] }`.
 Primary store is the sidecar (`.<slug>/comments.md`, design 02 §5); these commands are
 structured accessors over it. All write ops edit the sidecar; `--push` syncs immediately.
 
-- `list <page> [--unresolved] [--inline]` — threads with anchors/context.
+- `list <page> [--unresolved] [--inline] [--refresh]` — threads with anchors/context, from
+  the local copy (`checked_at` says how old it may be); `--refresh` reads them from the
+  server first.
 - `add <page> [--body|-m TEXT | --editor] [--push]` — footer comment draft.
 - `reply <comment-id> -m TEXT [--push]`
 - `resolve <comment-id> [--push]` — on DC inline threads only (a footer comment exits 9).

@@ -327,6 +327,15 @@ pub struct Comment {
     pub anchor: Option<InlineAnchor>,
 }
 
+/// Where comments changed recently, as far as the server can say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommentActivity {
+    /// The pages with a comment added or edited in the window.
+    Pages(Vec<PageId>),
+    /// More changes than the server will list: any page may be among them.
+    Unbounded,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VersionInfo {
     pub number: u32,

@@ -4,9 +4,9 @@
 //! milliseconds instead of sleeping through real backoff.
 
 use confed_api::{
-    ApiError, Attachment, AttachmentId, Auth, BodyFormat, CommentId, CommentKind, ConfluenceClient,
-    Http, InlineAnchor, NewPage, PageId, PageStatus, PageUpdate, Position, RetryPolicy, Secret,
-    SpaceId,
+    ApiError, Attachment, AttachmentId, Auth, BodyFormat, CommentActivity, CommentId, CommentKind,
+    ConfluenceClient, Http, InlineAnchor, NewPage, PageId, PageStatus, PageUpdate, Position,
+    RetryPolicy, Secret, SpaceId,
 };
 use confed_dc::DcClient;
 use serde_json::json;
@@ -1135,4 +1135,157 @@ async fn people_are_found_by_name_with_their_userkey() {
     assert_eq!(people.len(), 1);
     assert_eq!(people[0].user_key.as_deref(), Some("8a8b81"));
     assert_eq!(people[0].display_name, "Kimball Danny");
+}
+
+// ------------------------------------------------ comments that changed ----
+//
+// A comment has its own version: editing one leaves the page's alone, so the
+// page listing cannot show it. CQL is asked instead.
+
+fn comment_hit(id: &str, container: Option<(&str, &str)>) -> serde_json::Value {
+    let mut content =
+        json!({ "id": id, "type": "comment", "status": "current", "title": "Re: Team Handbook" });
+    if let Some((page, kind)) = container {
+        content["container"] = json!({ "id": page, "type": kind, "title": "Team Handbook" });
+    }
+    json!({
+        "content": content,
+        "title": "Re: Team Handbook",
+        "url": format!("/display/DOCS/Team+Handbook?focusedCommentId={id}#comment-{id}"),
+        "lastModified": "2026-08-30T09:00:00.000Z"
+    })
+}
+
+#[tokio::test]
+async fn recent_comment_activity_names_the_pages_commented_on() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/search"))
+        .and(query_param(
+            "cql",
+            r#"space = "DOCS" and type = comment and lastmodified >= now("-90m")"#,
+        ))
+        .and(query_param("expand", "content.container"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                comment_hit("2001", Some(("1001", "page"))),
+                // A second comment on the same page names it once.
+                comment_hit("2002", Some(("1001", "page"))),
+                // A comment on a blog post is not a page comment.
+                comment_hit("2003", Some(("7001", "blogpost"))),
+                // A hit that does not say where it is gets asked.
+                comment_hit("2004", None),
+                // And a server that ignored `type = comment` is not believed.
+                { "content": { "id": "1003", "type": "page", "title": "Onboarding" } },
+            ],
+            "start": 0, "limit": 100, "size": 5, "_links": {}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/2004"))
+        .and(query_param("expand", "container"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "2004", "type": "comment",
+            "container": { "id": 1002, "type": "page" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let activity =
+        client(&server).recent_comment_activity(&SpaceId::from_key("DOCS"), 90).await.unwrap();
+    assert_eq!(activity, CommentActivity::Pages(vec![PageId::new("1001"), PageId::new("1002")]));
+}
+
+#[tokio::test]
+async fn a_comment_search_that_fails_is_an_error_not_an_empty_answer() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/search"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("Could not parse cql"))
+        .mount(&server)
+        .await;
+
+    let err =
+        client(&server).recent_comment_activity(&SpaceId::from_key("DOCS"), 90).await.unwrap_err();
+    assert!(matches!(err, ApiError::Server { status: 400, .. }), "got {err:?}");
+}
+
+#[tokio::test]
+async fn a_comment_that_cannot_be_placed_means_any_page_may_have_changed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [comment_hit("2004", None), comment_hit("2005", None)],
+            "start": 0, "limit": 100, "size": 2, "_links": {}
+        })))
+        .mount(&server)
+        .await;
+    // Deleted since the search listed it: nothing to read anywhere.
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/2004"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("No content found"))
+        .mount(&server)
+        .await;
+    let space = SpaceId::from_key("DOCS");
+    let c = client(&server);
+
+    // …but one the server knows and cannot place is a change with no address.
+    let unplaced = Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/2005"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "id": "2005", "type": "comment" })),
+        )
+        .mount_as_scoped(&server)
+        .await;
+    assert_eq!(c.recent_comment_activity(&space, 90).await.unwrap(), CommentActivity::Unbounded);
+    drop(unplaced);
+
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/2005"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("No content found"))
+        .mount(&server)
+        .await;
+    assert_eq!(
+        c.recent_comment_activity(&space, 90).await.unwrap(),
+        CommentActivity::Pages(vec![])
+    );
+}
+
+#[tokio::test]
+async fn more_comment_changes_than_can_be_listed_are_reported_as_such() {
+    let server = MockServer::start().await;
+    // A full page of hits for every request: the search never runs dry.
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/search"))
+        .respond_with(|req: &Request| {
+            let start: usize = req
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == "start")
+                .and_then(|(_, v)| v.parse().ok())
+                .unwrap_or(0);
+            let limit: usize = req
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == "limit")
+                .and_then(|(_, v)| v.parse().ok())
+                .unwrap_or(100);
+            let results: Vec<_> = (start..start + limit)
+                .map(|i| comment_hit(&(2000 + i).to_string(), Some(("1001", "page"))))
+                .collect();
+            ResponseTemplate::new(200).set_body_json(json!({
+                "results": results, "start": start, "limit": limit, "size": limit,
+                "_links": { "next": "/rest/api/search?next" }
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let activity =
+        client(&server).recent_comment_activity(&SpaceId::from_key("DOCS"), 90).await.unwrap();
+    assert_eq!(activity, CommentActivity::Unbounded);
 }

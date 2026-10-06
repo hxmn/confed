@@ -162,11 +162,19 @@ safe way to find out what changed. Interrupted fetches resume rather than restar
 
 | Flag | Meaning |
 |---|---|
-| `--page <PAGE>` | Restrict to these pages (path or id). Repeatable. |
+| `--page <PAGE>` | Restrict to these pages (path or id), and read their comments again. Repeatable. |
 | `--since <RFC3339>` | Only pages modified at or after this timestamp. |
 
-Exits 8 if some pages failed after retries; the failures are listed in `result.failed` and
-repeated as warnings.
+A comment added or edited in Confluence does not change its page's version, so `fetch`
+also asks the server which pages were commented on since its last check and reads those
+pages' comments again: `result.comments_refreshed` counts them, `result.comments_changed`
+lists the ones that had changed. `--page` reads the named pages' comments regardless,
+which is also what sees a deleted comment. `--since` skips the check. See
+[sync.md](sync.md#comments-change-without-their-page).
+
+Exits 8 if some pages failed after retries, or the comments of some could not be read;
+the failures are listed in `result.failed` and repeated as warnings. A comment search that
+fails is a warning (`result.comment_check_failed`), not a failure.
 
 ```bash
 confed fetch
@@ -195,6 +203,12 @@ Fetch, then materialize pages, attachments and comment sidecars into files.
 Safety rule: `pull` decides the whole plan before writing anything. If any page in scope
 would lose local work, nothing is written at all and the command exits 7 listing what was
 blocked. Diverged pages are merged by default; a merge that leaves markers exits 4.
+
+Comments are pulled even when their page did not change: a page whose comments were
+added or edited on the server is listed in `result.updated` with `"ops": ["comments"]`.
+Naming pages (paths, `--page`, `--label`, `--cql`), `--force` and `--reset` read the
+comments of every page in scope directly, which is what also picks up a comment deleted
+on the server. See [sync.md](sync.md#comments-change-without-their-page).
 
 ```bash
 confed pull                                  # the whole space
@@ -406,7 +420,7 @@ immediately.
 
 | Subcommand | Flags |
 |---|---|
-| `comment list <PAGE>` | `--unresolved`, `--inline` |
+| `comment list <PAGE>` | `--unresolved`, `--inline`, `--refresh` (read the page's comments from the server first) |
 | `comment add <PAGE>` | `-m`, `--body <TEXT>`, `--anchor <TEXT>`, `--occurrence <N>`, `--sidecar`, `--push` |
 | `comment reply <COMMENT_ID>...` | `-m`, `--body <TEXT>` (required), `--push` |
 | `comment resolve <COMMENT_ID>...` | `--all <PAGE>`, `--push` (on Data Center, inline threads only) |
@@ -415,6 +429,11 @@ immediately.
 
 `list --json` gives each comment `resolved` and `thread_resolved` (a reply carries its
 thread's status) and the page's `orphan_markers`: inline markers no comment claims.
+`list` reads the local copy: `checked_at` is when confed last asked the server about
+comment changes (null if it never has), and an edit made in Confluence since then is not
+in it. `list --refresh` reads the page's comments from the server first, updates
+`comments.md` and the marks in the page to match, and reports `refreshed: true` and
+whether anything had `changed`.
 A push reports `comments_added`, `replies_added` and `comments_resolved` separately;
 `reply --push` lists each reply with the `parent` it was posted under — an inline thread
 is one level deep, so a reply to a reply there goes to the thread's root.

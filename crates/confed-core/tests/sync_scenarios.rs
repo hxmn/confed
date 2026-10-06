@@ -2506,3 +2506,620 @@ async fn a_dry_run_can_show_the_storage_it_would_send() {
     assert!(comment.storage.contains(r#"ri:content-title="Glossary""#), "{}", comment.storage);
     assert!(h.mock.mutating_calls().is_empty(), "{:?}", h.mock.mutating_calls());
 }
+
+// ------------------------------------- comments that change on their own ----
+//
+// Adding, editing or deleting a comment leaves its page's version alone, so
+// the page listing fetch works from cannot show it.
+
+use confed_api::CommentKind;
+use confed_core::sync::COMMENTS_CHECKED_AT_KEY;
+
+/// How many times a page's comments were asked of the server.
+fn comment_reads(h: &Harness, page_id: &str) -> usize {
+    h.mock.comment_listings().iter().filter(|p| *p == page_id).count()
+}
+
+/// The pages a pull reports as updated for their comments alone.
+fn comment_updates(outcome: &confed_core::sync::PullOutcome) -> Vec<&str> {
+    outcome
+        .updated
+        .iter()
+        .filter(|p| p.ops == ["comments"])
+        .map(|p| {
+            assert_eq!(p.from_version, p.to_version, "the page itself did not change: {p:?}");
+            p.page_id.as_str()
+        })
+        .collect()
+}
+
+/// Set the mark a fetch asks for comment changes from, as if the last one
+/// had run this long ago.
+fn last_checked_minutes_ago(h: &Harness, minutes: i64) {
+    let then = chrono::Utc::now() - chrono::Duration::minutes(minutes);
+    h.ws.state()
+        .set_meta(COMMENTS_CHECKED_AT_KEY, &then.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap();
+}
+
+// The report: a footer comment edited in the browser, on a page nobody
+// touched, has to reach the workspace on a plain pull.
+both_flavors!(an_edited_footer_comment_reaches_the_workspace, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.seed_page("1002", "Quiet", None, "<p>Body.</p>");
+    let id = h.mock.seed_comment("1001", "<p>Фраза 1.</p>", CommentKind::Footer);
+    h.mock.seed_comment("1002", "<p>Nobody edits this one.</p>", CommentKind::Footer);
+    h.pull().await;
+    assert!(h.read(".Discussed/comments.md").contains("Фраза 1."));
+
+    // Time passes; then the comment is edited. The page stays at its version.
+    h.mock.age_comments(24 * 60);
+    last_checked_minutes_ago(&h, 3 * 60);
+    h.mock.edit_comment_directly(&id, "<p>Фраза 2, edited.</p>");
+    assert_eq!(h.mock.page_version("1001"), Some(1));
+    let quiet_reads = comment_reads(&h, "1002");
+
+    let outcome = h.pull().await;
+    assert_eq!(comment_updates(&outcome), ["1001"], "{outcome:?}");
+    assert_eq!(outcome.updated.len(), 1, "and nothing else: {outcome:?}");
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    let sidecar = h.read(".Discussed/comments.md");
+    assert!(sidecar.contains("Фраза 2, edited."), "{sidecar}");
+    assert!(!sidecar.contains("Фраза 1."), "{sidecar}");
+    assert_eq!(h.status("1001"), PageState::Unchanged, "a comment is not a page edit");
+    assert_eq!(comment_reads(&h, "1002"), quiet_reads, "only the commented page is read again");
+
+    // Nothing changed since: nothing is reported, and nothing rewritten.
+    let written = std::fs::metadata(h.path(".Discussed/comments.md")).unwrap().modified().unwrap();
+    let again = h.pull().await;
+    assert!(again.is_empty(), "{again:?}");
+    assert_eq!(
+        std::fs::metadata(h.path(".Discussed/comments.md")).unwrap().modified().unwrap(),
+        written,
+        "an unchanged sidecar is left alone"
+    );
+});
+
+// The same for an inline comment: the sidecar and the mark in the body follow.
+both_flavors!(an_edited_inline_comment_reaches_the_workspace, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    let id = h.mock.seed_comment("1001", "<p>Link the template?</p>", CommentKind::Inline);
+    h.pull().await;
+    assert!(h.read("Onboarding.md").contains(&format!("<!--c {id} Alice Ng: Link the template?")));
+
+    h.mock.age_comments(24 * 60);
+    h.mock.edit_comment_directly(&id, "<p>Link the new template?</p>");
+    let outcome = h.pull().await;
+
+    assert_eq!(comment_updates(&outcome), ["1001"], "{outcome:?}");
+    assert!(h.read(".Onboarding/comments.md").contains("Link the new template?"));
+    let file = h.read("Onboarding.md");
+    assert!(
+        file.contains(&format!(
+            "<!--c {id} Alice Ng: Link the new template?-->first week checklist"
+        )),
+        "the preview in the body follows: {file}"
+    );
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+    assert!(h.pull().await.is_empty(), "and then it is settled");
+});
+
+// A comment added to a page that did not change is found the same way.
+both_flavors!(a_new_comment_on_an_unchanged_page_is_pulled, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.pull().await;
+    assert!(!h.path(".Discussed/comments.md").exists(), "no comments, no sidecar");
+
+    h.mock.seed_comment("1001", "<p>First to comment.</p>", CommentKind::Footer);
+    let outcome = h.pull().await;
+    assert_eq!(comment_updates(&outcome), ["1001"], "{outcome:?}");
+    assert!(h.read(".Discussed/comments.md").contains("First to comment."));
+});
+
+/// A pull with nothing new on the server asks for no page's comments: the
+/// search is the only request the check costs.
+#[tokio::test]
+async fn a_quiet_pull_reads_no_comments() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    for i in 1..=3 {
+        h.mock.seed_page(&format!("100{i}"), &format!("Page {i}"), None, "<p>Body.</p>");
+        h.mock.seed_comment(&format!("100{i}"), "<p>Settled.</p>", CommentKind::Footer);
+    }
+    h.pull().await;
+    h.mock.age_comments(24 * 60);
+
+    let before = h.mock.comment_listings().len();
+    let outcome = h.pull().await;
+    assert!(outcome.is_empty(), "{outcome:?}");
+    assert_eq!(h.mock.comment_listings().len(), before, "{:?}", h.mock.comment_listings());
+}
+
+/// The search reaches back to the last check, however long ago that was, and
+/// not much further.
+#[tokio::test]
+async fn the_comment_check_covers_everything_since_the_last_one() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    let id = h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+
+    // Edited two days ago, by a workspace that last looked three days ago.
+    h.mock.edit_comment_directly(&id, "<p>After.</p>");
+    h.mock.age_comments(2 * 24 * 60);
+    last_checked_minutes_ago(&h, 3 * 24 * 60);
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.comments_refreshed, 1, "{outcome:?}");
+    assert_eq!(outcome.comments_changed, ["1001"], "{outcome:?}");
+    assert_eq!(outcome.fetched, 0, "the page body was not downloaded again");
+
+    // The check moved the mark to now: the old edit is not asked about again.
+    let reads = comment_reads(&h, "1001");
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.comments_refreshed, 0, "{outcome:?}");
+    assert_eq!(comment_reads(&h, "1001"), reads);
+}
+
+/// A workspace that has never checked — one written by an older confed — reads
+/// every page's comments once, since nothing says how old they are.
+#[tokio::test]
+async fn a_workspace_from_before_the_check_reads_every_pages_comments_once() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.seed_page("1002", "Quiet", None, "<p>Body.</p>");
+    let id = h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+
+    // Edited long ago, as far as any search window goes.
+    h.mock.edit_comment_directly(&id, "<p>After.</p>");
+    h.mock.age_comments(400 * 24 * 60);
+    h.ws.state().delete_meta(COMMENTS_CHECKED_AT_KEY).unwrap();
+
+    let outcome = h.pull().await;
+    assert_eq!(comment_updates(&outcome), ["1001"], "{outcome:?}");
+    assert!(h.read(".Discussed/comments.md").contains("After."));
+    assert!(h.ws.state().get_meta(COMMENTS_CHECKED_AT_KEY).unwrap().is_some());
+
+    let reads = h.mock.comment_listings().len();
+    h.pull().await;
+    assert_eq!(h.mock.comment_listings().len(), reads, "once is enough");
+}
+
+/// A search that cannot answer must not read as "nothing changed": the pull
+/// says so, and the next check still covers the gap.
+#[tokio::test]
+async fn a_failed_comment_check_is_reported_and_made_up_for() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    let id = h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+    last_checked_minutes_ago(&h, 60);
+    let mark = h.ws.state().get_meta(COMMENTS_CHECKED_AT_KEY).unwrap();
+
+    h.mock.edit_comment_directly(&id, "<p>After.</p>");
+    h.mock.age_comments(30);
+    h.mock.break_comment_search(true);
+    let outcome = h.pull().await;
+    assert_eq!(outcome.warnings.len(), 1, "{outcome:?}");
+    assert!(outcome.warnings[0].contains("which comments changed"), "{outcome:?}");
+    assert!(outcome.warnings[0].contains("search is unavailable"), "{outcome:?}");
+    assert!(h.read(".Discussed/comments.md").contains("Before."));
+    assert_eq!(h.ws.state().get_meta(COMMENTS_CHECKED_AT_KEY).unwrap(), mark, "the mark stays");
+
+    h.mock.break_comment_search(false);
+    let outcome = h.pull().await;
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(comment_updates(&outcome), ["1001"], "{outcome:?}");
+    assert!(h.read(".Discussed/comments.md").contains("After."));
+}
+
+/// More changes than the search will list means any page may have some.
+#[tokio::test]
+async fn too_many_comment_changes_to_list_means_reading_them_all() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.seed_page("1002", "Quiet", None, "<p>Body.</p>");
+    h.pull().await;
+    h.mock.age_comments(24 * 60);
+
+    h.mock.overflow_comment_search(true);
+    let before = h.mock.comment_listings().len();
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.comments_refreshed, 2, "{outcome:?}");
+    assert_eq!(h.mock.comment_listings().len(), before + 2);
+    assert!(outcome.comment_check_failed.is_none());
+}
+
+// Naming a page reads its comments whatever the search says — which is also
+// what sees a deletion, since a deleted comment is in no search result.
+both_flavors!(a_named_page_has_its_comments_read_again, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Body.</p>");
+    let gone = h.mock.seed_comment("1001", "<p>Deleted soon.</p>", CommentKind::Footer);
+    h.mock.seed_comment("1001", "<p>Stays.</p>", CommentKind::Footer);
+    h.pull().await;
+    h.mock.age_comments(24 * 60);
+    h.mock.delete_comment_directly(&gone);
+    // Even with the search out of order.
+    h.mock.break_comment_search(true);
+
+    let other_reads = comment_reads(&h, "1002");
+    for scope in ["1001", "Discussed.md"] {
+        let reads = comment_reads(&h, "1001");
+        let outcome = h
+            .engine
+            .pull(
+                &mut h.ws,
+                &PullOptions { scope: vec![scope.to_string()], ..PullOptions::everything() },
+            )
+            .await
+            .expect("pull");
+        assert_eq!(comment_reads(&h, "1001"), reads + 1, "{scope}: read once more");
+        if scope == "1001" {
+            assert_eq!(comment_updates(&outcome), ["1001"], "{outcome:?}");
+        }
+    }
+    let sidecar = h.read(".Discussed/comments.md");
+    assert!(!sidecar.contains("Deleted soon."), "{sidecar}");
+    assert!(sidecar.contains("Stays."), "{sidecar}");
+    assert_eq!(comment_reads(&h, "1002"), other_reads, "a page not named is not read");
+});
+
+/// `--force` and `--reset` read every page's comments again.
+#[tokio::test]
+async fn force_and_reset_read_comments_whatever_the_page_version() {
+    for reset in [false, true] {
+        let mut h = Harness::new(Flavor::DataCenter);
+        h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+        let only = h.mock.seed_comment("1001", "<p>The only comment.</p>", CommentKind::Footer);
+        h.pull().await;
+        h.mock.age_comments(24 * 60);
+        h.mock.delete_comment_directly(&only);
+
+        // A plain pull has no way to see the deletion.
+        assert!(h.pull().await.is_empty());
+
+        let opts = PullOptions { force: !reset, reset, ..PullOptions::everything() };
+        let outcome = h.engine.pull(&mut h.ws, &opts).await.expect("pull");
+        assert!(outcome.updated.iter().any(|p| p.page_id == "1001"), "reset={reset}: {outcome:?}");
+        let sidecar = h.read(".Discussed/comments.md");
+        assert!(!sidecar.contains("The only comment."), "reset={reset}: {sidecar}");
+        assert!(sidecar.contains("No comments yet"), "reset={reset}: {sidecar}");
+        assert!(h.ws.state().page_comments("1001").unwrap().is_empty());
+    }
+}
+
+/// A dry run says a page's comments would be updated, and leaves the file.
+#[tokio::test]
+async fn a_dry_run_reports_changed_comments_without_writing_them() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    let id = h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+    h.mock.edit_comment_directly(&id, "<p>After.</p>");
+
+    let dry = h
+        .engine
+        .pull(&mut h.ws, &PullOptions { dry_run: true, ..PullOptions::everything() })
+        .await
+        .expect("dry run");
+    assert_eq!(comment_updates(&dry), ["1001"], "{dry:?}");
+    assert!(h.read(".Discussed/comments.md").contains("Before."), "nothing was written");
+
+    // The fetch already happened; the state alone is enough to write from.
+    let outcome = h
+        .engine
+        .pull(&mut h.ws, &PullOptions { no_fetch: true, ..PullOptions::everything() })
+        .await
+        .expect("pull");
+    assert_eq!(comment_updates(&outcome), ["1001"], "{outcome:?}");
+    assert!(h.read(".Discussed/comments.md").contains("After."));
+}
+
+/// One page's comments can be read again on their own.
+#[tokio::test]
+async fn one_pages_comments_can_be_refreshed() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    let inline = h.mock.seed_comment("1001", "<p>Link the template?</p>", CommentKind::Inline);
+    let footer = h.mock.seed_comment("1001", "<p>Reviewed.</p>", CommentKind::Footer);
+    h.pull().await;
+    let mut sidecar = h.read(".Onboarding/comments.md");
+    sidecar.push_str("\n<!-- confed:new -->\nA draft of mine.\n");
+    h.write(".Onboarding/comments.md", &sidecar);
+
+    assert!(!h.engine.refresh_comments(&mut h.ws, "1001").await.unwrap(), "nothing changed");
+
+    h.mock.delete_comment_directly(&inline);
+    h.mock.edit_comment_directly(&footer, "<p>Reviewed twice.</p>");
+    assert!(h.engine.refresh_comments(&mut h.ws, "1001").await.unwrap());
+    let sidecar = h.read(".Onboarding/comments.md");
+    assert!(sidecar.contains("Reviewed twice."), "{sidecar}");
+    assert!(!sidecar.contains("Link the template?"), "{sidecar}");
+    assert!(sidecar.contains("A draft of mine."), "the draft is kept: {sidecar}");
+    assert!(!h.read("Onboarding.md").contains("<!--c"), "the deleted thread's mark is gone");
+
+    let err = h.engine.refresh_comments(&mut h.ws, "4040").await.unwrap_err();
+    assert_eq!(err.exit_code(), confed_core::error::ExitCode::NotFound);
+}
+
+/// Comments that cannot be read are not comments that are gone: the ones
+/// already here stay, the failure is reported, and the next fetch asks again.
+#[tokio::test]
+async fn a_failed_comment_listing_keeps_the_comments_already_here() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    let id = h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+
+    // With the page itself changing…
+    h.mock.break_comment_listing("1001", true);
+    h.mock.remote_edit("1001", "<p>Body, edited.</p>");
+    h.mock.edit_comment_directly(&id, "<p>After.</p>");
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.fetched, 1, "the page itself came through: {outcome:?}");
+    assert_eq!(outcome.failed.len(), 1, "{outcome:?}");
+    assert!(outcome.failed[0].error.contains("comments could not be read"), "{outcome:?}");
+    assert_eq!(h.ws.state().page_comments("1001").unwrap()[0].body_markdown.trim(), "Before.");
+
+    // …and without: the read that is still owed fails again, and is still owed.
+    h.mock.age_comments(24 * 60);
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.failed.len(), 1, "{outcome:?}");
+    assert_eq!(h.ws.state().page_comments("1001").unwrap().len(), 1);
+
+    h.mock.break_comment_listing("1001", false);
+    let outcome = h.pull().await;
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert!(h.read(".Discussed/comments.md").contains("After."));
+    assert!(h.read("Discussed.md").contains("Body, edited."));
+    assert!(h.ws.state().pending_fetches().unwrap().is_empty());
+}
+
+/// A read still owed for a page that has since been deleted is dropped, not
+/// retried and failed on every fetch from then on.
+#[tokio::test]
+async fn nothing_stays_owed_for_a_page_that_is_gone() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+
+    h.mock.break_comment_listing("1001", true);
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.failed.len(), 1, "the read is owed: {outcome:?}");
+
+    h.mock.delete_page_directly("1001");
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.deleted_on_remote, ["1001"]);
+    assert!(outcome.failed.is_empty(), "{outcome:?}");
+    assert!(h.ws.state().pending_fetches().unwrap().is_empty());
+}
+
+/// A state rebuilt from the cache gets the cache's comments, and then asks the
+/// server what changed since the cache last knew — not for every page again.
+#[tokio::test]
+async fn comments_restored_from_the_cache_are_brought_up_to_date() {
+    let mut h = Harness::new(Flavor::Cloud);
+    for i in 1..=3 {
+        h.mock.seed_page(&format!("100{i}"), &format!("Page {i}"), None, "<p>Body.</p>");
+    }
+    let id = h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+    h.mock.age_comments(24 * 60);
+
+    let forget = |h: &Harness| {
+        h.ws.state().conn().execute("DELETE FROM remote_pages", []).unwrap();
+        h.ws.state().conn().execute("DELETE FROM comments", []).unwrap();
+        h.ws.state().delete_meta(COMMENTS_CHECKED_AT_KEY).unwrap();
+    };
+
+    forget(&h);
+    h.mock.edit_comment_directly(&id, "<p>After.</p>");
+    let before = h.mock.comment_listings().len();
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!((outcome.fetched, outcome.from_cache), (0, 3), "{outcome:?}");
+    assert_eq!(outcome.comments_changed, ["1001"], "{outcome:?}");
+    assert_eq!(h.mock.comment_listings().len(), before + 1, "only the page that changed");
+    assert_eq!(h.ws.state().page_comments("1001").unwrap()[0].body_markdown.trim(), "After.");
+
+    // A cache that does not say how current its comments are — one written
+    // by an older confed — is not taken at its word.
+    forget(&h);
+    rusqlite::Connection::open(h.path(".pages.db"))
+        .unwrap()
+        .execute("DELETE FROM cache_meta", [])
+        .unwrap();
+    let before = h.mock.comment_listings().len();
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.from_cache, 3, "{outcome:?}");
+    assert_eq!(h.mock.comment_listings().len(), before + 3, "every restored page is read");
+}
+
+/// `fetch --page` reads the named page's comments, and leaves the space-wide
+/// mark alone: it has not looked at the space.
+#[tokio::test]
+async fn fetching_a_named_page_reads_its_comments() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Body.</p>");
+    let id = h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+    last_checked_minutes_ago(&h, 60);
+    let mark = h.ws.state().get_meta(COMMENTS_CHECKED_AT_KEY).unwrap();
+    h.mock.delete_comment_directly(&id);
+
+    let opts = confed_core::sync::FetchOptions { pages: vec!["1001".into()], since: None };
+    let outcome = h.engine.fetch(&mut h.ws, &opts).await.expect("fetch");
+    assert_eq!(outcome.comments_refreshed, 1, "{outcome:?}");
+    assert_eq!(outcome.comments_changed, ["1001"], "{outcome:?}");
+    assert_eq!(comment_reads(&h, "1002"), 1, "the other page was read once, when first pulled");
+    assert_eq!(h.ws.state().get_meta(COMMENTS_CHECKED_AT_KEY).unwrap(), mark);
+}
+
+/// A resolve queued in the sidecar is unsent work, like a draft: a pull keeps
+/// it — until the thread is resolved on the server, when nothing is left to do.
+#[tokio::test]
+async fn a_queued_resolve_survives_a_pull() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Onboarding", None, COMMENTED);
+    let id = h.mock.seed_comment("1001", "<p>Link the template?</p>", CommentKind::Inline);
+    h.pull().await;
+
+    let request = format!("<!-- confed:resolve id={id} -->");
+    let mut sidecar = h.read(".Onboarding/comments.md");
+    sidecar.push_str(&format!("\n{request}\n"));
+    h.write(".Onboarding/comments.md", &sidecar);
+
+    let outcome = h.pull().await;
+    assert!(outcome.is_empty(), "a request is not a change on the server: {outcome:?}");
+    assert!(h.read(".Onboarding/comments.md").contains(&request), "the request is kept");
+    assert_eq!(confed_core::sync::pending_comment_work(&h.ws, "Onboarding.md"), 1);
+
+    h.mock.resolve_seeded(&id);
+    h.engine.refresh_comments(&mut h.ws, "1001").await.unwrap();
+    let sidecar = h.read(".Onboarding/comments.md");
+    assert!(sidecar.contains("resolved=true"), "{sidecar}");
+    assert!(!sidecar.contains(&request), "nothing left to resolve: {sidecar}");
+}
+
+/// A sidecar holding nothing but drafts is local work too, and `--reset`
+/// discards it like any other.
+#[tokio::test]
+async fn reset_discards_drafts_on_a_page_without_comments() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Quiet", None, "<p>Body.</p>");
+    h.pull().await;
+    std::fs::create_dir_all(h.path(".Quiet")).unwrap();
+    h.write(".Quiet/comments.md", "# Comments — Quiet (page 1001)\n\n<!-- confed:new -->\nMine.\n");
+
+    h.pull().await;
+    assert!(h.read(".Quiet/comments.md").contains("Mine."), "a plain pull keeps the draft");
+
+    h.engine
+        .pull(&mut h.ws, &PullOptions { reset: true, ..PullOptions::everything() })
+        .await
+        .expect("reset");
+    assert!(!h.read(".Quiet/comments.md").contains("Mine."));
+}
+
+/// Reading a page's comments must not settle a fetch of its body that is still
+/// owed: the page would stay at its old text under the new version for good.
+#[tokio::test]
+async fn reading_comments_does_not_cancel_a_body_still_owed() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Notes", None, "<p>One.</p>");
+    h.mock.seed_comment("1001", "<p>A comment.</p>", CommentKind::Footer);
+    h.pull().await;
+
+    // The page moves on, and its body cannot be fetched just now — during a
+    // pull that insists on reading the page's comments.
+    h.mock.remote_edit("1001", "<p>Two.</p>");
+    h.mock.break_page_fetch("1001", true);
+    let opts = PullOptions { force: true, ..PullOptions::everything() };
+    let outcome = h.engine.pull(&mut h.ws, &opts).await.expect("pull");
+    assert!(outcome.warnings.iter().any(|w| w.contains("1001")), "{outcome:?}");
+    assert_eq!(h.ws.state().pending_fetches().unwrap().len(), 1, "the body is still owed");
+    // And the old text is not passed off as the new version meanwhile.
+    assert!(outcome.updated.is_empty(), "{outcome:?}");
+    assert_eq!(h.ws.state().get_page("1001").unwrap().unwrap().version, 1);
+    assert_eq!(h.status("1001"), PageState::Behind);
+
+    h.mock.break_page_fetch("1001", false);
+    let outcome = h.pull().await;
+    assert_eq!(outcome.updated.len(), 1, "{outcome:?}");
+    assert!(h.read("Notes.md").contains("Two."), "{}", h.read("Notes.md"));
+    assert!(h.ws.state().pending_fetches().unwrap().is_empty());
+}
+
+/// A new page whose body could not be fetched is not written as an empty
+/// file: it appears once its content is here.
+#[tokio::test]
+async fn a_page_is_not_written_before_its_body_arrives() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Ready", None, "<p>Here.</p>");
+    h.mock.seed_page("1002", "Late", None, "<p>Eventually.</p>");
+    h.mock.break_page_fetch("1002", true);
+
+    let outcome = h.pull().await;
+    assert_eq!(outcome.created.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.warnings.len(), 1, "{outcome:?}");
+    assert!(!h.path("Late.md").exists(), "no empty stand-in is written");
+
+    // Without a fetch, pull says why the page is still missing.
+    let opts = PullOptions { no_fetch: true, ..PullOptions::everything() };
+    let offline = h.engine.pull(&mut h.ws, &opts).await.expect("pull");
+    assert!(offline.warnings[0].contains("has not been fetched yet"), "{offline:?}");
+    assert!(!h.path("Late.md").exists());
+
+    h.mock.break_page_fetch("1002", false);
+    let outcome = h.pull().await;
+    assert_eq!(outcome.created.len(), 1, "{outcome:?}");
+    assert!(h.read("Late.md").contains("Eventually."));
+}
+
+/// A mark from the future — the clock was ahead when it was written — says
+/// nothing about how long ago the check was, so it is not searched from.
+#[tokio::test]
+async fn a_mark_from_the_future_is_not_trusted() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    let id = h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+
+    h.mock.edit_comment_directly(&id, "<p>After.</p>");
+    h.mock.age_comments(3 * 60);
+    last_checked_minutes_ago(&h, -2 * 60);
+    let outcome = h.pull().await;
+    assert_eq!(comment_updates(&outcome), ["1001"], "{outcome:?}");
+    assert!(h.read(".Discussed/comments.md").contains("After."));
+}
+
+/// A page that left the listing and came back unchanged was out of the
+/// search's sight meanwhile; its comments are read, not assumed.
+#[tokio::test]
+async fn a_page_that_comes_back_has_its_comments_read() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    let id = h.mock.seed_comment("1001", "<p>Before.</p>", CommentKind::Footer);
+    h.pull().await;
+
+    h.mock.delete_page_directly("1001");
+    h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    h.mock.edit_comment_directly(&id, "<p>After.</p>");
+    h.mock.age_comments(24 * 60);
+    h.mock.restore_page_directly("1001");
+
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.comments_changed, ["1001"], "{outcome:?}");
+}
+
+/// When a page's comments could not be read along with it, the cache still
+/// learns its attachments: a state rebuilt from the cache must not lose them.
+#[tokio::test]
+async fn attachments_are_cached_even_when_the_comments_could_not_be_read() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.seed_comment("1001", "<p>A comment.</p>", CommentKind::Footer);
+    let file = h.path("diagram.png");
+    std::fs::write(&file, b"png").unwrap();
+    h.engine
+        .client()
+        .upload_attachment(&confed_api::PageId::new("1001"), &file, None)
+        .await
+        .unwrap();
+    std::fs::remove_file(&file).unwrap();
+
+    h.mock.break_comment_listing("1001", true);
+    h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    h.mock.break_comment_listing("1001", false);
+    h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(h.ws.state().page_comments("1001").unwrap().len(), 1);
+
+    h.ws.state().conn().execute("DELETE FROM remote_pages", []).unwrap();
+    h.ws.state().conn().execute("DELETE FROM attachments", []).unwrap();
+    h.ws.state().conn().execute("DELETE FROM comments", []).unwrap();
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.from_cache, 1, "{outcome:?}");
+    assert_eq!(h.ws.state().page_attachments("1001").unwrap().len(), 1);
+    assert_eq!(h.ws.state().page_comments("1001").unwrap().len(), 1);
+}

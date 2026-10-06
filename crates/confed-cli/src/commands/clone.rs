@@ -54,7 +54,8 @@ pub async fn run(
         json!({ "init": init_output.result, "pull": serde_json::to_value(&pull)? }),
         human,
     )
-    .warn_all(init_output.warnings))
+    .warn_all(init_output.warnings)
+    .warn_all(pull.warnings))
 }
 
 /// `https://site.atlassian.net/wiki/spaces/DOCS/...` → base URL + `DOCS`.

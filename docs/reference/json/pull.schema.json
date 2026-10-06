@@ -13,7 +13,7 @@
     },
     "updated": {
       "type": "array",
-      "description": "Pages overwritten from the server because there was nothing local to lose.",
+      "description": "Pages overwritten from the server because there was nothing local to lose — and pages whose comments changed on the server while the page did not: those have `ops: [\"comments\"]` and equal versions, and only comments.md and the comment marks in the page body were rewritten.",
       "items": { "$ref": "#/$defs/page_change" }
     },
     "merged": {
@@ -64,7 +64,7 @@
         "to_version": { "type": ["integer", "null"], "description": "Base version after it; null for a deletion." },
         "ops": {
           "type": "array",
-          "description": "Omitted on the pull side, which always rewrites the whole file.",
+          "description": "Omitted on the pull side, which always rewrites the whole file — except `[\"comments\"]`, for a page whose comments changed and nothing else.",
           "items": { "type": "string" }
         }
       }

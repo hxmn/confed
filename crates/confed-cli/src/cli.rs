@@ -487,13 +487,17 @@ pub struct AttachArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum CommentCommand {
-    /// Show a page's comments.
+    /// Show a page's comments, as of the last fetch (`checked_at` says when).
     List {
         page: String,
         #[arg(long)]
         unresolved: bool,
         #[arg(long)]
         inline: bool,
+        /// Read the page's comments from the server first, and update
+        /// comments.md and the marks in the page to match.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Add a comment.
     Add {

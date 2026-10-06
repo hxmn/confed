@@ -70,6 +70,22 @@ pub trait ConfluenceClient: Send + Sync {
     async fn delete_attachment(&self, id: &AttachmentId) -> ApiResult<()>;
 
     async fn list_comments(&self, page: &PageId) -> ApiResult<Vec<Comment>>;
+    /// Where in `space` a comment was added or edited in the last `minutes`
+    /// minutes.
+    ///
+    /// A comment has a version of its own: adding or editing one leaves its
+    /// page's version alone, so a page listing cannot show it. This is how
+    /// `fetch` finds the unchanged pages whose comments it has to read again.
+    /// A deleted comment is in no search result, so a deletion is not found
+    /// this way.
+    async fn recent_comment_activity(
+        &self,
+        space: &SpaceId,
+        minutes: u64,
+    ) -> ApiResult<CommentActivity> {
+        let _ = (space, minutes);
+        Err(crate::error::ApiError::unsupported(self.flavor(), "find recently changed comments"))
+    }
     async fn add_footer_comment(
         &self,
         page: &PageId,

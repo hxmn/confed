@@ -163,7 +163,9 @@ it.
 ## Exit 8 — partial success
 
 **Symptom.** `confed fetch` or `confed push` finishes, reports some successes, and exits 8.
-`result.failed` lists each page with its error.
+`result.failed` lists each page with its error. For a fetch, that includes a page whose
+comments could not be read: the comments already in the workspace are kept, and the next
+fetch asks again.
 
 **Cause.** Some operations succeeded and some did not. confed does not roll back the
 successes: a fetch that could not read one restricted page still updated the other three
@@ -329,6 +331,28 @@ downloads pages whose version actually moved, so subsequent syncs are cheap.
 - **Tune concurrency** as above.
 - **Do not commit `.state.db`.** It contains every page body, so it is large, it is
   rebuildable from the server, and it would conflict on every single sync.
+
+### A comment changed in Confluence but not here
+
+**Symptom.** `comments.md` or `confed comment list` shows a comment's old text, or a
+comment that was deleted or resolved in the browser, after a `confed pull`.
+
+**Cause.** A comment has a version of its own; changing one does not change its page's.
+`pull` finds comments that were **added or edited** by searching for them, on every run.
+It cannot find one that was **deleted** — a search does not return what is gone — and
+Data Center may not report **resolving** a thread as a modification. A pull that printed
+`could not ask the server which comments changed` did not search at all.
+
+**Fix.** Name the page. Every one of these reads its comments directly:
+
+```bash
+confed pull "Team Handbook/Onboarding.md"
+confed pull --page 1001
+confed comment list 1001 --refresh
+```
+
+`confed comment list --json` reports `checked_at`: when confed last asked the server
+about comment changes. See [sync.md](sync.md#comments-change-without-their-page).
 
 ### Files that confed seems to ignore
 

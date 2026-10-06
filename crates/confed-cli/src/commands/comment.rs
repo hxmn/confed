@@ -11,22 +11,28 @@ use confed_core::comments::{self, SidecarComment, SidecarKind};
 use confed_core::error::{ConfedError, Result};
 use confed_core::frontmatter::MarkdownFile;
 use confed_core::paths;
-use confed_core::sync::{write_atomic, PushOptions};
+use confed_core::sync::{write_atomic, PushOptions, COMMENTS_CHECKED_AT_KEY};
 use serde_json::json;
 use std::fmt::Write;
 
 pub async fn run(ctx: &mut Context, command: &CommentCommand) -> Result<Output> {
     match command {
-        CommentCommand::List { page, unresolved, inline } => match ctx.resolve_page(page) {
-            Ok(_) => list(ctx, page, *unresolved, *inline),
-            // Not in the workspace — removed with `confed rm`, or never
-            // pulled: an id can still be asked of the server.
-            Err(_) if ctx.page_id_arg(page).is_ok() => {
-                let id = ctx.page_id_arg(page)?;
-                list_live(ctx, &id, *unresolved, *inline).await
+        CommentCommand::List { page, unresolved, inline, refresh } => {
+            match ctx.resolve_page(page) {
+                Ok(page_id) => {
+                    let refreshed =
+                        if *refresh { Some(refresh_now(ctx, &page_id).await?) } else { None };
+                    list(ctx, page, *unresolved, *inline, refreshed)
+                }
+                // Not in the workspace — removed with `confed rm`, or never
+                // pulled: an id can still be asked of the server.
+                Err(_) if ctx.page_id_arg(page).is_ok() => {
+                    let id = ctx.page_id_arg(page)?;
+                    list_live(ctx, &id, *unresolved, *inline).await
+                }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
-        },
+        }
         CommentCommand::Add { page, body, anchor, occurrence, sidecar, push } => {
             let placement = AnchorPlacement { occurrence: *occurrence, sidecar: *sidecar };
             add(ctx, page, body.as_deref(), anchor.as_deref(), placement, None, *push).await
@@ -54,6 +60,16 @@ async fn push_now(ctx: &mut Context, pages: Vec<String>) -> Result<confed_core::
 
 fn comment_push(pages: Vec<String>) -> PushOptions {
     PushOptions { scope: pages, with_comments: true, comments_only: true, ..Default::default() }
+}
+
+/// Read one page's comments from the server now, whatever the last fetch saw,
+/// and say whether they had changed.
+async fn refresh_now(ctx: &mut Context, page_id: &str) -> Result<bool> {
+    let client = ctx.build_client()?;
+    let engine = ctx.engine(client)?;
+    let ws = ctx.workspace_mut()?;
+    let _lock = ws.lock()?;
+    engine.refresh_comments(ws, page_id).await
 }
 
 /// A page whose comment work failed — deleted on the server, say — makes the
@@ -325,9 +341,23 @@ async fn list_live(
         )))
 }
 
-fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Result<Output> {
+/// `refreshed` is whether the comments had changed, when they were just read
+/// from the server for this listing.
+fn list(
+    ctx: &Context,
+    page: &str,
+    unresolved: bool,
+    inline_only: bool,
+    refreshed: Option<bool>,
+) -> Result<Output> {
     let page_id = ctx.resolve_page(page)?;
     let records = ctx.workspace()?.state().page_comments(&page_id)?;
+    // The comments are the local copy. Say how old it may be: an edit made in
+    // the browser since then is not in it.
+    let checked_at = match refreshed {
+        Some(_) => Some(confed_core::state::now()),
+        None => ctx.workspace()?.state().get_meta(COMMENTS_CHECKED_AT_KEY)?,
+    };
     let marks = page_file(ctx, &page_id).map(|(_, _, f)| f.marks).unwrap_or_default();
 
     // A reply has no status of its own: it is as resolved as its thread.
@@ -427,10 +457,29 @@ fn list(ctx: &Context, page: &str, unresolved: bool, inline_only: bool) -> Resul
     let orphan_markers: Vec<serde_json::Value> =
         orphans.iter().map(|(r, text)| json!({ "ref": r, "text": text })).collect();
 
-    let output = Output::new(
-        json!({ "page_id": page_id, "comments": entries, "orphan_markers": orphan_markers }),
-        human,
-    );
+    let as_of = match (refreshed, &checked_at) {
+        (Some(true), _) => "Read from the server just now; comments.md was updated.".to_string(),
+        (Some(false), _) => "Read from the server just now; nothing had changed.".to_string(),
+        (None, Some(when)) => {
+            format!("As of {when}; `--refresh` reads them from the server again.")
+        }
+        (None, None) => "Not checked against the server by this confed yet; `--refresh` reads \
+                         them from it."
+            .to_string(),
+    };
+    let _ = writeln!(human, "{}", ctx.style.dim(&as_of));
+
+    let mut result = json!({
+        "page_id": page_id,
+        "comments": entries,
+        "orphan_markers": orphan_markers,
+        "checked_at": checked_at,
+        "refreshed": refreshed.is_some(),
+    });
+    if let Some(changed) = refreshed {
+        result["changed"] = json!(changed);
+    }
+    let output = Output::new(result, human);
     // Comments are read from the local copy; say so when the page itself is
     // gone from the server.
     let gone = ctx.workspace()?.state().get_remote(&page_id)?.is_some_and(|r| r.deleted);
@@ -675,7 +724,15 @@ fn write_sidecar(ctx: &Context, page_id: &str, sidecar: &comments::Sidecar) -> R
         std::fs::create_dir_all(parent)
             .map_err(|e| ConfedError::io(format!("creating {}", parent.display()), e))?;
     }
-    write_atomic(&path, &comments::render(page_id, &record.title, &records, &drafts))
+    // Resolves queued earlier are unsent work too, and stay.
+    let text = comments::render_with_requests(
+        page_id,
+        &record.title,
+        &records,
+        &drafts,
+        &sidecar.resolve_requests,
+    );
+    write_atomic(&path, &text)
 }
 
 /// Write an inline draft into the page body as a `<!--c new …-->` mark, and

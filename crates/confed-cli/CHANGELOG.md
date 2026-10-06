@@ -20,6 +20,66 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-06
+
+### Fixed
+
+- **A comment added or edited in Confluence never reached the workspace unless its page
+  changed too.** A comment has a version of its own: adding or editing one leaves the
+  page's version where it was, and confed decided what to re-read from page versions
+  alone. `pull`, `pull --page <id>` and `pull --force --page <id>` all answered
+  `updated: []`, rewrote `comments.md` with the old text, and said nothing. Inline
+  comments had the same problem. Now:
+  - Every `fetch` (so every `pull`) asks the server which pages were commented on since
+    its last check — one CQL search, by age on the server's own clock — and reads those
+    pages' comments again, without their bodies. `fetch` reports them as
+    `comments_refreshed` and `comments_changed`.
+  - A page that is named has its comments read whatever the search says: `pull <page>`,
+    `pull --page`, `--label`, `--cql`, `fetch --page`, and every page in scope under
+    `pull --force` or `--reset`. This is also what picks up a comment **deleted** on the
+    server, which no search can return — and a thread resolved there, should the server
+    not count that as an edit.
+  - `pull` lists a page whose comments changed and nothing else under `updated`, with
+    `"ops": ["comments"]` and equal versions; a `--dry-run` says so too. `comments.md`
+    is written only when its content differs, so its timestamp means something, and it
+    is cleared when a page's last comment is deleted.
+  - If the search fails, the fetch still succeeds and warns that comments of unchanged
+    pages may be out of date; the next check covers the gap.
+  - The first fetch after upgrading reads every page's comments once: nothing says how
+    old the ones in an existing workspace are.
+- A fetch that could not read a page's comments recorded the page as having none. The
+  comments already in the workspace are now kept, the page is listed under `failed`, and
+  the next fetch asks again.
+- **A page whose new version could not be fetched was written with its old text under
+  the new version number** — or, for a new page, as an empty file — and stayed that way:
+  once the body did arrive, the versions already matched, so nothing rewrote the file,
+  and a push from it would have been based on the old text. `pull` now leaves such a
+  page as it is (`behind`, or not yet created) until its body is here.
+- `pull` dropped a resolve queued in `comments.md` (`<!-- confed:resolve id=… -->`), and
+  so did queueing another draft with `comment add` or `comment reply`. A queued resolve
+  now stays until it is pushed, or until the thread is resolved or gone on the server.
+- `pull --reset` left the drafts in a `comments.md` whose page has no comments on the
+  server.
+- An inline comment whose text ends its paragraph was written to `comments.md` with its
+  marker broken across two lines, which hid the comment from everything that reads the
+  file back. A line break in a marker value is now written as `\n`; such sidecars are
+  rewritten by the next pull, which lists their pages under `updated` once.
+- A reply whose parent comment is missing from the server's listing was shown in
+  `comments.md` without its own replies.
+- A fetch still owed for a page that has since been deleted was retried, and failed, on
+  every fetch from then on.
+- `pull` now names each page it could not fetch, as a warning, instead of only logging
+  that there were some.
+
+### Added
+
+- `confed comment list <page> --refresh` reads the page's comments from the server
+  first, updates `comments.md` and the marks in the page to match, and reports
+  `refreshed` and `changed`.
+- `comment list` reports `checked_at`: when confed last asked the server about comment
+  changes. The comments it lists are the local copy as of then.
+- The agent guide says that comments go stale on their own, and how to re-read them.
+
 ## [0.8.1] - 2026-10-05
 
 ### Fixed
@@ -532,7 +592,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/hxmn/confed/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/hxmn/confed/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/hxmn/confed/compare/v0.7.5...v0.8.0
 [0.7.5]: https://github.com/hxmn/confed/compare/v0.7.4...v0.7.5

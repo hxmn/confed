@@ -4,8 +4,9 @@
 //! milliseconds instead of sleeping through real backoff.
 
 use confed_api::{
-    ApiError, Attachment, AttachmentId, Auth, BodyFormat, CommentKind, ConfluenceClient, Http,
-    InlineAnchor, NewPage, PageId, PageStatus, PageUpdate, Position, RetryPolicy, SpaceId,
+    ApiError, Attachment, AttachmentId, Auth, BodyFormat, CommentActivity, CommentKind,
+    ConfluenceClient, Http, InlineAnchor, NewPage, PageId, PageStatus, PageUpdate, Position,
+    RetryPolicy, SpaceId,
 };
 use confed_cloud::CloudClient;
 use serde_json::json;
@@ -713,4 +714,43 @@ async fn capabilities_advertise_the_cloud_feature_set() {
         c.page_url(&PageId::new("1001"), "DOCS"),
         format!("{}/wiki/spaces/DOCS/pages/1001", server.uri())
     );
+}
+
+/// v2 lists comments page by page only, so the comments changed across a space
+/// are asked of CQL, which v1 still serves — by key, even when only the
+/// numeric id is at hand.
+#[tokio::test]
+async fn recent_comment_activity_searches_the_space_by_key() {
+    let server = MockServer::start().await;
+    mount_space_lookup(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/wiki/rest/api/search"))
+        .and(query_param(
+            "cql",
+            r#"space = "DOCS" and type = comment and lastmodified >= now("-20m")"#,
+        ))
+        .and(query_param("expand", "content.container"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "content": {
+                    "id": "2001", "type": "comment", "status": "current",
+                    "container": { "id": "1001", "type": "page", "title": "Team Handbook" }
+                },
+                "title": "Re: Team Handbook",
+                "url": "/spaces/DOCS/pages/1001/Team+Handbook?focusedCommentId=2001",
+                "lastModified": "2026-08-30T09:00:00.000Z"
+            }],
+            "start": 0, "limit": 100, "size": 1, "_links": {}
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    for space in
+        [SpaceId::from_key("DOCS"), SpaceId { key: String::new(), numeric: Some("500".into()) }]
+    {
+        let activity = c.recent_comment_activity(&space, 20).await.unwrap();
+        assert_eq!(activity, CommentActivity::Pages(vec![PageId::new("1001")]));
+    }
 }

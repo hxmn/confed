@@ -4,7 +4,7 @@
   "title": "confed fetch result",
   "description": "The `result` of `confed fetch --json`. fetch only updates .state.db; it never writes a page file.",
   "type": "object",
-  "required": ["fetched", "unchanged", "deleted_on_remote", "failed", "resumed"],
+  "required": ["fetched", "unchanged", "deleted_on_remote", "failed", "resumed", "comments_refreshed", "comments_changed"],
   "properties": {
     "fetched": { "type": "integer", "minimum": 0, "description": "Pages whose body was downloaded." },
     "unchanged": { "type": "integer", "minimum": 0, "description": "Pages already at the server's version." },
@@ -15,7 +15,7 @@
     },
     "failed": {
       "type": "array",
-      "description": "Pages that could not be fetched. Non-empty means exit 8.",
+      "description": "Pages that could not be fetched, or whose comments could not be read. Non-empty means exit 8.",
       "items": {
         "type": "object",
         "required": ["page_id", "title", "error"],
@@ -29,6 +29,20 @@
     "resumed": {
       "type": "boolean",
       "description": "True when an interrupted fetch was continued rather than restarted."
+    },
+    "comments_refreshed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Pages at an unchanged version whose comments were read again. A comment has a version of its own: adding or editing one does not change the page's."
+    },
+    "comments_changed": {
+      "type": "array",
+      "description": "Of those, the page ids whose comments had changed. `confed pull` writes them to comments.md.",
+      "items": { "type": "string" }
+    },
+    "comment_check_failed": {
+      "type": "string",
+      "description": "Present when the server could not be asked which comments changed, with the reason. Comments of unchanged pages may then be out of date; the same is in `warnings`."
     }
   }
 }

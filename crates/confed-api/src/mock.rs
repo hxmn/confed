@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 #[derive(Clone, Debug)]
 struct MockPage {
@@ -30,6 +31,19 @@ struct MockState {
     pages: HashMap<String, MockPage>,
     attachments: HashMap<String, (Attachment, Vec<u8>)>,
     comments: Vec<Comment>,
+    /// When each comment was last added or edited, which is what a search by
+    /// `lastmodified` goes by.
+    comment_modified: HashMap<String, SystemTime>,
+    /// Pages whose comments were listed, in order: reads are not `calls`.
+    comment_listings: Vec<String>,
+    /// Whether the comment search answers at all.
+    comment_search_down: bool,
+    /// Whether the comment search has more hits than it will list.
+    comment_search_overflows: bool,
+    /// Pages whose comments cannot be listed.
+    comment_listings_down: Vec<String>,
+    /// Pages whose body cannot be fetched.
+    pages_down: Vec<String>,
     spaces: HashMap<String, Space>,
     /// Every mutating call recorded, so tests can assert "--dry-run wrote nothing".
     calls: Vec<String>,
@@ -187,7 +201,9 @@ impl MockClient {
 
     pub fn seed_comment(&self, page_id: &str, body_storage: &str, kind: CommentKind) -> CommentId {
         let id = CommentId::new(self.fresh_id());
-        self.state.lock().expect("mock poisoned").comments.push(Comment {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.comment_modified.insert(id.0.clone(), SystemTime::now());
+        state.comments.push(Comment {
             id: id.clone(),
             page_id: PageId::new(page_id),
             parent_comment_id: None,
@@ -206,6 +222,75 @@ impl MockClient {
             }),
         });
         id
+    }
+
+    /// Edit a comment the way a colleague would in the browser: its text and
+    /// its own version change, the page's version does not.
+    pub fn edit_comment_directly(&self, id: &CommentId, body_storage: &str) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        let comment = state.comments.iter_mut().find(|c| c.id == *id).expect("comment seeded");
+        comment.body_storage = body_storage.to_string();
+        state.comment_modified.insert(id.0.clone(), SystemTime::now());
+    }
+
+    /// Delete a comment, with its replies, the way a colleague would in the
+    /// browser. Nothing is left for a search to find.
+    pub fn delete_comment_directly(&self, id: &CommentId) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.comments.retain(|c| c.id != *id && c.parent_comment_id.as_ref() != Some(id));
+    }
+
+    /// Let `minutes` pass for every comment: none of them was added or edited
+    /// more recently than that.
+    pub fn age_comments(&self, minutes: u64) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        for at in state.comment_modified.values_mut() {
+            *at -= Duration::from_secs(minutes * 60);
+        }
+    }
+
+    /// Make the comment search fail, as an instance with search switched off
+    /// or an index being rebuilt would.
+    pub fn break_comment_search(&self, down: bool) {
+        self.state.lock().expect("mock poisoned").comment_search_down = down;
+    }
+
+    /// Make the comment search answer that more changed than it will list.
+    pub fn overflow_comment_search(&self, overflows: bool) {
+        self.state.lock().expect("mock poisoned").comment_search_overflows = overflows;
+    }
+
+    /// Make listing one page's comments fail, or work again.
+    pub fn break_comment_listing(&self, page_id: &str, down: bool) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.comment_listings_down.retain(|p| p != page_id);
+        if down {
+            state.comment_listings_down.push(page_id.to_string());
+        }
+    }
+
+    /// Make fetching one page fail, or work again. The listing still names it.
+    pub fn break_page_fetch(&self, page_id: &str, down: bool) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.pages_down.retain(|p| p != page_id);
+        if down {
+            state.pages_down.push(page_id.to_string());
+        }
+    }
+
+    /// Bring back a page deleted with [`Self::delete_page_directly`], as
+    /// restoring it from the trash would: same version, same body.
+    pub fn restore_page_directly(&self, id: &str) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        if let Some(page) = state.pages.get_mut(id) {
+            page.deleted = false;
+            page.summary.status = PageStatus::Current;
+        }
+    }
+
+    /// The page of every `list_comments` call so far, in order.
+    pub fn comment_listings(&self) -> Vec<String> {
+        self.state.lock().expect("mock poisoned").comment_listings.clone()
     }
 
     /// Resolve a comment the way a colleague would in the browser — on either
@@ -327,6 +412,9 @@ impl ConfluenceClient for MockClient {
 
     async fn get_page(&self, id: &PageId, _body: BodyFormat) -> ApiResult<Page> {
         let state = self.state.lock().expect("mock poisoned");
+        if state.pages_down.contains(&id.0) {
+            return Err(ApiError::Server { status: 503, body: format!("page {id}") });
+        }
         let page = state
             .pages
             .get(id.as_str())
@@ -516,8 +604,36 @@ impl ConfluenceClient for MockClient {
     }
 
     async fn list_comments(&self, page: &PageId) -> ApiResult<Vec<Comment>> {
-        let state = self.state.lock().expect("mock poisoned");
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.comment_listings.push(page.0.clone());
+        if state.comment_listings_down.contains(&page.0) {
+            return Err(ApiError::Server { status: 500, body: format!("comments of {page}") });
+        }
         Ok(state.comments.iter().filter(|c| c.page_id == *page).cloned().collect())
+    }
+
+    async fn recent_comment_activity(
+        &self,
+        _space: &SpaceId,
+        minutes: u64,
+    ) -> ApiResult<CommentActivity> {
+        let state = self.state.lock().expect("mock poisoned");
+        if state.comment_search_down {
+            return Err(ApiError::Server { status: 503, body: "search is unavailable".into() });
+        }
+        if state.comment_search_overflows {
+            return Ok(CommentActivity::Unbounded);
+        }
+        let since = SystemTime::now() - Duration::from_secs(minutes * 60);
+        let mut pages: Vec<PageId> = Vec::new();
+        for comment in &state.comments {
+            let recent =
+                state.comment_modified.get(comment.id.as_str()).is_some_and(|at| *at >= since);
+            if recent && !pages.contains(&comment.page_id) {
+                pages.push(comment.page_id.clone());
+            }
+        }
+        Ok(CommentActivity::Pages(pages))
     }
 
     async fn add_footer_comment(
@@ -538,7 +654,9 @@ impl ConfluenceClient for MockClient {
             resolved: false,
             anchor: None,
         };
-        self.state.lock().expect("mock poisoned").comments.push(comment.clone());
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.comment_modified.insert(comment.id.0.clone(), SystemTime::now());
+        state.comments.push(comment.clone());
         Ok(comment)
     }
 
@@ -602,6 +720,7 @@ impl ConfluenceClient for MockClient {
             resolved: false,
             anchor: Some(anchor),
         };
+        state.comment_modified.insert(comment.id.0.clone(), SystemTime::now());
         state.comments.push(comment.clone());
         Ok(comment)
     }
@@ -624,7 +743,9 @@ impl ConfluenceClient for MockClient {
             resolved: false,
             anchor: None,
         };
-        self.state.lock().expect("mock poisoned").comments.push(comment.clone());
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.comment_modified.insert(comment.id.0.clone(), SystemTime::now());
+        state.comments.push(comment.clone());
         Ok(comment)
     }
 
@@ -654,6 +775,7 @@ impl ConfluenceClient for MockClient {
             .find(|c| c.id == *id)
             .ok_or_else(|| ApiError::NotFound(format!("comment {id}")))?;
         comment.body_storage = body_storage.to_string();
+        state.comment_modified.insert(id.0.clone(), SystemTime::now());
         Ok(())
     }
 

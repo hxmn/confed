@@ -28,7 +28,7 @@ use confed_converter::{
 };
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -38,6 +38,19 @@ pub struct SyncEngine {
     concurrency: usize,
     progress: ProgressRef,
 }
+
+/// Workspace setting holding when the stored comments were last known to be
+/// current: the start of the last fetch that asked the server which comments
+/// had changed. The next such fetch asks from here.
+pub const COMMENTS_CHECKED_AT_KEY: &str = "comments_checked_at";
+
+/// How far past the last check the comment search reaches back. It covers the
+/// server's search index catching up with an edit, and costs only re-reading
+/// the comments of pages commented on in that window.
+const COMMENT_CHECK_OVERLAP_MINUTES: u64 = 15;
+
+/// What the fetch queue asks for when a page's body is already current.
+const NEEDS_COMMENTS: &[&str] = &["comments"];
 
 // ---------------------------------------------------------------- fetch ----
 
@@ -59,6 +72,27 @@ pub struct FetchOutcome {
     pub failed: Vec<FailedPage>,
     /// True when an interrupted fetch was continued rather than restarted.
     pub resumed: bool,
+    /// Pages at an unchanged version whose comments were read again: a comment
+    /// has a version of its own, and editing one leaves the page's alone.
+    pub comments_refreshed: usize,
+    /// Of those, the pages whose comments turned out to have changed.
+    pub comments_changed: Vec<String>,
+    /// Why the server could not be asked which comments changed, when it could
+    /// not. Comments of unchanged pages may then be out of date.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment_check_failed: Option<String>,
+}
+
+impl FetchOutcome {
+    /// What to tell the user when the comment check failed.
+    pub fn comment_check_warning(&self) -> Option<String> {
+        let reason = self.comment_check_failed.as_deref()?;
+        Some(format!(
+            "could not ask the server which comments changed ({reason}); comments of pages \
+             that did not change themselves may be out of date — `confed pull <page>` or \
+             `confed comment list <page> --refresh` re-reads a page's"
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -72,7 +106,35 @@ pub struct FailedPage {
 struct FetchedPage {
     page: Page,
     attachments: Vec<confed_api::Attachment>,
-    comments: Vec<Comment>,
+    /// The error when the comments could not be read. The ones already stored
+    /// are then kept: a failed request is not "this page has no comments".
+    comments: std::result::Result<Vec<Comment>, String>,
+}
+
+/// What one item of fetch work brought back.
+enum Fetched {
+    Page(Box<FetchedPage>),
+    /// The comments alone, of a page whose body is already current.
+    Comments(Vec<Comment>),
+}
+
+/// One item of fetch work: a page, and whether only its comments are wanted.
+struct FetchWork {
+    page_id: String,
+    comments_only: bool,
+}
+
+/// What a round of fetch work did, on top of what it stored.
+#[derive(Default)]
+struct FetchTally {
+    fetched: usize,
+    /// Pages whose comments are now as the server has them.
+    comments_read: Vec<String>,
+    /// Pages read for their comments alone.
+    comments_refreshed: usize,
+    /// Of those, the ones whose comments had changed.
+    comments_changed: Vec<String>,
+    failed: Vec<FailedPage>,
 }
 
 // ----------------------------------------------------------------- pull ----
@@ -117,6 +179,10 @@ pub struct PullOutcome {
     pub discarded: Vec<PageChange>,
     pub attachments_downloaded: usize,
     pub dry_run: bool,
+    /// What the user should know besides the changes: comments that could not
+    /// be re-read, say. Reported as warnings, not as part of the result.
+    #[serde(skip)]
+    pub warnings: Vec<String>,
 }
 
 impl PullOutcome {
@@ -138,7 +204,9 @@ pub struct PageChange {
     pub from_version: Option<u32>,
     pub to_version: Option<u32>,
     /// Which aspects changed: any of `body`, `title`, `labels`, `parent`,
-    /// `delete`. Empty for pull-side changes, which always rewrite the file.
+    /// `delete`. Empty for pull-side changes, which always rewrite the file —
+    /// except `comments`, for a pull that found only the page's comments
+    /// changed (the page file and its version are as they were).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ops: Vec<String>,
 }
@@ -342,7 +410,20 @@ impl SyncEngine {
 
     /// Refresh `.state.db`'s view of the server. Working files are untouched.
     pub async fn fetch(&self, ws: &mut Workspace, opts: &FetchOptions) -> Result<FetchOutcome> {
+        Ok(self.fetch_tracking(ws, opts).await?.0)
+    }
+
+    /// [`Self::fetch`], also naming the pages whose comments this run read, so
+    /// a pull that must re-read some does not ask twice.
+    async fn fetch_tracking(
+        &self,
+        ws: &mut Workspace,
+        opts: &FetchOptions,
+    ) -> Result<(FetchOutcome, Vec<String>)> {
         let mut outcome = FetchOutcome::default();
+        // Taken before anything is asked, so nothing that changes while this
+        // fetch runs falls between it and the next one.
+        let started = now();
         // Losing the cache costs bandwidth, not correctness, so a store that
         // will not open is a reason to fetch more, not to fail.
         let cache = ws.page_store().ok();
@@ -350,6 +431,20 @@ impl SyncEngine {
 
         let pending = state.pending_fetches()?;
         outcome.resumed = !pending.is_empty();
+
+        // A page's version says nothing about its comments, so those have a
+        // mark of their own: when they were last known to be current. The cache
+        // carries one too, for the comments restored from it.
+        let state_mark = state.get_meta(COMMENTS_CHECKED_AT_KEY)?.and_then(|m| trusted_mark(&m));
+        let cache_mark = cache
+            .as_ref()
+            .and_then(|c| c.comments_checked_at().ok().flatten())
+            .and_then(|m| trusted_mark(&m));
+        // Pages whose body needs no request, by whether a mark vouches for
+        // their comments, and the oldest mark doing so.
+        let mut covered: Vec<String> = Vec::new();
+        let mut uncovered: Vec<String> = Vec::new();
+        let mut oldest_mark: Option<chrono::DateTime<chrono::Utc>> = None;
 
         self.progress.stage("Listing pages", None);
         let summaries = self.client.list_pages(&self.space).await?;
@@ -371,7 +466,7 @@ impl SyncEngine {
                 .is_some_and(|r| r.version == summary.version && r.storage_body.is_some());
 
             // Anything already downloaded at this version is served from the
-            // cache, so the listing above is the only request this page costs.
+            // cache, so the listing above is the only request its body costs.
             let cached_body = if have_current_body {
                 None
             } else {
@@ -402,17 +497,39 @@ impl SyncEngine {
                 continue;
             }
 
+            // A page back in the listing after being gone from it — restored,
+            // or a restriction lifted — was out of the search's sight meanwhile.
+            let was_gone = existing.as_ref().is_some_and(|r| r.deleted);
+            let mut mark = state_mark.filter(|_| !was_gone);
             if cached_body.is_some() {
                 outcome.from_cache += 1;
                 // Restore the snapshots taken alongside that body, so a rebuilt
                 // state database does not have to ask for those either. They are
-                // exactly as current as they were before the rebuild.
-                if let Some(extras) = cache
+                // exactly as current as the cache says they are.
+                let extras = cache
                     .as_ref()
-                    .and_then(|c| c.extras(&summary.id.0, summary.version).ok().flatten())
-                {
-                    restore_extras(state, &summary.id.0, &extras)?;
+                    .and_then(|c| c.extras(&summary.id.0, summary.version).ok().flatten());
+                mark = match extras {
+                    Some(extras) => {
+                        // Comments the state already has are left in place, and
+                        // only the state's mark can vouch for those.
+                        let own = !state.page_comments(&summary.id.0)?.is_empty();
+                        restore_extras(state, &summary.id.0, &extras)?;
+                        match (cache_mark, state_mark) {
+                            (Some(c), Some(s)) => Some(c.min(s)),
+                            (Some(c), None) if !own => Some(c),
+                            _ => None,
+                        }
+                    }
+                    None => None,
+                };
+            }
+            match mark {
+                Some(mark) => {
+                    oldest_mark = Some(oldest_mark.map_or(mark, |o| o.min(mark)));
+                    covered.push(summary.id.0.clone());
                 }
+                None => uncovered.push(summary.id.0.clone()),
             }
             outcome.unchanged += 1;
         }
@@ -424,61 +541,182 @@ impl SyncEngine {
                 outcome.deleted_on_remote.push(remote.page_id);
             }
         }
-
-        let queue: Vec<String> = state.pending_fetches()?.into_iter().map(|(id, _)| id).collect();
-        let titles: HashMap<&str, &str> =
-            summaries.iter().map(|s| (s.id.0.as_str(), s.title.as_str())).collect();
-        self.progress.stage("Fetching", Some(queue.len()));
-
-        // Fetch concurrently, write serially: the SQLite connection is not shared
-        // across tasks, and one writer keeps every page's write atomic.
-        let mut inflight = FuturesUnordered::new();
-        let mut queue_iter = queue.iter();
-        for _ in 0..self.concurrency {
-            if let Some(id) = queue_iter.next() {
-                inflight.push(self.fetch_one(id.clone()));
+        // Nothing is owed for a page that is gone: asking again would fail on
+        // every fetch from here on.
+        for (id, _) in state.pending_fetches()? {
+            if !live.contains(&id) {
+                state.mark_fetch_done(&id)?;
             }
         }
-        while let Some(result) = inflight.next().await {
-            if let Some(id) = queue_iter.next() {
-                inflight.push(self.fetch_one(id.clone()));
+
+        // Comments of the pages whose body is current. Adding or editing a
+        // comment leaves the page's version alone, so the listing cannot show
+        // it: ask the server which pages were commented on since the mark, and
+        // read those again — and every page no mark vouches for.
+        let whole_space = opts.pages.is_empty() && opts.since.is_none();
+        let mut reread: BTreeSet<String> = uncovered.into_iter().collect();
+        let mut checked = whole_space;
+        if !opts.pages.is_empty() {
+            // Pages asked for by name are read, not reasoned about.
+            reread.extend(covered.iter().cloned());
+        } else if let (true, Some(mark)) = (whole_space && !covered.is_empty(), oldest_mark) {
+            self.progress.stage("Checking comments", None);
+            let minutes = minutes_since(mark) + COMMENT_CHECK_OVERLAP_MINUTES;
+            match self.client.recent_comment_activity(&self.space, minutes).await {
+                Ok(confed_api::CommentActivity::Pages(pages)) => {
+                    reread.extend(
+                        covered.iter().filter(|id| pages.iter().any(|p| p.0 == **id)).cloned(),
+                    );
+                }
+                Ok(confed_api::CommentActivity::Unbounded) => {
+                    reread.extend(covered.iter().cloned());
+                }
+                Err(e) => {
+                    checked = false;
+                    outcome.comment_check_failed = Some(e.to_string());
+                }
             }
-            match result {
-                Ok((id, fetched)) => {
-                    self.progress.item(&fetched.page.summary.title);
-                    self.store_fetched(ws, &id, &fetched)?;
-                    outcome.fetched += 1;
-                }
-                Err((id, e)) => {
-                    let title = titles.get(id.as_str()).copied().unwrap_or("").to_string();
-                    self.progress.item(&title);
-                    outcome.failed.push(FailedPage { page_id: id, title, error: e.to_string() });
-                }
+        }
+        if !reread.is_empty() && state_mark.is_none() && whole_space {
+            tracing::info!(
+                target: "confed::sync",
+                pages = reread.len(),
+                "reading every page's comments once: this workspace has not checked them before"
+            );
+        }
+        // A page already queued is queued for more than its comments.
+        let queued: Vec<String> = state.pending_fetches()?.into_iter().map(|(id, _)| id).collect();
+        for id in reread.iter().filter(|id| !queued.contains(id)) {
+            state.enqueue_fetch(id, NEEDS_COMMENTS)?;
+        }
+        // Everything this check found is in the queue, which outlives an
+        // interrupted run, so the mark can move now.
+        if checked {
+            state.set_meta(COMMENTS_CHECKED_AT_KEY, &started)?;
+        }
+
+        let work: Vec<FetchWork> = state
+            .pending_fetches()?
+            .into_iter()
+            .map(|(page_id, needs)| FetchWork {
+                comments_only: !needs.iter().any(|n| n == "body"),
+                page_id,
+            })
+            .collect();
+        let titles: HashMap<String, String> =
+            summaries.iter().map(|s| (s.id.0.clone(), s.title.clone())).collect();
+        self.progress.stage("Fetching", Some(work.len()));
+        let tally = self.run_fetches(ws, work, &titles).await?;
+        outcome.fetched = tally.fetched;
+        outcome.comments_refreshed = tally.comments_refreshed;
+        outcome.comments_changed = tally.comments_changed;
+        outcome.failed = tally.failed;
+
+        // The cache's comments are as current as the state's once nothing is
+        // left in the queue.
+        if checked && ws.state().pending_fetches()?.is_empty() {
+            if let Ok(cache) = ws.page_store() {
+                cache.set_comments_checked_at(&started)?;
             }
         }
 
         self.resolve_mentioned_users(ws).await?;
         ws.state().set_meta("last_fetch_at", &now())?;
         self.progress.finish();
-        Ok(outcome)
+        Ok((outcome, tally.comments_read))
+    }
+
+    /// Fetch `work` concurrently and store each result as it lands.
+    ///
+    /// Fetch concurrently, write serially: the SQLite connection is not shared
+    /// across tasks, and one writer keeps every page's write atomic.
+    async fn run_fetches(
+        &self,
+        ws: &mut Workspace,
+        work: Vec<FetchWork>,
+        titles: &HashMap<String, String>,
+    ) -> Result<FetchTally> {
+        let mut tally = FetchTally::default();
+        let title_of = |id: &str| titles.get(id).cloned().unwrap_or_default();
+
+        let mut inflight = FuturesUnordered::new();
+        let mut work = work.into_iter();
+        for _ in 0..self.concurrency {
+            if let Some(item) = work.next() {
+                inflight.push(self.fetch_one(item));
+            }
+        }
+        while let Some(result) = inflight.next().await {
+            if let Some(item) = work.next() {
+                inflight.push(self.fetch_one(item));
+            }
+            match result {
+                Ok((id, Fetched::Page(fetched))) => {
+                    self.progress.item(&fetched.page.summary.title);
+                    self.store_fetched(ws, &id, &fetched)?;
+                    tally.fetched += 1;
+                    match &fetched.comments {
+                        Ok(_) => tally.comments_read.push(id),
+                        Err(error) => tally.failed.push(FailedPage {
+                            title: fetched.page.summary.title.clone(),
+                            error: format!(
+                                "the page was fetched, but its comments could not be read \
+                                 (the ones already here are kept): {error}"
+                            ),
+                            page_id: id,
+                        }),
+                    }
+                }
+                Ok((id, Fetched::Comments(comments))) => {
+                    self.progress.item(&title_of(&id));
+                    if self.store_comments(ws, &id, &comments, true)? {
+                        tally.comments_changed.push(id.clone());
+                    }
+                    // Only what asked for comments alone is settled by them: a
+                    // page still waiting for its body stays in the queue.
+                    ws.state().mark_comments_fetched(&id)?;
+                    tally.comments_refreshed += 1;
+                    tally.comments_read.push(id);
+                }
+                Err((item, e)) => {
+                    let title = title_of(&item.page_id);
+                    self.progress.item(&title);
+                    let error = if item.comments_only {
+                        format!("its comments could not be read again: {e}")
+                    } else {
+                        e.to_string()
+                    };
+                    tally.failed.push(FailedPage { page_id: item.page_id, title, error });
+                }
+            }
+        }
+        tally.comments_changed.sort();
+        Ok(tally)
     }
 
     async fn fetch_one(
         &self,
-        id: String,
-    ) -> std::result::Result<(String, FetchedPage), (String, ConfedError)> {
-        let page_id = PageId::new(&id);
+        item: FetchWork,
+    ) -> std::result::Result<(String, Fetched), (FetchWork, ConfedError)> {
+        let page_id = PageId::new(&item.page_id);
         let result = async {
+            if item.comments_only {
+                return Ok(Fetched::Comments(self.client.list_comments(&page_id).await?));
+            }
             let page = self.client.get_page(&page_id, BodyFormat::Storage).await?;
             let attachments = self.client.list_attachments(&page_id).await.unwrap_or_default();
-            let comments = self.client.list_comments(&page_id).await.unwrap_or_default();
-            Ok::<_, confed_api::ApiError>(FetchedPage { page, attachments, comments })
+            let comments = self.client.list_comments(&page_id).await.map_err(|e| e.to_string());
+            Ok::<_, confed_api::ApiError>(Fetched::Page(Box::new(FetchedPage {
+                page,
+                attachments,
+                comments,
+            })))
         }
         .await;
 
         match result {
-            Ok(fetched) => Ok((id, fetched)),
-            Err(e) => Err((id, e.into())),
+            Ok(fetched) => Ok((item.page_id, fetched)),
+            Err(e) => Err((item, e.into())),
         }
     }
 
@@ -520,26 +758,107 @@ impl SyncEngine {
             })?;
         }
 
-        state.clear_page_comments(id)?;
-        for comment in &fetched.comments {
-            state.upsert_comment(&comment_record(id, comment))?;
+        if let Ok(cache) = ws.page_store() {
+            cache.put_body(id, summary.version, &fetched.page.body_storage)?;
         }
-
-        state.mark_fetch_done(id)?;
+        let Ok(comments) = &fetched.comments else {
+            // The body is in; the comments are still owed, and the queue is
+            // what remembers that for the next fetch.
+            if let Ok(cache) = ws.page_store() {
+                let attachments = serde_json::to_string(&fetched.attachments)?;
+                cache.put_attachments(id, summary.version, &attachments)?;
+            }
+            return ws.state().enqueue_fetch(id, NEEDS_COMMENTS);
+        };
+        // The body moved, so every anchor is placed afresh.
+        self.store_comments(ws, id, comments, false)?;
+        ws.state().mark_fetch_done(id)?;
 
         if let Ok(cache) = ws.page_store() {
-            let version = fetched.page.summary.version;
-            cache.put_body(id, version, &fetched.page.body_storage)?;
             cache.put_extras(
                 id,
-                version,
+                summary.version,
                 &crate::pagestore::PageExtras {
                     attachments: serde_json::to_string(&fetched.attachments)?,
-                    comments: serde_json::to_string(&fetched.comments)?,
+                    comments: serde_json::to_string(comments)?,
                 },
             )?;
         }
         Ok(())
+    }
+
+    /// Replace a page's stored comments with what the server has now, and say
+    /// whether a reader would see the difference.
+    ///
+    /// `same_body` is for comments read without their page: the body has not
+    /// moved, so where confed last placed each anchor in it still holds, and is
+    /// kept rather than recomputed from the server's bare selection.
+    fn store_comments(
+        &self,
+        ws: &mut Workspace,
+        id: &str,
+        comments: &[Comment],
+        same_body: bool,
+    ) -> Result<bool> {
+        let state = ws.state();
+        let before = state.page_comments(id)?;
+        let mut after: Vec<CommentRecord> =
+            comments.iter().map(|c| comment_record(id, c)).collect();
+        if same_body {
+            for record in &mut after {
+                let kept = before
+                    .iter()
+                    .find(|b| b.comment_id == record.comment_id)
+                    .filter(|b| marker_ref(b).is_some() && marker_ref(b) == marker_ref(record));
+                if let Some(kept) = kept {
+                    record.anchor = kept.anchor.clone();
+                }
+            }
+        }
+
+        state.clear_page_comments(id)?;
+        for record in &after {
+            state.upsert_comment(record)?;
+        }
+
+        if same_body {
+            if let (Ok(cache), Some(remote)) = (ws.page_store(), ws.state().get_remote(id)?) {
+                cache.put_comments(id, remote.version, &serde_json::to_string(comments)?)?;
+            }
+        }
+        Ok(!same_comments(&before, &after))
+    }
+
+    /// Read these pages' comments from the server again, whatever their page
+    /// version says, and store them. Returns the pages whose comments had
+    /// changed and the ones that could not be read.
+    async fn reread_comments(
+        &self,
+        ws: &mut Workspace,
+        page_ids: &[String],
+    ) -> Result<(Vec<String>, Vec<FailedPage>)> {
+        let titles: HashMap<String, String> =
+            ws.state().all_remote()?.into_iter().map(|r| (r.page_id, r.title)).collect();
+        let work = page_ids
+            .iter()
+            .map(|id| FetchWork { page_id: id.clone(), comments_only: true })
+            .collect();
+        let tally = self.run_fetches(ws, work, &titles).await?;
+        Ok((tally.comments_changed, tally.failed))
+    }
+
+    /// Read one page's comments from the server again and bring its comment
+    /// files — the sidecar and the marks in the page body — in line with them.
+    /// Unsent drafts and resolve requests are kept. Returns whether the
+    /// comments had changed.
+    pub async fn refresh_comments(&self, ws: &mut Workspace, page_id: &str) -> Result<bool> {
+        let record = ws
+            .state()
+            .get_page(page_id)?
+            .ok_or_else(|| ConfedError::NotFound(format!("no page {page_id} in this workspace")))?;
+        let comments = self.client.list_comments(&PageId::new(page_id)).await?;
+        self.store_comments(ws, page_id, &comments, true)?;
+        self.write_comments_sidecar(ws, page_id, &record.title, &record.local_path, true)
     }
 
     /// Look up everyone mentioned in the fetched bodies who is not cached yet.
@@ -592,18 +911,22 @@ impl SyncEngine {
 
     /// Materialize the fetched state into working files.
     pub async fn pull(&self, ws: &mut Workspace, opts: &PullOptions) -> Result<PullOutcome> {
+        let mut warnings: Vec<String> = Vec::new();
+        // Pages whose comments this run has already read from the server.
+        let mut comments_read: Vec<String> = Vec::new();
         if !opts.no_fetch {
-            let fetch = self.fetch(ws, &FetchOptions::default()).await?;
-            if !fetch.failed.is_empty() {
-                tracing::warn!(
-                    target: "confed::sync",
-                    failed = fetch.failed.len(),
-                    "some pages could not be fetched"
-                );
-            }
+            let (fetch, read) = self.fetch_tracking(ws, &FetchOptions::default()).await?;
+            comments_read = read;
+            // A page that could not be fetched is pulled as it was last seen;
+            // say which, rather than only that there were some.
+            warnings.extend(fetch.failed.iter().map(|f| {
+                let name = if f.title.is_empty() { &f.page_id } else { &f.title };
+                format!("{name} ({}): {}", f.page_id, f.error)
+            }));
+            warnings.extend(fetch.comment_check_warning());
         }
 
-        let mut outcome = PullOutcome { dry_run: opts.dry_run, ..Default::default() };
+        let mut outcome = PullOutcome { dry_run: opts.dry_run, warnings, ..Default::default() };
         let (files, _) = worktree::read_working_files(ws)?;
         self.reconcile_paths(ws, &files)?;
         let base = ws.state().all_pages()?;
@@ -620,9 +943,31 @@ impl SyncEngine {
         // Pass one: decide, and refuse the whole operation if anything would be
         // clobbered. Nothing is written until the plan is known to be safe.
         let known_users = convert_options(ws, "", &HashMap::new()).users;
+        // Pages the listing has moved on whose body could not be fetched yet.
+        // What is stored for them is the previous text, or none: writing it
+        // would stamp old content with the new version, and nothing would ever
+        // notice. They stay as they are until a fetch brings the body.
+        let owed: Vec<String> = ws
+            .state()
+            .pending_fetches()?
+            .into_iter()
+            .filter(|(_, needs)| needs.iter().any(|n| n == "body"))
+            .map(|(id, _)| id)
+            .collect();
         let mut plan: Vec<(RemotePage, PullAction)> = Vec::new();
         for remote_page in &remote {
             if !self.in_scope(&opts.scope, &placements, &remote_page.page_id) {
+                continue;
+            }
+            if owed.contains(&remote_page.page_id) && !remote_page.deleted {
+                // With a fetch in this run, its failure has been reported.
+                if opts.no_fetch {
+                    outcome.warnings.push(format!(
+                        "{} ({}): its content has not been fetched yet, so it is left as it \
+                         is; `confed pull` fetches it",
+                        remote_page.title, remote_page.page_id
+                    ));
+                }
                 continue;
             }
             let status =
@@ -667,6 +1012,27 @@ impl SyncEngine {
                 "review with `confed diff`, then re-run with --force to discard local edits \
                  (or push your changes first)",
             ));
+        }
+
+        // A page named in the scope, and every page under `--force` or
+        // `--reset`, has its comments read whatever its version says. The check
+        // fetch makes finds comments added or edited, through a search; this is
+        // the request that cannot miss, and the one that sees a deletion.
+        let insist = !opts.scope.is_empty() || opts.force || opts.reset;
+        if insist && opts.with_comments && !opts.no_fetch {
+            let wanted: Vec<String> = remote
+                .iter()
+                .filter(|r| !r.deleted && r.storage_body.is_some())
+                .filter(|r| !comments_read.contains(&r.page_id))
+                .filter(|r| self.in_scope(&opts.scope, &placements, &r.page_id))
+                .map(|r| r.page_id.clone())
+                .collect();
+            self.progress.stage("Reading comments", Some(wanted.len()));
+            let (_, failed) = self.reread_comments(ws, &wanted).await?;
+            outcome.warnings.extend(failed.iter().map(|f| {
+                let path = placements.get(&f.page_id).map_or(f.page_id.as_str(), |p| &p.path);
+                format!("{path}: {}", f.error)
+            }));
         }
 
         // Pass two: apply.
@@ -820,26 +1186,38 @@ impl SyncEngine {
 
         // Pages pull had nothing to write still need their sidecar looked after:
         // the markup copy may be missing (a workspace pulled by an older confed,
-        // or a deleted file), and a page edited only locally is exactly when an
-        // inline comment anchor moves.
-        if !opts.dry_run {
-            for record in ws.state().all_pages()? {
-                if handled.contains(&record.page_id)
-                    || !self.in_scope(&opts.scope, &placements, &record.page_id)
-                {
-                    continue;
-                }
-                let path = record.local_path.clone();
+        // or a deleted file), a page edited only locally is exactly when an
+        // inline comment anchor moves — and comments are added, edited and
+        // deleted on the server without the page itself changing.
+        for record in ws.state().all_pages()? {
+            if handled.contains(&record.page_id)
+                || !self.in_scope(&opts.scope, &placements, &record.page_id)
+            {
+                continue;
+            }
+            let path = record.local_path.clone();
+            let comments_changed = if opts.dry_run {
+                opts.with_comments && !sidecar_is_current(ws, &record.page_id, &path)?
+            } else {
                 self.ensure_storage_copy(ws, &path, &record.storage_body)?;
-                if opts.with_comments {
-                    self.write_comments_sidecar(
+                opts.with_comments
+                    && self.write_comments_sidecar(
                         ws,
                         &record.page_id,
                         &record.title,
                         &path,
                         !opts.reset,
-                    )?;
-                }
+                    )?
+            };
+            if comments_changed {
+                outcome.updated.push(PageChange {
+                    page_id: record.page_id.clone(),
+                    path,
+                    title: record.title.clone(),
+                    from_version: Some(record.version),
+                    to_version: Some(record.version),
+                    ops: vec!["comments".to_string()],
+                });
             }
         }
 
@@ -1217,6 +1595,12 @@ impl SyncEngine {
         Ok(count)
     }
 
+    /// Bring a page's comment files in line with the comments in the state:
+    /// the marks in the page body, then the sidecar.
+    ///
+    /// Returns whether the sidecar was showing something else than the server's
+    /// comments — which is how a pull learns that a page's comments changed
+    /// while the page did not. The file is written only when its text differs.
     fn write_comments_sidecar(
         &self,
         ws: &mut Workspace,
@@ -1224,31 +1608,40 @@ impl SyncEngine {
         title: &str,
         page_path: &str,
         keep_drafts: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         sync_marks(ws, page_id, page_path)?;
         self.reanchor_inline_comments(ws, page_id, page_path)?;
         let records = ws.state().page_comments(page_id)?;
-        let dir = ws.absolute(&paths::sidecar_for(page_path));
-        let path = dir.join(comments::COMMENTS_FILENAME);
+        let path = ws.absolute(&paths::sidecar_for(page_path)).join(comments::COMMENTS_FILENAME);
+        let on_disk = std::fs::read_to_string(&path).ok();
+        let existing =
+            on_disk.as_deref().and_then(|text| comments::parse(text).ok()).unwrap_or_default();
+        let changed = !comments::is_current(&existing, &records);
 
-        // Unpushed drafts survive a refresh — except under `--reset`, where a
-        // draft is a local modification like any other.
-        let drafts: Vec<comments::SidecarComment> = if keep_drafts {
-            std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| comments::parse(&text).ok())
-                .map(|s| s.comments.into_iter().filter(|c| c.is_draft()).collect())
-                .unwrap_or_default()
+        // Unsent work survives a refresh — except under `--reset`, where it is
+        // a local modification like any other. A resolve request for a thread
+        // that is resolved by now, or gone, has nothing left to do.
+        let unsent = existing.drafts().count() + existing.resolve_requests.len();
+        let (drafts, requests): (Vec<comments::SidecarComment>, Vec<String>) = if keep_drafts {
+            let open = |id: &String| records.iter().any(|r| &r.comment_id == id && !r.resolved);
+            (
+                existing.drafts().cloned().collect(),
+                existing.resolve_requests.iter().filter(|id| open(id)).cloned().collect(),
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
 
-        if records.is_empty() && drafts.is_empty() {
-            return Ok(());
+        // No comments, nothing unsent, and no file that says otherwise.
+        let nothing_to_show = records.is_empty() && drafts.is_empty() && requests.is_empty();
+        if nothing_to_show && !changed && unsent == 0 {
+            return Ok(false);
         }
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| ConfedError::io(format!("creating {}", dir.display()), e))?;
-        write_atomic(&path, &comments::render(page_id, title, &records, &drafts))
+        let text = comments::render_with_requests(page_id, title, &records, &drafts, &requests);
+        if on_disk.as_deref() != Some(text.as_str()) {
+            write_atomic(&path, &text)?;
+        }
+        Ok(changed)
     }
 
     /// Re-locate every inline comment's anchor in the page's current text.
@@ -2324,10 +2717,13 @@ impl SyncEngine {
     ) -> Result<()> {
         let records = ws.state().page_comments(&record.page_id)?;
         let drafts: Vec<comments::SidecarComment> = sidecar.drafts().cloned().collect();
-        let mut text = comments::render(&record.page_id, &record.title, &records, &drafts);
-        for id in &sidecar.resolve_requests {
-            text.push_str(&format!("\n<!-- confed:resolve id={id} -->\n"));
-        }
+        let text = comments::render_with_requests(
+            &record.page_id,
+            &record.title,
+            &records,
+            &drafts,
+            &sidecar.resolve_requests,
+        );
         write_atomic(path, &text)
     }
 
@@ -2598,6 +2994,20 @@ pub fn pending_comment_work(ws: &Workspace, page_path: &str) -> usize {
     body + sidecar
 }
 
+/// Whether a page's sidecar already shows the comments in the state. What a
+/// dry run goes by: the answer [`SyncEngine::write_comments_sidecar`] would
+/// give, without writing anything.
+fn sidecar_is_current(ws: &Workspace, page_id: &str, page_path: &str) -> Result<bool> {
+    let records = ws.state().page_comments(page_id)?;
+    let existing = std::fs::read_to_string(
+        ws.absolute(&paths::sidecar_for(page_path)).join(comments::COMMENTS_FILENAME),
+    )
+    .ok()
+    .and_then(|text| comments::parse(&text).ok())
+    .unwrap_or_default();
+    Ok(comments::is_current(&existing, &records))
+}
+
 /// The page file's stripped body, if it can be read.
 fn local_body(ws: &Workspace, path: &str) -> Option<String> {
     let content = std::fs::read_to_string(ws.absolute(path)).ok()?;
@@ -2762,6 +3172,54 @@ fn comment_record(page_id: &str, comment: &Comment) -> CommentRecord {
         anchor: comment.anchor.as_ref().and_then(|a| serde_json::to_string(a).ok()),
         synced_at: Some(now()),
     }
+}
+
+/// The Confluence marker an inline comment's anchor names, if it has one.
+fn marker_ref(record: &CommentRecord) -> Option<String> {
+    let anchor: confed_api::InlineAnchor = serde_json::from_str(record.anchor.as_deref()?).ok()?;
+    anchor.marker_ref
+}
+
+/// Whether two snapshots of a page's comments read the same: the same
+/// comments, in the same threads, with the same text and resolved state.
+/// Anchors are left out — where a comment sits is worked out locally.
+fn same_comments(before: &[CommentRecord], after: &[CommentRecord]) -> bool {
+    let key = |records: &[CommentRecord]| {
+        let mut keys: Vec<_> = records
+            .iter()
+            .map(|r| {
+                (
+                    r.comment_id.clone(),
+                    r.parent_comment_id.clone(),
+                    r.kind.clone(),
+                    r.resolved,
+                    r.body_storage.clone(),
+                )
+            })
+            .collect();
+        keys.sort();
+        keys
+    };
+    key(before) == key(after)
+}
+
+/// A stored comment mark, if it can be searched from.
+///
+/// A mark well in the future was stamped by a clock that has since been set
+/// back: how long ago the check really was is unknown, so it vouches for
+/// nothing and every page is read again. One ahead by less than the overlap
+/// the search adds anyway is ordinary drift, and the overlap covers it.
+fn trusted_mark(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let mark = chrono::DateTime::parse_from_rfc3339(value).ok()?.with_timezone(&chrono::Utc);
+    let drift = chrono::Duration::minutes(COMMENT_CHECK_OVERLAP_MINUTES as i64);
+    (mark <= chrono::Utc::now() + drift).then_some(mark)
+}
+
+/// Whole minutes from `mark` to now, rounded up; none for a mark slightly
+/// ahead of the clock.
+fn minutes_since(mark: chrono::DateTime<chrono::Utc>) -> u64 {
+    let seconds = (chrono::Utc::now() - mark).num_seconds().max(0) as u64;
+    seconds.div_ceil(60)
 }
 
 /// Put cached attachment and comment snapshots back into the sync state.

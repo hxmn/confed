@@ -716,8 +716,12 @@ async fn run_work(engine: &SyncEngine, ws: &mut Workspace, work: Work) -> Result
         }
         Work::Pull(options) => {
             let outcome = engine.pull(ws, &options).await?;
+            let warnings = match outcome.warnings.len() {
+                0 => String::new(),
+                n => format!(" {n} warning(s): `confed pull` shows them."),
+            };
             Ok(format!(
-                "Pulled: {} created, {} updated, {} merged, {} conflicted.",
+                "Pulled: {} created, {} updated, {} merged, {} conflicted.{warnings}",
                 outcome.created.len(),
                 outcome.updated.len(),
                 outcome.merged.len(),

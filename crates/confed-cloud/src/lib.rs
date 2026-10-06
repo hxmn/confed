@@ -432,6 +432,24 @@ impl ConfluenceClient for CloudClient {
         Ok(out)
     }
 
+    async fn recent_comment_activity(
+        &self,
+        space: &SpaceId,
+        minutes: u64,
+    ) -> ApiResult<CommentActivity> {
+        // v2 lists comments page by page only; CQL, still served by v1, is the
+        // one query that spans the space.
+        let key = if space.key.is_empty() {
+            self.space_key_for(space.numeric.clone()).await
+        } else {
+            space.key.clone()
+        };
+        if key.is_empty() {
+            return Err(ApiError::NotFound("space: no key to search comments by".into()));
+        }
+        v1::recent_comment_activity(&self.http, &key, minutes).await
+    }
+
     async fn add_footer_comment(
         &self,
         page: &PageId,

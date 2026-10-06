@@ -1500,3 +1500,224 @@ async fn an_anchor_inside_a_raw_table_is_drafted_in_the_sidecar() {
     let sidecar = read(dir.path(), "Team Handbook/.Onboarding/comments.md");
     assert!(sidecar.contains("line one\nline two"), "{sidecar}");
 }
+
+// ------------------------------------- comments that change on their own ----
+
+/// A space whose root page has one footer comment, which `edited` rewrites the
+/// way the web UI does: the comment gets a new version and text, the page
+/// keeps its own. Only the comment search can tell.
+async fn mount_commented_root(
+    server: &MockServer,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let edited = std::sync::Arc::new(AtomicBool::new(false));
+
+    let state = edited.clone();
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{ROOT_PAGE}/child/comment")))
+        .respond_with(move |_: &Request| {
+            let (version, text) = if state.load(Ordering::SeqCst) {
+                (2, "Фраза 2.")
+            } else {
+                (1, "Фраза 1.")
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "2001", "type": "comment", "status": "current",
+                    "container": { "id": ROOT_PAGE, "type": "page" },
+                    "body": { "storage": { "value": format!("<p>{text}</p>") } },
+                    "version": { "number": version, "by": { "displayName": "Alice Ng" } },
+                    "history": {
+                        "createdDate": "2026-07-30T10:02:00Z",
+                        "createdBy": { "displayName": "Alice Ng" }
+                    }
+                }],
+                "start": 0, "limit": 100, "size": 1, "_links": {}
+            }))
+        })
+        .with_priority(1)
+        .mount(server)
+        .await;
+
+    let state = edited.clone();
+    Mock::given(method("GET"))
+        .and(path("/rest/api/search"))
+        .and(is_comment_search)
+        .respond_with(move |_: &Request| {
+            let results = if state.load(Ordering::SeqCst) {
+                json!([{
+                    "content": {
+                        "id": "2001", "type": "comment", "status": "current",
+                        "container": { "id": ROOT_PAGE, "type": "page" }
+                    },
+                    "title": "Re: Team Handbook",
+                    "url": "/display/DOCS/Team+Handbook?focusedCommentId=2001#comment-2001"
+                }])
+            } else {
+                json!([])
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "results": results, "start": 0, "limit": 100, "_links": {}
+            }))
+        })
+        .with_priority(1)
+        .mount(server)
+        .await;
+    edited
+}
+
+/// The search `fetch` makes for comments added or edited since its last check.
+fn is_comment_search(request: &Request) -> bool {
+    request.url.query_pairs().any(|(key, value)| {
+        key == "cql"
+            && value.starts_with(&format!("space = \"{SPACE}\" and type = comment and "))
+            && value.contains("lastmodified >= now(\"-")
+    })
+}
+
+/// How many times the root page's comments were asked for.
+async fn comment_reads(server: &MockServer) -> usize {
+    let route = format!("/rest/api/content/{ROOT_PAGE}/child/comment");
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == route)
+        .count()
+}
+
+/// The report this guards against: a footer comment edited in the web UI, on
+/// a page nobody touched, never reached the workspace — `pull`, `pull --page`
+/// and `pull --force --page` all answered `updated: []` and left the old text.
+#[tokio::test]
+async fn a_comment_edited_on_the_server_is_pulled_though_its_page_did_not_change() {
+    use std::sync::atomic::Ordering;
+
+    let server = dc_server().await;
+    let edited = mount_commented_root(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let sidecar = ".Team Handbook/comments.md";
+    assert!(read(dir.path(), sidecar).contains("Фраза 1."));
+
+    // Nothing changed: the search is asked, no page's comments are.
+    let reads = comment_reads(&server).await;
+    let quiet = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&quiet), 0, "stderr: {}", stderr(&quiet));
+    let quiet = envelope(&quiet, "pull");
+    assert_eq!(quiet["result"]["updated"], json!([]), "{quiet}");
+    assert_eq!(comment_reads(&server).await, reads, "an unchanged page costs no comment request");
+    let searches =
+        server.received_requests().await.unwrap().iter().filter(|r| is_comment_search(r)).count();
+    assert_eq!(searches, 1, "the first pull fetched everything; the second one asked");
+
+    // The comment is edited in the browser. The page is still version 3.
+    edited.store(true, Ordering::SeqCst);
+    let output = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "pull");
+    assert_eq!(value["warnings"], json!([]), "{value}");
+    let updated = value["result"]["updated"].as_array().expect("updated");
+    assert_eq!(updated.len(), 1, "{value}");
+    assert_eq!(updated[0]["page_id"], json!(ROOT_PAGE));
+    assert_eq!(updated[0]["path"], json!(ROOT_FILE));
+    assert_eq!(updated[0]["ops"], json!(["comments"]));
+    assert_eq!((&updated[0]["from_version"], &updated[0]["to_version"]), (&json!(3), &json!(3)));
+    assert_eq!(comment_reads(&server).await, reads + 1);
+
+    let text = read(dir.path(), sidecar);
+    assert!(text.contains("Фраза 2."), "{text}");
+    assert!(!text.contains("Фраза 1."), "{text}");
+    let list = envelope(
+        &run(confed_authed(dir.path(), &["comment", "list", ROOT_FILE, "--json"])),
+        "comment",
+    );
+    assert_eq!(
+        list["result"]["comments"][0]["body_markdown"].as_str().map(str::trim),
+        Some("Фраза 2.")
+    );
+    assert!(list["result"]["checked_at"].is_string(), "{list}");
+    assert_eq!(list["result"]["refreshed"], json!(false));
+    let status = envelope(&run(confed_authed(dir.path(), &["status", "--json"])), "status");
+    assert_eq!(status["result"]["clean"], json!(true), "a comment is not a page edit: {status}");
+
+    // Naming the page reads its comments whatever the search says.
+    for args in [
+        &["pull", "--page", ROOT_PAGE, "--json"][..],
+        &["pull", "--force", "--page", ROOT_PAGE, "--json"][..],
+        &["pull", ROOT_FILE, "--json"][..],
+        &["fetch", "--page", ROOT_PAGE, "--json"][..],
+    ] {
+        let before = comment_reads(&server).await;
+        let output = run(confed_authed(dir.path(), args));
+        assert_eq!(exit_code(&output), 0, "{args:?}: {}", stderr(&output));
+        envelope(&output, args[0]);
+        assert_eq!(comment_reads(&server).await, before + 1, "{args:?}");
+    }
+
+    // And so does asking for the comments themselves.
+    let before = comment_reads(&server).await;
+    let output =
+        run(confed_authed(dir.path(), &["comment", "list", ROOT_FILE, "--refresh", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let list = envelope(&output, "comment");
+    assert_eq!(list["result"]["refreshed"], json!(true), "{list}");
+    assert_eq!(list["result"]["changed"], json!(false), "{list}");
+    assert_eq!(comment_reads(&server).await, before + 1);
+    assert!(mutations(&server).await.is_empty(), "reading comments changes nothing on the server");
+}
+
+/// A search that fails must not read as "no comments changed".
+#[tokio::test]
+async fn a_failed_comment_search_is_a_warning_not_silence() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/search"))
+        .and(is_comment_search)
+        .respond_with(ResponseTemplate::new(400).set_body_string("Could not parse cql"))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let output = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&output), 0, "the pages still pull: {}", stderr(&output));
+    let value = envelope(&output, "pull");
+    let warnings = value["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 1, "{value}");
+    let warning = warnings[0].as_str().unwrap();
+    assert!(warning.contains("which comments changed"), "{warning}");
+    assert!(warning.contains("confed pull <page>"), "it names the way out: {warning}");
+
+    let output = run(confed_authed(dir.path(), &["fetch", "--json"]));
+    let value = envelope(&output, "fetch");
+    assert!(value["result"]["comment_check_failed"].is_string(), "{value}");
+    assert_eq!(value["warnings"].as_array().map(Vec::len), Some(1), "{value}");
+}
+
+/// Queued comment work is kept by every rewrite of the sidecar: a resolve
+/// queued first must still be there after a reply is queued next to it.
+#[tokio::test]
+async fn queueing_a_reply_keeps_a_resolve_queued_before_it() {
+    let server = dc_server().await;
+    mount_commented_root(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let sidecar_path = dir.path().join(".Team Handbook/comments.md");
+    let mut sidecar = std::fs::read_to_string(&sidecar_path).unwrap();
+    sidecar.push_str("\n<!-- confed:resolve id=2001 -->\n");
+    std::fs::write(&sidecar_path, sidecar).unwrap();
+
+    let output =
+        run(confed_authed(dir.path(), &["comment", "reply", "2001", "-m", "Agreed.", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let text = std::fs::read_to_string(&sidecar_path).unwrap();
+    assert!(text.contains("Agreed."), "{text}");
+    assert!(text.contains("<!-- confed:resolve id=2001 -->"), "{text}");
+}

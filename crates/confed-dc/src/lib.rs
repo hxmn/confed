@@ -540,6 +540,14 @@ impl ConfluenceClient for DcClient {
         Ok(raw.into_iter().map(|c| c.into_comment(page)).collect())
     }
 
+    async fn recent_comment_activity(
+        &self,
+        space: &SpaceId,
+        minutes: u64,
+    ) -> ApiResult<CommentActivity> {
+        v1::recent_comment_activity(&self.http, &space.key, minutes).await
+    }
+
     async fn add_footer_comment(
         &self,
         page: &PageId,

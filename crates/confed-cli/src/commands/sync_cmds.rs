@@ -53,7 +53,15 @@ pub mod fetch {
                 ))
             );
         }
-        if outcome.fetched > 0 {
+        if outcome.comments_refreshed > 0 {
+            let _ = writeln!(
+                human,
+                "Read the comments of {} again; {} changed.",
+                plural(outcome.comments_refreshed, "unchanged page", "unchanged pages"),
+                outcome.comments_changed.len()
+            );
+        }
+        if outcome.fetched > 0 || !outcome.comments_changed.is_empty() {
             let _ =
                 writeln!(human, "{}", style.dim("Run `confed pull` to write the changes to disk."));
         }
@@ -62,6 +70,9 @@ pub mod fetch {
         let mut output = Output::from_data(&outcome, human);
         for failure in &outcome.failed {
             output = output.warn(format!("{}: {}", failure.page_id, failure.error));
+        }
+        if let Some(warning) = outcome.comment_check_warning() {
+            output = output.warn(warning);
         }
         if failures > 0 {
             output.exit = ExitCode::Partial;
@@ -118,7 +129,13 @@ pub mod pull {
             ("deleted", &outcome.deleted),
         ] {
             for page in pages {
-                let _ = writeln!(human, "  {:<8} {}", label, page.path);
+                // A page whose comments changed and nothing else.
+                let what = if page.ops == ["comments"] {
+                    style.dim("  (comments)")
+                } else {
+                    String::new()
+                };
+                let _ = writeln!(human, "  {:<8} {}{}", label, page.path, what);
             }
         }
         for moved in &outcome.moved {
@@ -163,7 +180,9 @@ pub mod pull {
 
         let skipped: Vec<String> =
             outcome.skipped_dirty.iter().map(|b| format!("{}: {}", b.path, b.reason)).collect();
-        let mut output = Output::from_data(&outcome, human).warn_all(skipped);
+        let mut output = Output::from_data(&outcome, human)
+            .warn_all(skipped)
+            .warn_all(outcome.warnings.iter().cloned());
         if conflicts > 0 {
             output.exit = ExitCode::Conflict;
         }

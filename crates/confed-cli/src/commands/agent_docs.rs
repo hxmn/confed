@@ -165,7 +165,7 @@ confed pull --json                    # write remote changes into files (merges)
 confed push --dry-run --json          # exactly what would be uploaded
 confed push --dry-run --show-storage  # …and the Confluence markup it would send
 confed push -m "reason" --json        # upload
-confed comment list <page> --json     # read discussion
+confed comment list <page> --json     # read discussion (add --refresh to re-read it)
 confed user search "name" --json      # people, with the mention to paste
 confed log <page> --json              # server version history
 confed log --json                     # what changed lately anywhere in the space
@@ -246,6 +246,20 @@ Each entry has `id`, `kind` (`footer` | `inline`), `author`, `created`,
 has no status of its own: both say whether its thread is resolved), `anchor`
 (`text`, `orphaned`, `placed`, `line`) and `body_markdown`. `orphan_markers` lists
 inline markers in the page that belong to no comment — left by deleted comments.
+
+**These are the local copy, as of `checked_at`.** A comment changes in Confluence
+without its page changing, so do not assume `comments.md` is current because the page
+is. `confed pull` brings in comments added or edited on any page (such a page is in
+`updated` with `"ops": ["comments"]`), but it cannot see one that was deleted, and on
+Data Center may not see one that was resolved. Before acting on a discussion, read it
+from the server:
+
+```bash
+confed comment list <page> --refresh --json   # reads the server, updates comments.md
+confed pull <page> --json                     # the same, with the page
+```
+
+A pull that warns it `could not ask the server which comments changed` did not look.
 
 ### Writing: commands
 
@@ -470,6 +484,19 @@ mod tests {
             "by the page's current title on Data Center",
         ] {
             assert!(doc.contains(required), "the contract should mention {required:?}");
+        }
+    }
+
+    #[test]
+    fn the_contract_says_comments_go_stale_on_their_own() {
+        let doc = render("https://wiki.corp", Flavor::DataCenter, "DOCS");
+        for needle in [
+            "as of `checked_at`",
+            "confed comment list <page> --refresh --json",
+            r#""ops": ["comments"]"#,
+            "could not ask the server which comments changed",
+        ] {
+            assert!(doc.contains(needle), "the contract must mention {needle:?}");
         }
     }
 

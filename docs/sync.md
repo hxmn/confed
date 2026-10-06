@@ -74,6 +74,10 @@ that disappeared from the listing as deleted. Bodies are queued in `.state.db` b
 are downloaded, so an interrupted fetch resumes instead of restarting — the JSON result
 reports `"resumed": true` when it did. Nothing on disk changes.
 
+Comments are looked for separately, because a comment has a version of its own: adding or
+editing one in Confluence leaves the page's version where it was, so the listing cannot
+show it. See [Comments change without their page](#comments-change-without-their-page).
+
 **`pull`** fetches first (unless `--no-fetch`), then plans and writes. Planning happens in
 full before anything is written: if any page in scope would lose local work, nothing is
 written at all and the command exits 7. Per page:
@@ -102,6 +106,10 @@ sides changed the title, yours wins and a warning is logged.
 
 A page renamed on the server is *moved*, not duplicated: the new path is written and the
 old file removed, and the move is reported in `result.moved`.
+
+A page whose comments changed on the server while the page did not is reported under
+`result.updated` with `"ops": ["comments"]` and equal `from_version` and `to_version`:
+its `comments.md` and the comment marks in its body were rewritten, nothing else.
 
 **`push`** builds a plan, refuses anything unsafe, then applies it. Creates run
 parent-first so a child always has a parent to attach to; deletes run child-first so a
@@ -216,6 +224,38 @@ a `new` one: `status` counts it as a comment draft, and `push` posts it.
 After a merge the marks are placed again from what the server knows; a conflicted file
 carries none (two candidate texts, one comment) until `confed resolve` puts them back.
 
+## Comments change without their page
+
+Adding, editing, resolving or deleting a comment in Confluence does not change the version
+of the page it is on. A sync that only compared page versions would never see it, and the
+local `comments.md` would go stale without a word. So `fetch` — and therefore `pull` —
+looks for comment changes on its own:
+
+- **Every fetch asks the server which pages were commented on since the last check** —
+  one CQL search (`space = … and type = comment and lastmodified >= now("-…m")`) — and
+  reads the comments of those pages again, without downloading their bodies. This finds
+  comments that were **added or edited**. The result reports the pages read as
+  `comments_refreshed` and the ones that had changed as `comments_changed`.
+- **A page you name has its comments read whatever the search says**: `confed pull
+  <page>`, `pull --page <id>`, `fetch --page <id>` and `confed comment list <page>
+  --refresh` all ask for that page's comments directly. So does every page under `pull
+  --force` and `pull --reset`.
+
+The search cannot see a comment that was **deleted** — it is in no result — and Data
+Center may not count **resolving** a thread as a modification. Those reach the workspace
+when the page is named, or when the page itself changes. If a pull must not miss them,
+name the page.
+
+`confed comment list` reads the local copy and says how old it may be: `checked_at` is
+when confed last asked the server about comment changes.
+
+If the search fails — search switched off, an index being rebuilt — the fetch still
+succeeds and warns that comments of unchanged pages may be out of date. The next check
+covers the gap, since the mark it searches from only moves when a check succeeds.
+
+A workspace that has never checked — one last synced by confed 0.8.1 or older — reads
+every page's comments once on its next fetch, since nothing says how old they are.
+
 ## Optimistic version checking
 
 Confluence updates are optimistic: you send the version number you expect the page to
@@ -309,16 +349,18 @@ confed pull --reset              # throw it away
 ## What a fetch actually costs
 
 A page body at a given version never changes, so confed downloads it once and keeps it in
-`.pages.db`, keyed by page and version. `fetch` then asks the server one question — which
-versions exist — and takes everything else from the cache:
+`.pages.db`, keyed by page and version. `fetch` then asks the server two questions — which
+versions exist, and which pages were commented on since the last check — and takes
+everything else from the cache:
 
-- **Nothing changed upstream.** One request, whatever the size of the space.
-- **Some pages changed.** One request, plus a body, attachment list and comment list for
-  each page whose version moved.
+- **Nothing changed upstream.** The listing and one search, whatever the size of the space.
+- **Some pages changed.** The same, plus a body, attachment list and comment list for
+  each page whose version moved, and a comment list for each unchanged page that was
+  commented on.
 - **`.state.db` was rebuilt** — a fresh clone, or `confed init` over an existing tree.
-  Still one request: every body is already cached, and the attachment and comment
-  snapshots taken alongside each one are restored with it, leaving confed exactly as
-  current as it was before the rebuild.
+  Still the same two: every body is already cached, and the attachment and comment
+  snapshots taken alongside each one are restored with it. The cache records when its
+  comments were last current, and the search picks up from there.
 
 The cache keeps the last few versions of each page, so a page reverted on the server also
 costs nothing. Deleting `.pages.db` is always safe; the next fetch downloads what it needs

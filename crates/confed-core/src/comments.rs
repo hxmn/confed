@@ -71,6 +71,41 @@ impl Sidecar {
     }
 }
 
+/// Whether a sidecar already shows the server's comments as `records` has them:
+/// the same threads, with the same text and resolved state.
+///
+/// This is what tells a pull that a page's comments changed. It compares what
+/// a reader sees, not bytes: anchor context and layout are confed's own, and
+/// drafts and resolve requests are local work, not the server's.
+pub fn is_current(sidecar: &Sidecar, records: &[CommentRecord]) -> bool {
+    // Indentation is the thread's depth and is not kept on the way back in.
+    let text = |body: &str| body.lines().map(str::trim).collect::<Vec<_>>().join("\n");
+    let mut shown: Vec<_> = sidecar
+        .comments
+        .iter()
+        .filter_map(|c| {
+            let id = c.id.as_deref()?;
+            Some((id, c.reply_to.as_deref(), c.kind, c.resolved, text(c.body.trim())))
+        })
+        .collect();
+    let mut stored: Vec<_> = records
+        .iter()
+        .map(|r| {
+            let kind = if r.kind == "inline" { SidecarKind::Inline } else { SidecarKind::Footer };
+            (
+                r.comment_id.as_str(),
+                r.parent_comment_id.as_deref(),
+                kind,
+                r.resolved,
+                text(r.body_markdown.trim()),
+            )
+        })
+        .collect();
+    shown.sort_by(|a, b| a.0.cmp(b.0));
+    stored.sort_by(|a, b| a.0.cmp(b.0));
+    shown == stored
+}
+
 /// Render the sidecar file for a page.
 ///
 /// `drafts` are unpushed local entries, appended after the server threads so a
@@ -108,12 +143,30 @@ pub fn render(
         if orphaned_reply {
             out.push('\n');
             write_record(&mut out, record, 0);
+            write_replies(&mut out, comments, &record.comment_id, 1);
         }
     }
 
     for draft in drafts {
         out.push('\n');
         write_draft(&mut out, draft);
+    }
+    out
+}
+
+/// [`render`], followed by the resolve requests still waiting to be pushed.
+/// Every rewrite of a sidecar goes through here, so queued work is never
+/// dropped by one.
+pub fn render_with_requests(
+    page_id: &str,
+    title: &str,
+    comments: &[CommentRecord],
+    drafts: &[SidecarComment],
+    resolve_requests: &[String],
+) -> String {
+    let mut out = render(page_id, title, comments, drafts);
+    for id in resolve_requests {
+        out.push_str(&format!("\n<!-- confed:resolve id={id} -->\n"));
     }
     out
 }
@@ -186,8 +239,12 @@ fn parse_anchor(json: &str) -> Option<InlineAnchor> {
     serde_json::from_str(json).ok()
 }
 
+/// A marker is one line, so a line break inside a value — the text around an
+/// anchor at the end of its paragraph has one — is written as `\n`.
 fn quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    let escaped =
+        value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r");
+    format!("\"{escaped}\"")
 }
 
 /// Parse a sidecar file back into structured comments.
@@ -310,10 +367,15 @@ fn parse_attrs(input: &str) -> std::collections::HashMap<String, String> {
             i += 1;
             let mut value = String::new();
             while i < chars.len() && chars[i] != '"' {
-                if chars[i] == '\\' && i + 1 < chars.len() {
+                let escaped = chars[i] == '\\' && i + 1 < chars.len();
+                if escaped {
                     i += 1;
                 }
-                value.push(chars[i]);
+                value.push(match chars[i] {
+                    'n' if escaped => '\n',
+                    'r' if escaped => '\r',
+                    other => other,
+                });
                 i += 1;
             }
             i += 1; // closing quote
@@ -408,6 +470,32 @@ mod tests {
     }
 
     #[test]
+    fn an_anchor_at_the_end_of_its_paragraph_keeps_its_marker_on_one_line() {
+        let mut inline = record("77120", None, "Still true?", "inline");
+        inline.anchor = Some(
+            serde_json::to_string(&InlineAnchor {
+                text: "ask questions".into(),
+                context_before: "and then ".into(),
+                context_after: ".\n\nNext paragraph, with a \\n in it".into(),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        let text = render("163842", "Onboarding", std::slice::from_ref(&inline), &[]);
+        assert_eq!(text.lines().filter(|l| l.contains("confed:inline")).count(), 1);
+        assert!(
+            text.contains(r#"context-after=".\n\nNext paragraph, with a \\n in it""#),
+            "{text}"
+        );
+
+        let parsed = parse(&text).unwrap();
+        assert_eq!(parsed.comments.len(), 1, "a broken marker would hide the comment");
+        let anchor = parsed.comments[0].anchor.as_ref().unwrap();
+        assert_eq!(anchor.context_after, ".\n\nNext paragraph, with a \\n in it");
+        assert!(is_current(&parsed, &[inline]));
+    }
+
+    #[test]
     fn orphaned_anchors_are_flagged_not_dropped() {
         let mut inline = record("77120", None, "Still relevant?", "inline");
         inline.anchor = Some(
@@ -482,6 +570,55 @@ mod tests {
         assert_eq!(parsed.comments.len(), 2);
         assert_eq!(parsed.drafts().count(), 1);
         assert_eq!(parsed.drafts().next().unwrap().body, "My unpushed note.");
+    }
+
+    #[test]
+    fn a_sidecar_is_current_while_it_shows_what_the_server_has() {
+        let comments = vec![
+            record("98211", None, "Question?", "footer"),
+            // A reply is indented in the file; a code block inside it more so.
+            record("98230", Some("98211"), "Answer:\n\n    indented code\n\nDone.", "footer"),
+            record("77120", None, "Inline note.", "inline"),
+        ];
+        let sidecar = parse(&render("163842", "Onboarding", &comments, &[])).unwrap();
+        assert!(is_current(&sidecar, &comments));
+
+        // An edit, a resolved thread, a new comment and a deleted one all show.
+        let mut edited = comments.clone();
+        edited[0].body_markdown = "Another question?".into();
+        assert!(!is_current(&sidecar, &edited));
+
+        let mut resolved = comments.clone();
+        resolved[2].resolved = true;
+        assert!(!is_current(&sidecar, &resolved));
+
+        let mut added = comments.clone();
+        added.push(record("98300", None, "New.", "footer"));
+        assert!(!is_current(&sidecar, &added));
+        assert!(!is_current(&sidecar, &comments[..2]));
+
+        // Local work is not the server's: a draft and a resolve request change nothing.
+        let text = format!(
+            "{}\n<!-- confed:new -->\nMine.\n\n<!-- confed:resolve id=77120 -->\n",
+            render("163842", "Onboarding", &comments, &[])
+        );
+        assert!(is_current(&parse(&text).unwrap(), &comments));
+
+        // No file and no comments agree with each other.
+        assert!(is_current(&Sidecar::default(), &[]));
+        assert!(!is_current(&Sidecar::default(), &comments));
+    }
+
+    #[test]
+    fn a_reply_whose_parent_is_missing_still_brings_its_own_replies() {
+        // What is left of a thread when its first comments are not listed.
+        let comments = vec![
+            record("3", Some("2"), "Left without a parent.", "footer"),
+            record("4", Some("3"), "A reply to it.", "footer"),
+        ];
+        let text = render("163842", "Onboarding", &comments, &[]);
+        assert!(text.contains("A reply to it."), "{text}");
+        assert!(is_current(&parse(&text).unwrap(), &comments), "every stored comment is shown");
     }
 
     #[test]
