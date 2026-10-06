@@ -179,7 +179,8 @@ async fn remove(
     push: bool,
 ) -> Result<Output> {
     let recorded = ctx.workspace()?.state().page_attachments(page_id)?;
-    let on_server = recorded.iter().any(|a| a.filename == filename);
+    let record = recorded.iter().find(|a| a.filename == filename);
+    let on_server = record.is_some();
     let path = sidecar.join(filename);
     let local = path.exists();
 
@@ -187,6 +188,14 @@ async fn remove(
         return Err(ConfedError::NotFound(format!(
             "no attachment {filename} on this page; `confed attach <page> --list --remote` shows what is there"
         )));
+    }
+    // What gets deleted must be something this workspace has seen: a file — or
+    // a version of one — that only the server has is pulled first.
+    if record.is_some_and(|a| !a.downloaded) {
+        return Err(ConfedError::state_with_hint(
+            format!("{filename} has a version on the server that has not been pulled here"),
+            "run `confed pull` on the page first, then remove the attachment",
+        ));
     }
     if local {
         std::fs::remove_file(&path)

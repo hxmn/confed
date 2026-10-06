@@ -344,6 +344,12 @@ confed:                    # TOOL-MANAGED — DO NOT EDIT ANY OF THIS
   the storage format; deleting the whole block deletes the macro. Never touch
   `ac:macro-id`.
 - Attachments are referenced relative to the sidecar: `![alt](.Onboarding/diagram.png)`.
+  The files there, and `confed.attachments` in the frontmatter, are the local copy: a
+  file is attached to a page — or dropped into a comment on it — without the page
+  changing. `confed pull` brings in files added or replaced on any page (such a page is
+  in `updated` with `"ops": ["attachments"]`), but only `confed pull <page>` sees one
+  that was deleted. Before concluding a file is missing, pull the page, or ask the
+  server: `confed attach <page> --list --remote --json`.
 - `.<page>/storage.xml` is the body as Confluence stores it, indented, refreshed on every
   sync. Read it to see what a conversion produced; editing it does nothing, because pushes
   are built from the Markdown.
@@ -456,6 +462,9 @@ confed pull <page> --json                     # the same, with the page
 ```
 
 A pull that warns it `could not ask the server which comments changed` did not look.
+One that warns a `comment … references <file>, which is not among the page's
+attachments` is telling you the comment shows or links a file this workspace does not
+have — deleted from the page since, usually.
 
 ### Writing: commands
 
@@ -691,6 +700,19 @@ mod tests {
             "confed comment list <page> --refresh --json",
             r#""ops": ["comments"]"#,
             "could not ask the server which comments changed",
+        ] {
+            assert!(doc.contains(needle), "the contract must mention {needle:?}");
+        }
+    }
+
+    #[test]
+    fn the_contract_says_attachments_go_stale_on_their_own() {
+        let doc = render("https://wiki.corp", Flavor::DataCenter, "DOCS");
+        for needle in [
+            r#""ops": ["attachments"]"#,
+            "only `confed pull <page>` sees one",
+            "confed attach <page> --list --remote --json",
+            "which is not among the page's",
         ] {
             assert!(doc.contains(needle), "the contract must mention {needle:?}");
         }

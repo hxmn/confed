@@ -208,6 +208,23 @@ impl MarkdownFile {
 
     /// Serialize to the on-disk form, with a stable key order.
     pub fn render(&self) -> Result<String> {
+        let head = self.render_frontmatter()?;
+        let marked = self.marked_body();
+        let body = marked.trim_start_matches('\n');
+        let mut out = String::with_capacity(head.len() + body.len() + 2);
+        out.push_str(&head);
+        out.push('\n');
+        out.push_str(body);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        Ok(out)
+    }
+
+    /// The frontmatter block on its own, fences included, as [`Self::render`]
+    /// writes it — for replacing a file's frontmatter without touching a byte
+    /// of its body.
+    pub fn render_frontmatter(&self) -> Result<String> {
         let fm = &self.frontmatter;
         let mut map = Mapping::new();
         map.insert(Value::from("title"), Value::from(fm.title.clone()));
@@ -226,19 +243,13 @@ impl MarkdownFile {
         }
 
         let yaml = serde_yaml::to_string(&Value::Mapping(map))?;
-        let marked = self.marked_body();
-        let body = marked.trim_start_matches('\n');
-        let mut out = String::with_capacity(yaml.len() + body.len() + 16);
+        let mut out = String::with_capacity(yaml.len() + 8);
         out.push_str("---\n");
         out.push_str(&yaml);
         if !yaml.ends_with('\n') {
             out.push('\n');
         }
-        out.push_str("---\n\n");
-        out.push_str(body);
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
+        out.push_str("---\n");
         Ok(out)
     }
 }

@@ -160,6 +160,36 @@ pub fn user_references(storage: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The files a storage body refers to as attachments of its own page: images
+/// shown in it and files linked from it.
+///
+/// An `ri:attachment` that names another page as its container is that page's
+/// file and is left out. Markup that does not parse yields nothing — this
+/// answers a question about a body, it does not validate it.
+pub fn attachment_references(storage: &str) -> Vec<String> {
+    fn collect(nodes: &[dom::Node], out: &mut Vec<String>) {
+        for element in nodes.iter().filter_map(dom::Node::as_element) {
+            if element.name == "ri:attachment" {
+                let own = element.child_elements().next().is_none();
+                if let (true, Some(file)) = (own, element.attr("ri:filename")) {
+                    if !file.is_empty() && !out.iter().any(|f| f == file) {
+                        out.push(file.to_string());
+                    }
+                }
+            } else {
+                collect(&element.children, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if storage.contains("ri:attachment") {
+        if let Ok(nodes) = dom::parse_fragment(storage) {
+            collect(&nodes, &mut out);
+        }
+    }
+    out
+}
+
 /// Convenience for comment bodies, which are short storage fragments.
 pub fn storage_fragment_to_markdown(storage: &str) -> ConvertResult<String> {
     let opts = ConvertOptions::default();
@@ -196,5 +226,34 @@ mod user_reference_tests {
     fn an_escaped_value_is_unescaped() {
         let found = super::user_references(r#"<ri:user ri:username="a&amp;b"/>"#);
         assert_eq!(found, [("username".to_string(), "a&b".to_string())]);
+    }
+}
+
+#[cfg(test)]
+mod attachment_reference_tests {
+    use super::attachment_references;
+
+    #[test]
+    fn images_and_file_links_name_the_pages_own_attachments() {
+        let storage =
+            "<p>See <ac:image ac:width=\"300\"><ri:attachment ri:filename=\"chart.png\"/>\
+            </ac:image> and <ac:link><ri:attachment ri:filename=\"a &amp; b.pdf\" />\
+            <ac:plain-text-link-body><![CDATA[the spec]]></ac:plain-text-link-body></ac:link>, \
+            then <ac:image><ri:attachment ri:filename=\"chart.png\"/></ac:image> again.</p>";
+        assert_eq!(attachment_references(storage), ["chart.png", "a & b.pdf"]);
+    }
+
+    #[test]
+    fn a_file_on_another_page_is_not_this_pages() {
+        let storage = "<p><ac:link><ri:attachment ri:filename=\"elsewhere.pdf\">\
+            <ri:page ri:content-title=\"Team Handbook\"/></ri:attachment></ac:link></p>";
+        assert!(attachment_references(storage).is_empty());
+    }
+
+    #[test]
+    fn a_body_without_attachments_or_without_sense_yields_nothing() {
+        assert!(attachment_references("<p>Just prose.</p>").is_empty());
+        assert!(attachment_references("").is_empty());
+        assert!(attachment_references("<p><ri:attachment ri:filename=\"x.png\"").is_empty());
     }
 }

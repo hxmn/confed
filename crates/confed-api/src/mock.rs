@@ -44,6 +44,16 @@ struct MockState {
     comment_listings_down: Vec<String>,
     /// Pages whose body cannot be fetched.
     pages_down: Vec<String>,
+    /// When each attachment was added or last given a new version.
+    attachment_modified: HashMap<String, SystemTime>,
+    /// Pages whose attachments were listed, in order.
+    attachment_listings: Vec<String>,
+    /// Whether the attachment search answers at all.
+    attachment_search_down: bool,
+    /// Pages whose attachments cannot be listed.
+    attachment_listings_down: Vec<String>,
+    /// Attachments, by filename, that cannot be downloaded.
+    downloads_down: Vec<String>,
     spaces: HashMap<String, Space>,
     /// Every mutating call recorded, so tests can assert "--dry-run wrote nothing".
     calls: Vec<String>,
@@ -291,6 +301,81 @@ impl MockClient {
     /// The page of every `list_comments` call so far, in order.
     pub fn comment_listings(&self) -> Vec<String> {
         self.state.lock().expect("mock poisoned").comment_listings.clone()
+    }
+
+    /// Attach a file the way a colleague would in the browser — on the page,
+    /// or by dropping it into a comment they are writing, which stores it on
+    /// the page all the same. The page's version does not change. A file by a
+    /// name the page already has becomes a new version of that attachment.
+    pub fn attach_directly(&self, page_id: &str, filename: &str, bytes: &[u8]) -> AttachmentId {
+        let fresh = self.fresh_id();
+        let mut state = self.state.lock().expect("mock poisoned");
+        let existing = state
+            .attachments
+            .values()
+            .find(|(a, _)| a.page_id.0 == page_id && a.filename == filename)
+            .map(|(a, _)| (a.id.clone(), a.version));
+        let (id, version) = match existing {
+            Some((id, version)) => (id, version + 1),
+            None => (AttachmentId::new(fresh), 1),
+        };
+        let attachment = Attachment {
+            id: id.clone(),
+            page_id: PageId::new(page_id),
+            filename: filename.to_string(),
+            media_type: Some("application/octet-stream".into()),
+            file_size: Some(bytes.len() as u64),
+            version,
+            download_url: format!("/download/attachments/{page_id}/{filename}"),
+        };
+        state.attachment_modified.insert(id.0.clone(), SystemTime::now());
+        state.attachments.insert(id.0.clone(), (attachment, bytes.to_vec()));
+        id
+    }
+
+    /// Delete an attachment the way a colleague would in the browser. Nothing
+    /// is left for a search to find.
+    pub fn delete_attachment_directly(&self, id: &AttachmentId) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.attachments.remove(id.as_str());
+        state.attachment_modified.remove(id.as_str());
+    }
+
+    /// Let `minutes` pass for every attachment: none of them was added or
+    /// replaced more recently than that.
+    pub fn age_attachments(&self, minutes: u64) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        for at in state.attachment_modified.values_mut() {
+            *at -= Duration::from_secs(minutes * 60);
+        }
+    }
+
+    /// Make the attachment search fail, or work again.
+    pub fn break_attachment_search(&self, down: bool) {
+        self.state.lock().expect("mock poisoned").attachment_search_down = down;
+    }
+
+    /// Make listing one page's attachments fail, or work again.
+    pub fn break_attachment_listing(&self, page_id: &str, down: bool) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.attachment_listings_down.retain(|p| p != page_id);
+        if down {
+            state.attachment_listings_down.push(page_id.to_string());
+        }
+    }
+
+    /// Make downloading every attachment of this name fail, or work again.
+    pub fn break_download(&self, filename: &str, down: bool) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.downloads_down.retain(|f| f != filename);
+        if down {
+            state.downloads_down.push(filename.to_string());
+        }
+    }
+
+    /// The page of every `list_attachments` call so far, in order.
+    pub fn attachment_listings(&self) -> Vec<String> {
+        self.state.lock().expect("mock poisoned").attachment_listings.clone()
     }
 
     /// Resolve a comment the way a colleague would in the browser — on either
@@ -544,7 +629,11 @@ impl ConfluenceClient for MockClient {
     }
 
     async fn list_attachments(&self, id: &PageId) -> ApiResult<Vec<Attachment>> {
-        let state = self.state.lock().expect("mock poisoned");
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.attachment_listings.push(id.0.clone());
+        if state.attachment_listings_down.contains(&id.0) {
+            return Err(ApiError::Server { status: 500, body: format!("attachments of {id}") });
+        }
         let mut out: Vec<_> = state
             .attachments
             .values()
@@ -558,6 +647,10 @@ impl ConfluenceClient for MockClient {
     async fn download_attachment(&self, attachment: &Attachment, dest: &Path) -> ApiResult<u64> {
         let bytes = {
             let state = self.state.lock().expect("mock poisoned");
+            if state.downloads_down.contains(&attachment.filename) {
+                let body = format!("download of {}", attachment.filename);
+                return Err(ApiError::Server { status: 503, body });
+            }
             state
                 .attachments
                 .get(attachment.id.as_str())
@@ -593,14 +686,41 @@ impl ConfluenceClient for MockClient {
             version,
             download_url: format!("/download/attachments/{page}/{filename}"),
         };
+        state.attachment_modified.insert(id.0.clone(), SystemTime::now());
         state.attachments.insert(id.0.clone(), (attachment.clone(), bytes));
         Ok(attachment)
     }
 
     async fn delete_attachment(&self, id: &AttachmentId) -> ApiResult<()> {
         self.record(format!("delete_attachment:{id}"));
-        self.state.lock().expect("mock poisoned").attachments.remove(id.as_str());
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.attachments.remove(id.as_str());
+        state.attachment_modified.remove(id.as_str());
         Ok(())
+    }
+
+    async fn recent_attachment_activity(
+        &self,
+        _space: &SpaceId,
+        minutes: u64,
+    ) -> ApiResult<ContentActivity> {
+        let state = self.state.lock().expect("mock poisoned");
+        if state.attachment_search_down {
+            return Err(ApiError::Server { status: 503, body: "search is unavailable".into() });
+        }
+        let since = SystemTime::now() - Duration::from_secs(minutes * 60);
+        let mut pages: Vec<PageId> = Vec::new();
+        for (attachment, _) in state.attachments.values() {
+            let recent = state
+                .attachment_modified
+                .get(attachment.id.as_str())
+                .is_some_and(|at| *at >= since);
+            if recent && !pages.contains(&attachment.page_id) {
+                pages.push(attachment.page_id.clone());
+            }
+        }
+        pages.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(ContentActivity::Pages(pages))
     }
 
     async fn list_comments(&self, page: &PageId) -> ApiResult<Vec<Comment>> {

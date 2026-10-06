@@ -1994,3 +1994,239 @@ async fn choosing_the_rules_page_from_a_list_needs_a_terminal() {
         "{value}"
     );
 }
+
+// ---------------------------------- attachments that change on their own ----
+
+/// What the root page's attachments are on the server at a point in the story.
+const NOT_ATTACHED: u8 = 0;
+const ATTACHED: u8 = 1;
+const DELETED: u8 = 2;
+
+/// A space whose root page gets a file attached the way the web UI does it —
+/// on the page, or dropped into a comment: the attachment is new, the page
+/// keeps its version. Only the attachment search can tell. Later the file is
+/// deleted, which no search can tell.
+async fn mount_attached_root(server: &MockServer) -> std::sync::Arc<std::sync::atomic::AtomicU8> {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    let stage = std::sync::Arc::new(AtomicU8::new(NOT_ATTACHED));
+
+    let state = stage.clone();
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{ROOT_PAGE}/child/attachment")))
+        .respond_with(move |_: &Request| {
+            let results = if state.load(Ordering::SeqCst) == ATTACHED {
+                json!([{
+                    "id": "3001", "type": "attachment", "status": "current",
+                    "title": "report.pdf",
+                    "container": { "id": ROOT_PAGE, "type": "page" },
+                    "version": { "number": 1 },
+                    "extensions": { "fileSize": 17, "mediaType": "application/pdf" },
+                    "_links": {
+                        "download": format!("/download/attachments/{ROOT_PAGE}/report.pdf?version=1")
+                    }
+                }])
+            } else {
+                json!([])
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "results": results, "start": 0, "limit": 100, "_links": {}
+            }))
+        })
+        .with_priority(1)
+        .mount(server)
+        .await;
+
+    let state = stage.clone();
+    Mock::given(method("GET"))
+        .and(path("/rest/api/search"))
+        .and(is_attachment_search)
+        .respond_with(move |_: &Request| {
+            let results = if state.load(Ordering::SeqCst) == ATTACHED {
+                json!([{
+                    "content": {
+                        "id": "3001", "type": "attachment", "status": "current",
+                        "title": "report.pdf",
+                        "container": { "id": ROOT_PAGE, "type": "page" }
+                    },
+                    "title": "report.pdf",
+                    "url": format!("/pages/viewpage.action?pageId={ROOT_PAGE}")
+                }])
+            } else {
+                json!([])
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "results": results, "start": 0, "limit": 100, "_links": {}
+            }))
+        })
+        .with_priority(1)
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/download/attachments/{ROOT_PAGE}/report.pdf")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"quarterly numbers".to_vec()))
+        .mount(server)
+        .await;
+    stage
+}
+
+/// The search `fetch` makes for attachments added or replaced since its last
+/// check.
+fn is_attachment_search(request: &Request) -> bool {
+    request.url.query_pairs().any(|(key, value)| {
+        key == "cql"
+            && value.starts_with(&format!("space = \"{SPACE}\" and type = attachment and "))
+            && value.contains("lastmodified >= now(\"-")
+    })
+}
+
+/// How many times the root page's attachments were asked for.
+async fn attachment_reads(server: &MockServer) -> usize {
+    let route = format!("/rest/api/content/{ROOT_PAGE}/child/attachment");
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == route)
+        .count()
+}
+
+/// The report this guards against: a file attached in the web UI, to a page
+/// nobody edited, never reached the workspace — `pull`, `pull --page` and
+/// `pull --force --page` all answered `updated: []` with nothing downloaded,
+/// and never asked for the page's attachments at all.
+#[tokio::test]
+async fn a_file_attached_on_the_server_is_pulled_though_its_page_did_not_change() {
+    use std::sync::atomic::Ordering;
+
+    let server = dc_server().await;
+    let stage = mount_attached_root(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let local = ".Team Handbook/report.pdf";
+    let listed = |dir: &Path| {
+        let list = envelope(
+            &run(confed_authed(dir, &["attach", ROOT_FILE, "--list", "--json"])),
+            "attach",
+        );
+        list["result"]["attachments"].clone()
+    };
+    assert_eq!(listed(dir.path()), json!([]));
+
+    // Nothing changed: the search is asked, no page's attachments are.
+    let reads = attachment_reads(&server).await;
+    let quiet = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&quiet), 0, "stderr: {}", stderr(&quiet));
+    let quiet = envelope(&quiet, "pull");
+    assert_eq!(quiet["result"]["updated"], json!([]), "{quiet}");
+    assert_eq!(attachment_reads(&server).await, reads, "an unchanged page costs no listing");
+    let searches = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| is_attachment_search(r))
+        .count();
+    assert_eq!(searches, 1, "the first pull fetched everything; the second one asked");
+
+    // A file is attached in the browser. The page is still version 3.
+    stage.store(ATTACHED, Ordering::SeqCst);
+    let output = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "pull");
+    assert_eq!(value["warnings"], json!([]), "{value}");
+    let updated = value["result"]["updated"].as_array().expect("updated");
+    assert_eq!(updated.len(), 1, "{value}");
+    assert_eq!(updated[0]["page_id"], json!(ROOT_PAGE));
+    assert_eq!(updated[0]["path"], json!(ROOT_FILE));
+    assert_eq!(updated[0]["ops"], json!(["attachments"]));
+    assert_eq!((&updated[0]["from_version"], &updated[0]["to_version"]), (&json!(3), &json!(3)));
+    assert_eq!(value["result"]["attachments_downloaded"], json!(1));
+    assert_eq!(value["result"]["attachments_removed"], json!(0));
+
+    assert_eq!(std::fs::read(dir.path().join(local)).unwrap(), b"quarterly numbers");
+    let page = read(dir.path(), ROOT_FILE);
+    assert!(page.contains("file: report.pdf"), "the frontmatter lists it: {page}");
+    assert!(page.contains("version: 3"), "{page}");
+    let attachments = listed(dir.path());
+    assert_eq!(attachments[0]["file"], json!("report.pdf"), "{attachments}");
+    assert_eq!(attachments[0]["downloaded"], json!(true), "{attachments}");
+    let status = envelope(&run(confed_authed(dir.path(), &["status", "--json"])), "status");
+    assert_eq!(
+        status["result"]["clean"],
+        json!(true),
+        "an attachment is not a page edit: {status}"
+    );
+
+    // Naming the page lists its attachments whatever the search says, and
+    // downloads nothing it already has.
+    for args in [
+        &["pull", "--page", ROOT_PAGE, "--json"][..],
+        &["pull", "--force", "--page", ROOT_PAGE, "--json"][..],
+        &["pull", ROOT_FILE, "--json"][..],
+        &["fetch", "--page", ROOT_PAGE, "--json"][..],
+    ] {
+        let before = attachment_reads(&server).await;
+        let output = run(confed_authed(dir.path(), args));
+        assert_eq!(exit_code(&output), 0, "{args:?}: {}", stderr(&output));
+        let value = envelope(&output, args[0]);
+        assert_eq!(attachment_reads(&server).await, before + 1, "{args:?}");
+        if args[0] == "pull" {
+            assert_eq!(value["result"]["attachments_downloaded"], json!(0), "{args:?}: {value}");
+        }
+    }
+
+    // The file is deleted in the browser. No search returns what is gone, so
+    // a plain pull cannot know; naming the page finds out.
+    stage.store(DELETED, Ordering::SeqCst);
+    let value = envelope(&run(confed_authed(dir.path(), &["pull", "--json"])), "pull");
+    assert_eq!(value["result"]["updated"], json!([]), "{value}");
+    assert!(dir.path().join(local).exists());
+
+    let output = run(confed_authed(dir.path(), &["pull", "--page", ROOT_PAGE, "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "pull");
+    assert_eq!(value["warnings"], json!([]), "{value}");
+    assert_eq!(value["result"]["updated"][0]["ops"], json!(["attachments"]), "{value}");
+    assert_eq!(value["result"]["attachments_removed"], json!(1), "{value}");
+    assert!(!dir.path().join(local).exists(), "the local copy went with it");
+    assert!(!read(dir.path(), ROOT_FILE).contains("report.pdf"), "and so did its entry");
+    assert_eq!(listed(dir.path()), json!([]));
+
+    let push = envelope(&run(confed_authed(dir.path(), &["push", "--json"])), "push");
+    assert_eq!(push["result"]["attachments_uploaded"], json!([]), "{push}");
+    assert!(mutations(&server).await.is_empty(), "none of this changes anything on the server");
+}
+
+/// A search that fails must not read as "no attachments changed".
+#[tokio::test]
+async fn a_failed_attachment_search_is_a_warning_not_silence() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/search"))
+        .and(is_attachment_search)
+        .respond_with(ResponseTemplate::new(400).set_body_string("Could not parse cql"))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let output = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&output), 0, "the pages still pull: {}", stderr(&output));
+    let value = envelope(&output, "pull");
+    let warnings = value["warnings"].as_array().expect("warnings");
+    assert_eq!(warnings.len(), 1, "{value}");
+    let warning = warnings[0].as_str().unwrap();
+    assert!(warning.contains("which attachments changed"), "{warning}");
+    assert!(warning.contains("confed pull <page>"), "it names the way out: {warning}");
+
+    let output = run(confed_authed(dir.path(), &["fetch", "--json"]));
+    let value = envelope(&output, "fetch");
+    assert!(value["result"]["attachment_check_failed"].is_string(), "{value}");
+    assert_eq!(value["warnings"].as_array().map(Vec::len), Some(1), "{value}");
+}

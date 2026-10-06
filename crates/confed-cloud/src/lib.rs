@@ -138,6 +138,20 @@ impl CloudClient {
         }
     }
 
+    /// The space key a CQL search for `what` needs: v2 knows a space by its
+    /// number, CQL by its key.
+    async fn search_key(&self, space: &SpaceId, what: &str) -> ApiResult<String> {
+        let key = if space.key.is_empty() {
+            self.space_key_for(space.numeric.clone()).await
+        } else {
+            space.key.clone()
+        };
+        if key.is_empty() {
+            return Err(ApiError::NotFound(format!("space: no key to search {what} by")));
+        }
+        Ok(key)
+    }
+
     async fn fetch_page(&self, id: &PageId) -> ApiResult<v2::Page> {
         self.http
             .get_json(
@@ -409,6 +423,16 @@ impl ConfluenceClient for CloudClient {
         self.http.delete(&format!("api/v2/attachments/{id}")).await
     }
 
+    async fn recent_attachment_activity(
+        &self,
+        space: &SpaceId,
+        minutes: u64,
+    ) -> ApiResult<ContentActivity> {
+        // As for comments: v2 lists attachments page by page only.
+        let key = self.search_key(space, "attachments").await?;
+        v1::recent_attachment_activity(&self.http, &key, minutes).await
+    }
+
     async fn list_comments(&self, page: &PageId) -> ApiResult<Vec<Comment>> {
         let query = [("body-format", "storage".to_string()), ("limit", PAGE_SIZE.to_string())];
         let footer: Vec<v2::Comment> = collect_cursor(
@@ -439,14 +463,7 @@ impl ConfluenceClient for CloudClient {
     ) -> ApiResult<CommentActivity> {
         // v2 lists comments page by page only; CQL, still served by v1, is the
         // one query that spans the space.
-        let key = if space.key.is_empty() {
-            self.space_key_for(space.numeric.clone()).await
-        } else {
-            space.key.clone()
-        };
-        if key.is_empty() {
-            return Err(ApiError::NotFound("space: no key to search comments by".into()));
-        }
+        let key = self.search_key(space, "comments").await?;
         v1::recent_comment_activity(&self.http, &key, minutes).await
     }
 

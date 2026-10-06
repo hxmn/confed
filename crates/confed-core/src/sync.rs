@@ -11,7 +11,7 @@
 use crate::attachments;
 use crate::comments;
 use crate::error::{ConfedError, Result};
-use crate::frontmatter::{Frontmatter, Managed, MarkdownFile};
+use crate::frontmatter::{AttachmentRef, Frontmatter, Managed, MarkdownFile};
 use crate::merge::{self, RemoteLabel, ScalarMerge};
 use crate::paths::{self, Placement};
 use crate::progress::{self, ProgressRef};
@@ -44,13 +44,40 @@ pub struct SyncEngine {
 /// had changed. The next such fetch asks from here.
 pub const COMMENTS_CHECKED_AT_KEY: &str = "comments_checked_at";
 
-/// How far past the last check the comment search reaches back. It covers the
-/// server's search index catching up with an edit, and costs only re-reading
-/// the comments of pages commented on in that window.
-const COMMENT_CHECK_OVERLAP_MINUTES: u64 = 15;
+/// The same for the stored attachment lists. It is a mark of its own because
+/// a workspace can have checked one and never the other.
+pub const ATTACHMENTS_CHECKED_AT_KEY: &str = "attachments_checked_at";
 
-/// What the fetch queue asks for when a page's body is already current.
-const NEEDS_COMMENTS: &[&str] = &["comments"];
+/// How far past the last check a search for changes reaches back. It covers
+/// the server's search index catching up with an edit, and costs only
+/// re-reading the pages touched in that window.
+const CHECK_OVERLAP_MINUTES: u64 = 15;
+
+/// What a page carries beside its body. Each has versions of its own, so the
+/// page's version says nothing about either: a file attached to a page, or a
+/// comment edited on it, leaves the page where it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Extra {
+    Attachments,
+    Comments,
+}
+
+impl Extra {
+    /// What the fetch queue calls it, and what messages do.
+    fn name(self) -> &'static str {
+        match self {
+            Extra::Attachments => "attachments",
+            Extra::Comments => "comments",
+        }
+    }
+
+    fn mark_key(self) -> &'static str {
+        match self {
+            Extra::Attachments => ATTACHMENTS_CHECKED_AT_KEY,
+            Extra::Comments => COMMENTS_CHECKED_AT_KEY,
+        }
+    }
+}
 
 // ---------------------------------------------------------------- fetch ----
 
@@ -81,6 +108,16 @@ pub struct FetchOutcome {
     /// not. Comments of unchanged pages may then be out of date.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment_check_failed: Option<String>,
+    /// Pages at an unchanged version whose attachments were listed again: a
+    /// file attached to a page — or uploaded into a comment on it — leaves the
+    /// page's version alone, as a comment does.
+    pub attachments_refreshed: usize,
+    /// Of those, the pages whose attachments turned out to have changed.
+    pub attachments_changed: Vec<String>,
+    /// Why the server could not be asked which attachments changed, when it
+    /// could not. Attachments of unchanged pages may then be out of date.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment_check_failed: Option<String>,
 }
 
 impl FetchOutcome {
@@ -93,6 +130,21 @@ impl FetchOutcome {
              `confed comment list <page> --refresh` re-reads a page's"
         ))
     }
+
+    /// What to tell the user when the attachment check failed.
+    pub fn attachment_check_warning(&self) -> Option<String> {
+        let reason = self.attachment_check_failed.as_deref()?;
+        Some(format!(
+            "could not ask the server which attachments changed ({reason}); attachments of \
+             pages that did not change themselves may be out of date — `confed pull <page>` \
+             lists a page's again"
+        ))
+    }
+
+    /// Both of the above, for whoever reports a fetch.
+    pub fn check_warnings(&self) -> Vec<String> {
+        self.attachment_check_warning().into_iter().chain(self.comment_check_warning()).collect()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -102,39 +154,157 @@ pub struct FailedPage {
     pub error: String,
 }
 
+/// A list read from the server, or the error when it could not be read. What
+/// is already stored is then kept: a failed request is not "this page has
+/// none".
+type Listed<T> = std::result::Result<Vec<T>, String>;
+
 /// Everything fetched for one page, before it is written to the DB.
 struct FetchedPage {
     page: Page,
-    attachments: Vec<confed_api::Attachment>,
-    /// The error when the comments could not be read. The ones already stored
-    /// are then kept: a failed request is not "this page has no comments".
-    comments: std::result::Result<Vec<Comment>, String>,
+    attachments: Listed<confed_api::Attachment>,
+    comments: Listed<Comment>,
 }
 
 /// What one item of fetch work brought back.
 enum Fetched {
     Page(Box<FetchedPage>),
-    /// The comments alone, of a page whose body is already current.
-    Comments(Vec<Comment>),
+    /// What was asked for of a page whose body is already current; `None` for
+    /// the part that was not.
+    Extras {
+        attachments: Option<Listed<confed_api::Attachment>>,
+        comments: Option<Listed<Comment>>,
+    },
 }
 
-/// One item of fetch work: a page, and whether only its comments are wanted.
+/// One item of fetch work: a page, and how much of it is wanted.
 struct FetchWork {
     page_id: String,
-    comments_only: bool,
+    /// The page itself, which brings everything on it along.
+    body: bool,
+    attachments: bool,
+    comments: bool,
+}
+
+impl FetchWork {
+    /// The work a fetch queue entry stands for.
+    fn owed(page_id: String, needs: &[String]) -> Self {
+        let has = |need: &str| needs.iter().any(|n| n == need);
+        Self {
+            body: has("body"),
+            attachments: has(Extra::Attachments.name()),
+            comments: has(Extra::Comments.name()),
+            page_id,
+        }
+    }
+}
+
+/// The pages whose attachments, and whose comments, a run has read from the
+/// server — so that nothing is asked for twice.
+#[derive(Default)]
+struct ExtrasRead {
+    attachments: Vec<String>,
+    comments: Vec<String>,
 }
 
 /// What a round of fetch work did, on top of what it stored.
 #[derive(Default)]
 struct FetchTally {
     fetched: usize,
-    /// Pages whose comments are now as the server has them.
-    comments_read: Vec<String>,
-    /// Pages read for their comments alone.
+    /// Pages whose attachments and comments are now as the server has them.
+    read: ExtrasRead,
+    /// Pages whose attachments were listed without the page.
+    attachments_refreshed: usize,
+    /// Of those, the ones whose attachments had changed.
+    attachments_changed: Vec<String>,
+    /// Pages whose comments were read without the page.
     comments_refreshed: usize,
     /// Of those, the ones whose comments had changed.
     comments_changed: Vec<String>,
     failed: Vec<FailedPage>,
+}
+
+/// Who can say how current the stored attachments and comments of a page are,
+/// when its body needs no request.
+enum Voucher {
+    /// The state has had them all along: its marks.
+    State,
+    /// They were just put back from the page cache, where the state had none
+    /// of its own: the cache's marks. What the state did have was left in
+    /// place, and only its own mark can vouch for that.
+    Cache { own_attachments: bool, own_comments: bool },
+    /// Nobody: the page is read.
+    Nobody,
+}
+
+/// One fetch's reckoning of which pages need an [`Extra`] read again.
+struct ExtraCheck {
+    extra: Extra,
+    /// When the state's copies were last known to be current, if it says.
+    state_mark: Option<chrono::DateTime<chrono::Utc>>,
+    /// The same for the copies in the page cache.
+    cache_mark: Option<chrono::DateTime<chrono::Utc>>,
+    /// Pages a mark vouches for: what changed on these since is searched for.
+    covered: Vec<String>,
+    /// Pages no mark vouches for: these are read, not reasoned about.
+    uncovered: Vec<String>,
+    /// The oldest mark vouching for a covered page, which is where the search
+    /// has to start.
+    oldest_mark: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether this run can say the whole space is current as of its start.
+    checked: bool,
+    /// Why the server could not be asked, when it could not.
+    failed: Option<String>,
+}
+
+impl ExtraCheck {
+    fn new(
+        extra: Extra,
+        state: &crate::state::StateDb,
+        cache: Option<&crate::pagestore::PageStore>,
+    ) -> Result<Self> {
+        let cached = cache.and_then(|c| match extra {
+            Extra::Attachments => c.attachments_checked_at().ok().flatten(),
+            Extra::Comments => c.comments_checked_at().ok().flatten(),
+        });
+        Ok(Self {
+            extra,
+            state_mark: state.get_meta(extra.mark_key())?.and_then(|m| trusted_mark(&m)),
+            cache_mark: cached.and_then(|m| trusted_mark(&m)),
+            covered: Vec::new(),
+            uncovered: Vec::new(),
+            oldest_mark: None,
+            checked: false,
+            failed: None,
+        })
+    }
+
+    /// File a page whose body is current under the mark that vouches for it,
+    /// or under none.
+    fn place(&mut self, page_id: &str, voucher: &Voucher) {
+        let mark = match voucher {
+            Voucher::State => self.state_mark,
+            Voucher::Cache { own_attachments, own_comments } => {
+                let own = match self.extra {
+                    Extra::Attachments => *own_attachments,
+                    Extra::Comments => *own_comments,
+                };
+                match (self.cache_mark, self.state_mark) {
+                    (Some(c), Some(s)) => Some(c.min(s)),
+                    (Some(c), None) if !own => Some(c),
+                    _ => None,
+                }
+            }
+            Voucher::Nobody => None,
+        };
+        match mark {
+            Some(mark) => {
+                self.oldest_mark = Some(self.oldest_mark.map_or(mark, |o| o.min(mark)));
+                self.covered.push(page_id.to_string());
+            }
+            None => self.uncovered.push(page_id.to_string()),
+        }
+    }
 }
 
 // ----------------------------------------------------------------- pull ----
@@ -178,6 +348,8 @@ pub struct PullOutcome {
     /// Pages whose local changes `--reset` or `--force` deliberately discarded.
     pub discarded: Vec<PageChange>,
     pub attachments_downloaded: usize,
+    /// Local copies removed because the server no longer has the attachment.
+    pub attachments_removed: usize,
     pub dry_run: bool,
     /// What the user should know besides the changes: comments that could not
     /// be re-read, say. Reported as warnings, not as part of the result.
@@ -205,8 +377,8 @@ pub struct PageChange {
     pub to_version: Option<u32>,
     /// Which aspects changed: any of `body`, `title`, `labels`, `parent`,
     /// `delete`. Empty for pull-side changes, which always rewrite the file —
-    /// except `comments`, for a pull that found only the page's comments
-    /// changed (the page file and its version are as they were).
+    /// except `attachments` and `comments`, for a pull that found only those
+    /// changed (the page's text and its version are as they were).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ops: Vec<String>,
 }
@@ -413,13 +585,13 @@ impl SyncEngine {
         Ok(self.fetch_tracking(ws, opts).await?.0)
     }
 
-    /// [`Self::fetch`], also naming the pages whose comments this run read, so
-    /// a pull that must re-read some does not ask twice.
+    /// [`Self::fetch`], also naming the pages whose attachments and comments
+    /// this run read, so a pull that must re-read some does not ask twice.
     async fn fetch_tracking(
         &self,
         ws: &mut Workspace,
         opts: &FetchOptions,
-    ) -> Result<(FetchOutcome, Vec<String>)> {
+    ) -> Result<(FetchOutcome, ExtrasRead)> {
         let mut outcome = FetchOutcome::default();
         // Taken before anything is asked, so nothing that changes while this
         // fetch runs falls between it and the next one.
@@ -432,19 +604,13 @@ impl SyncEngine {
         let pending = state.pending_fetches()?;
         outcome.resumed = !pending.is_empty();
 
-        // A page's version says nothing about its comments, so those have a
-        // mark of their own: when they were last known to be current. The cache
-        // carries one too, for the comments restored from it.
-        let state_mark = state.get_meta(COMMENTS_CHECKED_AT_KEY)?.and_then(|m| trusted_mark(&m));
-        let cache_mark = cache
-            .as_ref()
-            .and_then(|c| c.comments_checked_at().ok().flatten())
-            .and_then(|m| trusted_mark(&m));
-        // Pages whose body needs no request, by whether a mark vouches for
-        // their comments, and the oldest mark doing so.
-        let mut covered: Vec<String> = Vec::new();
-        let mut uncovered: Vec<String> = Vec::new();
-        let mut oldest_mark: Option<chrono::DateTime<chrono::Utc>> = None;
+        // A page's version says nothing about its attachments or its comments,
+        // so each has a mark of its own: when they were last known to be
+        // current. The cache carries both too, for what is restored from it.
+        let mut checks = [
+            ExtraCheck::new(Extra::Attachments, state, cache.as_ref())?,
+            ExtraCheck::new(Extra::Comments, state, cache.as_ref())?,
+        ];
 
         self.progress.stage("Listing pages", None);
         let summaries = self.client.list_pages(&self.space).await?;
@@ -497,11 +663,7 @@ impl SyncEngine {
                 continue;
             }
 
-            // A page back in the listing after being gone from it — restored,
-            // or a restriction lifted — was out of the search's sight meanwhile.
-            let was_gone = existing.as_ref().is_some_and(|r| r.deleted);
-            let mut mark = state_mark.filter(|_| !was_gone);
-            if cached_body.is_some() {
+            let voucher = if cached_body.is_some() {
                 outcome.from_cache += 1;
                 // Restore the snapshots taken alongside that body, so a rebuilt
                 // state database does not have to ask for those either. They are
@@ -509,27 +671,24 @@ impl SyncEngine {
                 let extras = cache
                     .as_ref()
                     .and_then(|c| c.extras(&summary.id.0, summary.version).ok().flatten());
-                mark = match extras {
+                match extras {
                     Some(extras) => {
-                        // Comments the state already has are left in place, and
-                        // only the state's mark can vouch for those.
-                        let own = !state.page_comments(&summary.id.0)?.is_empty();
+                        let own_attachments = !state.page_attachments(&summary.id.0)?.is_empty();
+                        let own_comments = !state.page_comments(&summary.id.0)?.is_empty();
                         restore_extras(state, &summary.id.0, &extras)?;
-                        match (cache_mark, state_mark) {
-                            (Some(c), Some(s)) => Some(c.min(s)),
-                            (Some(c), None) if !own => Some(c),
-                            _ => None,
-                        }
+                        Voucher::Cache { own_attachments, own_comments }
                     }
-                    None => None,
-                };
-            }
-            match mark {
-                Some(mark) => {
-                    oldest_mark = Some(oldest_mark.map_or(mark, |o| o.min(mark)));
-                    covered.push(summary.id.0.clone());
+                    None => Voucher::Nobody,
                 }
-                None => uncovered.push(summary.id.0.clone()),
+            } else if existing.as_ref().is_some_and(|r| r.deleted) {
+                // A page back in the listing after being gone from it — restored,
+                // or a restriction lifted — was out of the search's sight meanwhile.
+                Voucher::Nobody
+            } else {
+                Voucher::State
+            };
+            for check in &mut checks {
+                check.place(&summary.id.0, &voucher);
             }
             outcome.unchanged += 1;
         }
@@ -549,81 +708,114 @@ impl SyncEngine {
             }
         }
 
-        // Comments of the pages whose body is current. Adding or editing a
-        // comment leaves the page's version alone, so the listing cannot show
-        // it: ask the server which pages were commented on since the mark, and
-        // read those again — and every page no mark vouches for.
+        // Attachments and comments of the pages whose body is current. Adding
+        // or changing either leaves the page's version alone, so the listing
+        // cannot show it: ask the server which pages had one touched since the
+        // mark, and read those again — and every page no mark vouches for.
         let whole_space = opts.pages.is_empty() && opts.since.is_none();
-        let mut reread: BTreeSet<String> = uncovered.into_iter().collect();
-        let mut checked = whole_space;
-        if !opts.pages.is_empty() {
-            // Pages asked for by name are read, not reasoned about.
-            reread.extend(covered.iter().cloned());
-        } else if let (true, Some(mark)) = (whole_space && !covered.is_empty(), oldest_mark) {
-            self.progress.stage("Checking comments", None);
-            let minutes = minutes_since(mark) + COMMENT_CHECK_OVERLAP_MINUTES;
-            match self.client.recent_comment_activity(&self.space, minutes).await {
-                Ok(confed_api::CommentActivity::Pages(pages)) => {
-                    reread.extend(
-                        covered.iter().filter(|id| pages.iter().any(|p| p.0 == **id)).cloned(),
-                    );
-                }
-                Ok(confed_api::CommentActivity::Unbounded) => {
-                    reread.extend(covered.iter().cloned());
-                }
-                Err(e) => {
-                    checked = false;
-                    outcome.comment_check_failed = Some(e.to_string());
+        let mut reread: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+        for check in &mut checks {
+            let extra = check.extra;
+            let mut again: BTreeSet<&String> = check.uncovered.iter().collect();
+            check.checked = whole_space;
+            if !opts.pages.is_empty() {
+                // Pages asked for by name are read, not reasoned about.
+                again.extend(&check.covered);
+            } else if let (true, Some(mark)) =
+                (whole_space && !check.covered.is_empty(), check.oldest_mark)
+            {
+                self.progress.stage(&format!("Checking {}", extra.name()), None);
+                let minutes = minutes_since(mark) + CHECK_OVERLAP_MINUTES;
+                let activity = match extra {
+                    Extra::Attachments => {
+                        self.client.recent_attachment_activity(&self.space, minutes).await
+                    }
+                    Extra::Comments => {
+                        self.client.recent_comment_activity(&self.space, minutes).await
+                    }
+                };
+                match activity {
+                    Ok(confed_api::ContentActivity::Pages(pages)) => {
+                        again.extend(
+                            check.covered.iter().filter(|id| pages.iter().any(|p| p.0 == **id)),
+                        );
+                    }
+                    Ok(confed_api::ContentActivity::Unbounded) => again.extend(&check.covered),
+                    Err(e) => {
+                        check.checked = false;
+                        check.failed = Some(e.to_string());
+                    }
                 }
             }
+            if !again.is_empty() && check.state_mark.is_none() && whole_space {
+                tracing::info!(
+                    target: "confed::sync",
+                    pages = again.len(),
+                    "reading every page's {} once: this workspace has not checked them before",
+                    extra.name()
+                );
+            }
+            for id in again {
+                reread.entry(id.clone()).or_default().push(extra.name());
+            }
         }
-        if !reread.is_empty() && state_mark.is_none() && whole_space {
-            tracing::info!(
-                target: "confed::sync",
-                pages = reread.len(),
-                "reading every page's comments once: this workspace has not checked them before"
-            );
+        // A page queued for its body is queued for everything on it; one
+        // queued for less keeps what it is still owed.
+        let queued: HashMap<String, Vec<String>> = state.pending_fetches()?.into_iter().collect();
+        for (id, mut needs) in reread {
+            let owed = queued.get(&id).map(Vec::as_slice).unwrap_or_default();
+            if owed.iter().any(|n| n == "body") {
+                continue;
+            }
+            for need in owed {
+                if !needs.contains(&need.as_str()) {
+                    needs.push(need);
+                }
+            }
+            state.enqueue_fetch(&id, &needs)?;
         }
-        // A page already queued is queued for more than its comments.
-        let queued: Vec<String> = state.pending_fetches()?.into_iter().map(|(id, _)| id).collect();
-        for id in reread.iter().filter(|id| !queued.contains(id)) {
-            state.enqueue_fetch(id, NEEDS_COMMENTS)?;
-        }
-        // Everything this check found is in the queue, which outlives an
-        // interrupted run, so the mark can move now.
-        if checked {
-            state.set_meta(COMMENTS_CHECKED_AT_KEY, &started)?;
+        // Everything these checks found is in the queue, which outlives an
+        // interrupted run, so the marks can move now.
+        for check in checks.iter().filter(|c| c.checked) {
+            state.set_meta(check.extra.mark_key(), &started)?;
         }
 
         let work: Vec<FetchWork> = state
             .pending_fetches()?
             .into_iter()
-            .map(|(page_id, needs)| FetchWork {
-                comments_only: !needs.iter().any(|n| n == "body"),
-                page_id,
-            })
+            .map(|(page_id, needs)| FetchWork::owed(page_id, &needs))
             .collect();
         let titles: HashMap<String, String> =
             summaries.iter().map(|s| (s.id.0.clone(), s.title.clone())).collect();
         self.progress.stage("Fetching", Some(work.len()));
         let tally = self.run_fetches(ws, work, &titles).await?;
         outcome.fetched = tally.fetched;
+        outcome.attachments_refreshed = tally.attachments_refreshed;
+        outcome.attachments_changed = tally.attachments_changed;
         outcome.comments_refreshed = tally.comments_refreshed;
         outcome.comments_changed = tally.comments_changed;
         outcome.failed = tally.failed;
 
-        // The cache's comments are as current as the state's once nothing is
+        // The cache's copies are as current as the state's once nothing is
         // left in the queue.
-        if checked && ws.state().pending_fetches()?.is_empty() {
+        if ws.state().pending_fetches()?.is_empty() {
             if let Ok(cache) = ws.page_store() {
-                cache.set_comments_checked_at(&started)?;
+                for check in checks.iter().filter(|c| c.checked) {
+                    match check.extra {
+                        Extra::Attachments => cache.set_attachments_checked_at(&started)?,
+                        Extra::Comments => cache.set_comments_checked_at(&started)?,
+                    }
+                }
             }
         }
+        let [attachments, comments] = checks;
+        outcome.attachment_check_failed = attachments.failed;
+        outcome.comment_check_failed = comments.failed;
 
         self.resolve_mentioned_users(ws).await?;
         ws.state().set_meta("last_fetch_at", &now())?;
         self.progress.finish();
-        Ok((outcome, tally.comments_read))
+        Ok((outcome, tally.read))
     }
 
     /// Fetch `work` concurrently and store each result as it lands.
@@ -652,13 +844,25 @@ impl SyncEngine {
             }
             match result {
                 Ok((id, Fetched::Page(fetched))) => {
-                    self.progress.item(&fetched.page.summary.title);
+                    let title = &fetched.page.summary.title;
+                    self.progress.item(title);
                     self.store_fetched(ws, &id, &fetched)?;
                     tally.fetched += 1;
-                    match &fetched.comments {
-                        Ok(_) => tally.comments_read.push(id),
+                    match &fetched.attachments {
+                        Ok(_) => tally.read.attachments.push(id.clone()),
                         Err(error) => tally.failed.push(FailedPage {
-                            title: fetched.page.summary.title.clone(),
+                            page_id: id.clone(),
+                            title: title.clone(),
+                            error: format!(
+                                "the page was fetched, but its attachments could not be listed \
+                                 (the ones already here are kept): {error}"
+                            ),
+                        }),
+                    }
+                    match &fetched.comments {
+                        Ok(_) => tally.read.comments.push(id),
+                        Err(error) => tally.failed.push(FailedPage {
+                            title: title.clone(),
                             error: format!(
                                 "the page was fetched, but its comments could not be read \
                                  (the ones already here are kept): {error}"
@@ -667,29 +871,61 @@ impl SyncEngine {
                         }),
                     }
                 }
-                Ok((id, Fetched::Comments(comments))) => {
-                    self.progress.item(&title_of(&id));
-                    if self.store_comments(ws, &id, &comments, true)? {
-                        tally.comments_changed.push(id.clone());
+                Ok((id, Fetched::Extras { attachments, comments })) => {
+                    let title = title_of(&id);
+                    self.progress.item(&title);
+                    let mut read: Vec<&str> = Vec::new();
+                    let mut failed = |error: String| {
+                        tally.failed.push(FailedPage {
+                            page_id: id.clone(),
+                            title: title.clone(),
+                            error,
+                        })
+                    };
+                    match attachments {
+                        Some(Ok(listed)) => {
+                            if self.refresh_attachments(ws, &id, &listed)? {
+                                tally.attachments_changed.push(id.clone());
+                            }
+                            tally.attachments_refreshed += 1;
+                            tally.read.attachments.push(id.clone());
+                            read.push(Extra::Attachments.name());
+                        }
+                        Some(Err(e)) => {
+                            failed(format!("its attachments could not be listed again: {e}"))
+                        }
+                        None => {}
                     }
-                    // Only what asked for comments alone is settled by them: a
-                    // page still waiting for its body stays in the queue.
-                    ws.state().mark_comments_fetched(&id)?;
-                    tally.comments_refreshed += 1;
-                    tally.comments_read.push(id);
+                    match comments {
+                        Some(Ok(comments)) => {
+                            if self.store_comments(ws, &id, &comments, true)? {
+                                tally.comments_changed.push(id.clone());
+                            }
+                            tally.comments_refreshed += 1;
+                            tally.read.comments.push(id.clone());
+                            read.push(Extra::Comments.name());
+                        }
+                        Some(Err(e)) => {
+                            failed(format!("its comments could not be read again: {e}"))
+                        }
+                        None => {}
+                    }
+                    // Only what was read is settled: whatever failed, and a
+                    // body still waited for, stay in the queue.
+                    ws.state().mark_fetched(&id, &read)?;
                 }
                 Err((item, e)) => {
                     let title = title_of(&item.page_id);
                     self.progress.item(&title);
-                    let error = if item.comments_only {
-                        format!("its comments could not be read again: {e}")
-                    } else {
-                        e.to_string()
-                    };
-                    tally.failed.push(FailedPage { page_id: item.page_id, title, error });
+                    tally.failed.push(FailedPage {
+                        page_id: item.page_id,
+                        title,
+                        error: e.to_string(),
+                    });
                 }
             }
         }
+        tally.attachments_changed.sort();
         tally.comments_changed.sort();
         Ok(tally)
     }
@@ -699,23 +935,23 @@ impl SyncEngine {
         item: FetchWork,
     ) -> std::result::Result<(String, Fetched), (FetchWork, ConfedError)> {
         let page_id = PageId::new(&item.page_id);
-        let result = async {
-            if item.comments_only {
-                return Ok(Fetched::Comments(self.client.list_comments(&page_id).await?));
-            }
-            let page = self.client.get_page(&page_id, BodyFormat::Storage).await?;
-            let attachments = self.client.list_attachments(&page_id).await.unwrap_or_default();
-            let comments = self.client.list_comments(&page_id).await.map_err(|e| e.to_string());
-            Ok::<_, confed_api::ApiError>(Fetched::Page(Box::new(FetchedPage {
-                page,
-                attachments,
-                comments,
-            })))
-        }
-        .await;
+        // A list that cannot be read is reported beside whatever else came
+        // through, in the words the user would get for the request alone.
+        let said = |e: confed_api::ApiError| ConfedError::from(e).to_string();
+        let attachments = async { self.client.list_attachments(&page_id).await.map_err(said) };
+        let comments = async { self.client.list_comments(&page_id).await.map_err(said) };
 
-        match result {
-            Ok(fetched) => Ok((item.page_id, fetched)),
+        if !item.body {
+            let attachments = if item.attachments { Some(attachments.await) } else { None };
+            let comments = if item.comments { Some(comments.await) } else { None };
+            return Ok((item.page_id, Fetched::Extras { attachments, comments }));
+        }
+        match self.client.get_page(&page_id, BodyFormat::Storage).await {
+            Ok(page) => {
+                let fetched =
+                    FetchedPage { page, attachments: attachments.await, comments: comments.await };
+                Ok((item.page_id, Fetched::Page(Box::new(fetched))))
+            }
             Err(e) => Err((item, e.into())),
         }
     }
@@ -739,52 +975,140 @@ impl SyncEngine {
             fetched_at: now(),
             deleted: false,
         })?;
+        if let Ok(cache) = ws.page_store() {
+            cache.put_body(id, summary.version, &fetched.page.body_storage)?;
+        }
 
-        for attachment in &fetched.attachments {
-            let existing = state
-                .page_attachments(id)?
-                .into_iter()
-                .find(|a| a.attachment_id == attachment.id.0);
-            state.upsert_attachment(&AttachmentRecord {
+        // The body is in. A list that could not be read is still owed, and the
+        // queue is what remembers that for the next fetch.
+        let mut owed: Vec<&str> = Vec::new();
+        match &fetched.attachments {
+            Ok(attachments) => {
+                self.store_attachments(ws, id, attachments)?;
+            }
+            Err(_) => owed.push(Extra::Attachments.name()),
+        }
+        match &fetched.comments {
+            // The body moved, so every anchor is placed afresh.
+            Ok(comments) => {
+                self.store_comments(ws, id, comments, false)?;
+            }
+            Err(_) => owed.push(Extra::Comments.name()),
+        }
+        if owed.is_empty() {
+            ws.state().mark_fetch_done(id)?;
+        } else {
+            ws.state().enqueue_fetch(id, &owed)?;
+        }
+
+        // The cache takes a snapshot only of what was read: one with a half
+        // missing would restore as "this page has none".
+        if let Ok(cache) = ws.page_store() {
+            match (&fetched.attachments, &fetched.comments) {
+                (Ok(attachments), Ok(comments)) => cache.put_extras(
+                    id,
+                    summary.version,
+                    &crate::pagestore::PageExtras {
+                        attachments: serde_json::to_string(attachments)?,
+                        comments: serde_json::to_string(comments)?,
+                    },
+                )?,
+                // The comments already cached are kept beside these, as the
+                // ones in the state are.
+                (Ok(attachments), Err(_)) => cache.put_attachments(
+                    id,
+                    summary.version,
+                    &serde_json::to_string(attachments)?,
+                )?,
+                (Err(_), _) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Replace a page's stored attachments with what the server lists now, and
+    /// say whether the list differs: a file added, replaced, renamed or gone.
+    ///
+    /// What confed knows about the copies in the sidecar is carried over: the
+    /// hash of the one it wrote stays with the name, and that copy counts as
+    /// downloaded only while the server still has the version it was. A name
+    /// the server no longer lists is noted as removed, for the next pull to
+    /// take the local copy away — and for a push in between not to upload it
+    /// back.
+    fn store_attachments(
+        &self,
+        ws: &mut Workspace,
+        id: &str,
+        listed: &[confed_api::Attachment],
+    ) -> Result<bool> {
+        let state = ws.state();
+        let before = state.page_attachments(id)?;
+        let mut after: Vec<AttachmentRecord> = Vec::with_capacity(listed.len());
+        for attachment in listed {
+            // The name becomes a path in the sidecar. One that cannot be a
+            // file there is not tracked: it could be neither downloaded nor,
+            // later, safely removed.
+            if !attachments::is_storable(&attachment.filename) {
+                tracing::warn!(
+                    target: "confed::sync",
+                    page = %id, attachment = %attachment.id, name = %attachment.filename,
+                    "this attachment's name cannot be a file in the sidecar; it is left out"
+                );
+                continue;
+            }
+            // One name, one file: a server that lists a name twice is not
+            // followed into storing two.
+            if after.iter().any(|a| a.filename == attachment.filename) {
+                continue;
+            }
+            let same = before.iter().find(|b| b.attachment_id == attachment.id.0);
+            // A file deleted and attached again is a new attachment under an
+            // old name: the copy in the sidecar is still the old one's.
+            let known = same.or_else(|| {
+                before.iter().find(|b| {
+                    b.filename == attachment.filename
+                        && !listed.iter().any(|a| a.id.0 == b.attachment_id)
+                })
+            });
+            let current = same.is_some_and(|k| {
+                k.downloaded && k.version == attachment.version && k.filename == attachment.filename
+            });
+            after.push(AttachmentRecord {
                 attachment_id: attachment.id.0.clone(),
                 page_id: id.to_string(),
                 filename: attachment.filename.clone(),
                 media_type: attachment.media_type.clone(),
                 file_size: attachment.file_size,
                 version: attachment.version,
-                // A new server version invalidates the hash of what we downloaded.
-                sha256: existing.filter(|e| e.version == attachment.version).and_then(|e| e.sha256),
-                downloaded: false,
-            })?;
+                sha256: known.and_then(|k| k.sha256.clone()),
+                downloaded: current,
+            });
         }
 
-        if let Ok(cache) = ws.page_store() {
-            cache.put_body(id, summary.version, &fetched.page.body_storage)?;
+        state.clear_page_attachments(id)?;
+        for record in &after {
+            state.upsert_attachment(record)?;
+            state.forget_removed_attachment(id, &record.filename)?;
         }
-        let Ok(comments) = &fetched.comments else {
-            // The body is in; the comments are still owed, and the queue is
-            // what remembers that for the next fetch.
-            if let Ok(cache) = ws.page_store() {
-                let attachments = serde_json::to_string(&fetched.attachments)?;
-                cache.put_attachments(id, summary.version, &attachments)?;
-            }
-            return ws.state().enqueue_fetch(id, NEEDS_COMMENTS);
-        };
-        // The body moved, so every anchor is placed afresh.
-        self.store_comments(ws, id, comments, false)?;
-        ws.state().mark_fetch_done(id)?;
+        for gone in before.iter().filter(|b| !after.iter().any(|a| a.filename == b.filename)) {
+            state.note_removed_attachment(id, &gone.filename, gone.sha256.as_deref())?;
+        }
+        Ok(!same_attachments(&before, &after))
+    }
 
-        if let Ok(cache) = ws.page_store() {
-            cache.put_extras(
-                id,
-                summary.version,
-                &crate::pagestore::PageExtras {
-                    attachments: serde_json::to_string(&fetched.attachments)?,
-                    comments: serde_json::to_string(comments)?,
-                },
-            )?;
+    /// [`Self::store_attachments`] for a list read without its page: the
+    /// snapshot the cache took at the page's version follows.
+    fn refresh_attachments(
+        &self,
+        ws: &mut Workspace,
+        id: &str,
+        listed: &[confed_api::Attachment],
+    ) -> Result<bool> {
+        let changed = self.store_attachments(ws, id, listed)?;
+        if let (Ok(cache), Some(remote)) = (ws.page_store(), ws.state().get_remote(id)?) {
+            cache.refresh_attachments(id, remote.version, &serde_json::to_string(listed)?)?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     /// Replace a page's stored comments with what the server has now, and say
@@ -827,24 +1151,6 @@ impl SyncEngine {
             }
         }
         Ok(!same_comments(&before, &after))
-    }
-
-    /// Read these pages' comments from the server again, whatever their page
-    /// version says, and store them. Returns the pages whose comments had
-    /// changed and the ones that could not be read.
-    async fn reread_comments(
-        &self,
-        ws: &mut Workspace,
-        page_ids: &[String],
-    ) -> Result<(Vec<String>, Vec<FailedPage>)> {
-        let titles: HashMap<String, String> =
-            ws.state().all_remote()?.into_iter().map(|r| (r.page_id, r.title)).collect();
-        let work = page_ids
-            .iter()
-            .map(|id| FetchWork { page_id: id.clone(), comments_only: true })
-            .collect();
-        let tally = self.run_fetches(ws, work, &titles).await?;
-        Ok((tally.comments_changed, tally.failed))
     }
 
     /// Read one page's comments from the server again and bring its comment
@@ -912,18 +1218,18 @@ impl SyncEngine {
     /// Materialize the fetched state into working files.
     pub async fn pull(&self, ws: &mut Workspace, opts: &PullOptions) -> Result<PullOutcome> {
         let mut warnings: Vec<String> = Vec::new();
-        // Pages whose comments this run has already read from the server.
-        let mut comments_read: Vec<String> = Vec::new();
+        // What this run has already read from the server, beside page bodies.
+        let mut read = ExtrasRead::default();
         if !opts.no_fetch {
-            let (fetch, read) = self.fetch_tracking(ws, &FetchOptions::default()).await?;
-            comments_read = read;
+            let (fetch, fetched) = self.fetch_tracking(ws, &FetchOptions::default()).await?;
+            read = fetched;
             // A page that could not be fetched is pulled as it was last seen;
             // say which, rather than only that there were some.
             warnings.extend(fetch.failed.iter().map(|f| {
                 let name = if f.title.is_empty() { &f.page_id } else { &f.title };
                 format!("{name} ({}): {}", f.page_id, f.error)
             }));
-            warnings.extend(fetch.comment_check_warning());
+            warnings.extend(fetch.check_warnings());
         }
 
         let mut outcome = PullOutcome { dry_run: opts.dry_run, warnings, ..Default::default() };
@@ -1015,21 +1321,29 @@ impl SyncEngine {
         }
 
         // A page named in the scope, and every page under `--force` or
-        // `--reset`, has its comments read whatever its version says. The check
-        // fetch makes finds comments added or edited, through a search; this is
-        // the request that cannot miss, and the one that sees a deletion.
+        // `--reset`, has its attachments and comments read whatever its version
+        // says. The check fetch makes finds what was added or edited, through a
+        // search; this is the request that cannot miss, and the one that sees a
+        // deletion.
         let insist = !opts.scope.is_empty() || opts.force || opts.reset;
-        if insist && opts.with_comments && !opts.no_fetch {
-            let wanted: Vec<String> = remote
+        if insist && !opts.no_fetch {
+            let work: Vec<FetchWork> = remote
                 .iter()
                 .filter(|r| !r.deleted && r.storage_body.is_some())
-                .filter(|r| !comments_read.contains(&r.page_id))
                 .filter(|r| self.in_scope(&opts.scope, &placements, &r.page_id))
-                .map(|r| r.page_id.clone())
+                .map(|r| FetchWork {
+                    page_id: r.page_id.clone(),
+                    body: false,
+                    attachments: opts.with_attachments && !read.attachments.contains(&r.page_id),
+                    comments: opts.with_comments && !read.comments.contains(&r.page_id),
+                })
+                .filter(|w| w.attachments || w.comments)
                 .collect();
-            self.progress.stage("Reading comments", Some(wanted.len()));
-            let (_, failed) = self.reread_comments(ws, &wanted).await?;
-            outcome.warnings.extend(failed.iter().map(|f| {
+            let titles: HashMap<String, String> =
+                remote.iter().map(|r| (r.page_id.clone(), r.title.clone())).collect();
+            self.progress.stage("Reading attachments and comments", Some(work.len()));
+            let tally = self.run_fetches(ws, work, &titles).await?;
+            outcome.warnings.extend(tally.failed.iter().map(|f| {
                 let path = placements.get(&f.page_id).map_or(f.page_id.as_str(), |p| &p.path);
                 format!("{path}: {}", f.error)
             }));
@@ -1040,6 +1354,9 @@ impl SyncEngine {
         let mut handled: Vec<String> = Vec::new();
         // (path a rename left behind, path the page moved to)
         let mut vacated: Vec<(String, String)> = Vec::new();
+        // (page, its path, whether that path is new) for the pages written,
+        // whose attachments are seen to once every sidecar is where it belongs.
+        let mut written: Vec<(String, String, bool)> = Vec::new();
         for (remote_page, action) in plan {
             handled.push(remote_page.page_id.clone());
             let local = files_by_id.get(remote_page.page_id.as_str()).copied();
@@ -1114,15 +1431,14 @@ impl SyncEngine {
             // A page renamed on the server moves its file. The old path is not
             // removed yet: when two pages swap titles, one page's old path is
             // another page's new one.
-            if let (Some(base_record), false) = (base_record, opts.dry_run) {
-                if base_record.local_path != placement.path {
-                    outcome.moved.push(MovedPage {
-                        page_id: remote_page.page_id.clone(),
-                        from: base_record.local_path.clone(),
-                        to: placement.path.clone(),
-                    });
-                    vacated.push((base_record.local_path.clone(), placement.path.clone()));
-                }
+            let moved = base_record.is_some_and(|b| b.local_path != placement.path);
+            if let (Some(base_record), true, false) = (base_record, moved, opts.dry_run) {
+                outcome.moved.push(MovedPage {
+                    page_id: remote_page.page_id.clone(),
+                    from: base_record.local_path.clone(),
+                    to: placement.path.clone(),
+                });
+                vacated.push((base_record.local_path.clone(), placement.path.clone()));
             }
 
             // Say what was thrown away. A destructive flag is not a licence to
@@ -1143,9 +1459,7 @@ impl SyncEngine {
             self.progress.item(&placement.path);
 
             if opts.with_attachments && !opts.dry_run {
-                outcome.attachments_downloaded += self
-                    .download_attachments(ws, &remote_page.page_id, placement, opts.reset)
-                    .await?;
+                written.push((remote_page.page_id.clone(), placement.path.clone(), moved));
             }
             if opts.with_comments && !opts.dry_run {
                 self.write_comments_sidecar(
@@ -1184,11 +1498,22 @@ impl SyncEngine {
             }
         }
 
+        // The attachments of the pages just written, now that a renamed page's
+        // sidecar has followed it: the copies already here are found where
+        // they are looked for, and only what is new comes down.
+        for (page_id, path, moved) in written {
+            let synced = self.sync_attachments(ws, &page_id, &path, opts, moved).await?;
+            outcome.attachments_downloaded += synced.downloaded;
+            outcome.attachments_removed += synced.removed;
+            outcome.warnings.extend(synced.warnings);
+        }
+
         // Pages pull had nothing to write still need their sidecar looked after:
         // the markup copy may be missing (a workspace pulled by an older confed,
         // or a deleted file), a page edited only locally is exactly when an
-        // inline comment anchor moves — and comments are added, edited and
-        // deleted on the server without the page itself changing.
+        // inline comment anchor moves — and files are attached and removed, and
+        // comments added, edited and deleted, on the server without the page
+        // itself changing.
         for record in ws.state().all_pages()? {
             if handled.contains(&record.page_id)
                 || !self.in_scope(&opts.scope, &placements, &record.page_id)
@@ -1196,6 +1521,24 @@ impl SyncEngine {
                 continue;
             }
             let path = record.local_path.clone();
+            let mut ops: Vec<String> = Vec::new();
+            // A page whose file was deleted here keeps what it has until the
+            // deletion is pushed or undone.
+            if opts.with_attachments && ws.absolute(&path).is_file() {
+                let changed = if opts.dry_run {
+                    self.attachments_differ(ws, &record.page_id, &path, opts)?
+                } else {
+                    let synced =
+                        self.sync_attachments(ws, &record.page_id, &path, opts, false).await?;
+                    outcome.attachments_downloaded += synced.downloaded;
+                    outcome.attachments_removed += synced.removed;
+                    outcome.warnings.extend(synced.warnings);
+                    synced.changed
+                };
+                if changed {
+                    ops.push(Extra::Attachments.name().to_string());
+                }
+            }
             let comments_changed = if opts.dry_run {
                 opts.with_comments && !sidecar_is_current(ws, &record.page_id, &path)?
             } else {
@@ -1210,14 +1553,36 @@ impl SyncEngine {
                     )?
             };
             if comments_changed {
+                ops.push(Extra::Comments.name().to_string());
+            }
+            if !ops.is_empty() {
                 outcome.updated.push(PageChange {
                     page_id: record.page_id.clone(),
                     path,
                     title: record.title.clone(),
                     from_version: Some(record.version),
                     to_version: Some(record.version),
-                    ops: vec!["comments".to_string()],
+                    ops,
                 });
+            }
+        }
+
+        // A comment that shows or links a file the page does not have cannot
+        // be read in full here. Said for the pages this pull touched or was
+        // pointed at, not for the whole space on every run.
+        let touched: Vec<&str> = [&outcome.created, &outcome.updated, &outcome.merged]
+            .into_iter()
+            .flatten()
+            .chain(&outcome.conflicted)
+            .map(|change| change.page_id.as_str())
+            .collect();
+        if opts.with_attachments && opts.with_comments && (insist || !touched.is_empty()) {
+            for record in ws.state().all_pages()? {
+                let wanted = touched.contains(&record.page_id.as_str())
+                    || (insist && self.in_scope(&opts.scope, &placements, &record.page_id));
+                if wanted {
+                    outcome.warnings.extend(missing_comment_attachments(ws, &record)?);
+                }
             }
         }
 
@@ -1545,14 +1910,30 @@ impl SyncEngine {
         Ok(())
     }
 
-    async fn download_attachments(
+    /// Bring a page's sidecar, and the `attachments` its file lists, in line
+    /// with the attachments in the state: download what is new or has a new
+    /// version, and remove the copy of what the server no longer has.
+    ///
+    /// A file in the sidecar that is not the copy confed last wrote there is
+    /// local work. It is neither overwritten nor removed — the page's warning
+    /// says so — unless the pull was told to discard local changes.
+    ///
+    /// `moved` is for a page whose file this pull put somewhere else: a copy
+    /// that did not come along with the sidecar is downloaded, not taken for
+    /// one somebody removed.
+    async fn sync_attachments(
         &self,
         ws: &mut Workspace,
         page_id: &str,
-        placement: &Placement,
-        reset: bool,
-    ) -> Result<usize> {
-        let dir = ws.absolute(&placement.sidecar);
+        page_path: &str,
+        opts: &PullOptions,
+        moved: bool,
+    ) -> Result<AttachmentSync> {
+        let mut sync = AttachmentSync::default();
+        let discard = opts.force || opts.reset;
+        let restore = if opts.reset { Restore::Changed } else { Restore::from_moved(moved) };
+        let sidecar = paths::sidecar_for(page_path);
+        let dir = ws.absolute(&sidecar);
         // Scratch from a download this or an earlier pull gave up on. Sweeping
         // it here keeps the sidecar directory nothing but page content.
         let swept = attachments::remove_stale_partials(&dir);
@@ -1564,35 +1945,117 @@ impl SyncEngine {
             );
         }
 
-        let records = ws.state().page_attachments(page_id)?;
-        if records.is_empty() {
-            return Ok(0);
+        // The state does not keep download links, so the page is asked for
+        // them — only when there is something to download. What it answers is
+        // the newest word on its attachments, and the state follows it first:
+        // a file deleted since the fetch is then not waited for forever.
+        let wants = |ws: &Workspace| -> Result<bool> {
+            Ok(ws
+                .state()
+                .page_attachments(page_id)?
+                .iter()
+                .any(|r| would_download(r, &dir.join(&r.filename), restore, discard)))
+        };
+        let mut listed = Vec::new();
+        if wants(ws)? {
+            match self.client.list_attachments(&PageId::new(page_id)).await {
+                Ok(now) => {
+                    self.refresh_attachments(ws, page_id, &now)?;
+                    listed = now;
+                }
+                Err(e) => sync.warnings.push(format!(
+                    "{page_path}: its attachments could not be downloaded: {}",
+                    ConfedError::from(e)
+                )),
+            }
         }
-        let remote_attachments =
-            self.client.list_attachments(&PageId::new(page_id)).await.unwrap_or_default();
 
-        let mut count = 0;
-        for record in records {
+        for gone in ws.state().removed_attachments(page_id)? {
+            let dest = dir.join(&gone.filename);
+            // Only a copy confed wrote is confed's to remove: untouched, or —
+            // when told to discard local changes — edited since. A file it
+            // never wrote merely shares the name, and stays without a word.
+            if let (Some(written), true) = (gone.sha256.as_deref(), dest.is_file()) {
+                let untouched = attachments::file_sha256(&dest).ok().as_deref() == Some(written);
+                if untouched || discard {
+                    std::fs::remove_file(&dest)
+                        .map_err(|e| ConfedError::io(format!("removing {}", dest.display()), e))?;
+                    sync.removed += 1;
+                } else {
+                    sync.warnings.push(format!(
+                        "{sidecar}/{}: the attachment was deleted on the server, but the file \
+                         here has changed since confed downloaded it, so it is kept — delete \
+                         it, or `confed push` attaches it again",
+                        gone.filename
+                    ));
+                }
+            }
+            ws.state().forget_removed_attachment(page_id, &gone.filename)?;
+        }
+
+        for record in ws.state().page_attachments(page_id)? {
             let dest = dir.join(&record.filename);
-            if !needs_download(&record, &dest, reset) {
+            if !needs_download(&record, &dest, restore) {
                 continue;
             }
-            let Some(attachment) =
-                remote_attachments.iter().find(|a| a.id.0 == record.attachment_id)
-            else {
+            if !would_download(&record, &dest, restore, discard) {
+                sync.warnings.push(format!(
+                    "{sidecar}/{}: the server has a newer version, but the file here is not \
+                     the copy confed downloaded, so it is kept — `confed pull --force` on the \
+                     page takes the server's, `confed push` uploads this one over it",
+                    record.filename
+                ));
+                continue;
+            }
+            let Some(attachment) = listed.iter().find(|a| a.id.0 == record.attachment_id) else {
                 continue;
             };
             std::fs::create_dir_all(&dir)
                 .map_err(|e| ConfedError::io(format!("creating {}", dir.display()), e))?;
-            self.client.download_attachment(attachment, &dest).await?;
+            // One file that will not come down is no reason to stop: the rest
+            // of the pull stands, and the next one asks for this file again.
+            if let Err(e) = self.client.download_attachment(attachment, &dest).await {
+                sync.warnings.push(format!(
+                    "{sidecar}/{}: could not be downloaded: {}",
+                    record.filename,
+                    ConfedError::from(e)
+                ));
+                continue;
+            }
             let mut updated = record.clone();
+            updated.version = attachment.version;
             updated.downloaded = true;
             updated.sha256 = attachments::file_sha256(&dest).ok();
             updated.file_size = attachments::file_size(&dest);
             ws.state().upsert_attachment(&updated)?;
-            count += 1;
+            sync.downloaded += 1;
         }
-        Ok(count)
+
+        let relisted = write_attachment_refs(ws, page_id, page_path)?;
+        sync.changed = relisted || sync.downloaded > 0 || sync.removed > 0;
+        Ok(sync)
+    }
+
+    /// Whether [`Self::sync_attachments`] would find something to do: what a
+    /// dry run reports, without downloading or removing anything.
+    fn attachments_differ(
+        &self,
+        ws: &Workspace,
+        page_id: &str,
+        page_path: &str,
+        opts: &PullOptions,
+    ) -> Result<bool> {
+        let dir = ws.absolute(&paths::sidecar_for(page_path));
+        let records = ws.state().page_attachments(page_id)?;
+        let restore = if opts.reset { Restore::Changed } else { Restore::Nothing };
+        let discard = opts.force || opts.reset;
+        let removable = |gone: &crate::state::RemovedAttachment| {
+            gone.sha256.is_some() && dir.join(&gone.filename).is_file()
+        };
+        Ok(ws.state().removed_attachments(page_id)?.iter().any(removable)
+            || records.iter().any(|r| would_download(r, &dir.join(&r.filename), restore, discard))
+            || listed_attachments(ws, page_path)
+                .is_some_and(|listed| !same_refs(&listed, &attachments::to_refs(&records))))
     }
 
     /// Bring a page's comment files in line with the comments in the state:
@@ -1842,9 +2305,25 @@ impl SyncEngine {
                 let sidecar_rel = paths::sidecar_for(&status.path);
                 let sidecar = ws.absolute(&sidecar_rel);
                 let recorded = ws.state().page_attachments(page_id)?;
+                let removed = ws.state().removed_attachments(page_id)?;
                 for action in attachments::diff_attachments(&sidecar, &recorded)? {
                     let (kind, attachment_id) = match &action {
                         attachments::AttachmentAction::Unchanged { .. } => continue,
+                        // Not a new file: the copy of an attachment deleted on
+                        // the server, which a pull has yet to take away.
+                        // Uploading it would quietly undo the deletion.
+                        attachments::AttachmentAction::Upload { filename }
+                            if removed.iter().any(|r| &r.filename == filename) =>
+                        {
+                            plan.skipped.push(BlockedPage {
+                                page_id: page_id.clone(),
+                                path: format!("{sidecar_rel}/{filename}"),
+                                reason: "the attachment was deleted on the server; `confed pull` \
+                                         removes this copy, or keeps it if it has changed"
+                                    .into(),
+                            });
+                            continue;
+                        }
                         attachments::AttachmentAction::Upload { .. } => {
                             (AttachmentOpKind::Upload, None)
                         }
@@ -2013,7 +2492,9 @@ impl SyncEngine {
         // Attachments after page bodies: a body that references a new file is
         // uploaded first, so the reference is never dangling for long.
         if opts.with_attachments {
-            self.push_attachments(ws, opts, &plan.attachment_ops, &mut outcome).await?;
+            let uploaded =
+                self.push_attachments(ws, opts, &plan.attachment_ops, &mut outcome).await?;
+            self.relist_attachments(ws, &plan, &outcome, &uploaded).await?;
         }
         if opts.with_comments {
             let work = self.push_comments(ws, opts).await?;
@@ -2031,14 +2512,16 @@ impl SyncEngine {
     /// delete the ones removed locally.
     ///
     /// This runs from the same plan `--dry-run` prints, so what a dry run
-    /// promises and what a push does cannot drift apart.
+    /// promises and what a push does cannot drift apart. Returns the
+    /// attachments as the server answered each upload.
     async fn push_attachments(
         &self,
         ws: &mut Workspace,
         opts: &PushOptions,
         ops: &[AttachmentOp],
         outcome: &mut PushOutcome,
-    ) -> Result<()> {
+    ) -> Result<Vec<confed_api::Attachment>> {
+        let mut uploaded = Vec::new();
         for op in ops {
             let page_id = PageId::new(&op.page_id);
             let sidecar = ws.absolute(&paths::sidecar_for(&op.path));
@@ -2061,6 +2544,7 @@ impl SyncEngine {
                         downloaded: true,
                     })?;
                     outcome.attachments_uploaded.push(op.file.clone());
+                    uploaded.push(attachment);
                 }
                 // Deleting an attachment removes content from the server, so it
                 // follows the same explicit opt-in as deleting a page — and is
@@ -2078,6 +2562,65 @@ impl SyncEngine {
                     outcome.attachments_deleted.push(op.file.clone());
                 }
             }
+        }
+        Ok(uploaded)
+    }
+
+    /// List the attachments of every page this push wrote to, and bring what
+    /// each page file lists in line.
+    ///
+    /// A push is the one visit confed pays a page it believes is current: a
+    /// file attached there by somebody else, or removed, changes nothing a
+    /// later fetch would notice by the page's version — least of all on Data
+    /// Center, where the push itself has just taken that version. New files
+    /// are downloaded by the next pull; nothing in the sidecar is touched here.
+    ///
+    /// `uploaded` is what this push attached itself. A list that does not have
+    /// one of those yet is behind, not saying it is gone.
+    async fn relist_attachments(
+        &self,
+        ws: &mut Workspace,
+        plan: &PushPlan,
+        outcome: &PushOutcome,
+        uploaded: &[confed_api::Attachment],
+    ) -> Result<()> {
+        let mut pages: Vec<(&str, &str)> = Vec::new();
+        let written = outcome.pushed.iter().chain(&outcome.created);
+        let attached = plan
+            .attachment_ops
+            .iter()
+            .filter(|op| {
+                outcome.attachments_uploaded.contains(&op.file)
+                    || outcome.attachments_deleted.contains(&op.file)
+            })
+            .map(|op| (op.page_id.as_str(), op.path.as_str()));
+        for page in written.map(|c| (c.page_id.as_str(), c.path.as_str())).chain(attached) {
+            if !pages.contains(&page) {
+                pages.push(page);
+            }
+        }
+        for (page_id, path) in pages {
+            match self.client.list_attachments(&PageId::new(page_id)).await {
+                Ok(mut listed) => {
+                    for own in uploaded.iter().filter(|a| a.page_id.0 == page_id) {
+                        if !listed.iter().any(|a| a.id == own.id) {
+                            listed.push(own.clone());
+                        }
+                    }
+                    self.refresh_attachments(ws, page_id, &listed)?;
+                }
+                // Not worth failing a push that went through: the list is
+                // owed, and the next fetch reads it.
+                Err(e) => {
+                    tracing::debug!(
+                        target: "confed::sync",
+                        page = %page_id, error = %e,
+                        "could not list the page's attachments after the push"
+                    );
+                    ws.state().enqueue_fetch_also(page_id, &[Extra::Attachments.name()])?;
+                }
+            }
+            write_attachment_refs(ws, page_id, path)?;
         }
         Ok(())
     }
@@ -3132,25 +3675,134 @@ fn status_of<'a>(statuses: &'a [PageStatus], page_id: &str) -> Option<&'a PageSt
     statuses.iter().find(|s| s.page_id.as_deref() == Some(page_id))
 }
 
-/// Does this attachment have to come down again?
-///
-/// Normally the recorded state is enough: a file confed downloaded and has not
-/// been told about a newer version of is current. A reset trusts the disk
-/// instead of the record, but still only downloads what actually differs —
-/// re-fetching a file that already matches the server is pure waste, and on a
-/// page full of images it is the slowest part of the reset.
-fn needs_download(record: &AttachmentRecord, dest: &Path, reset: bool) -> bool {
-    if !dest.exists() {
-        return true;
-    }
-    // No recorded hash means the server has a version confed has not seen.
-    let Some(recorded) = record.sha256.as_deref() else { return true };
+/// What bringing one page's sidecar in line with its attachments did.
+#[derive(Default)]
+struct AttachmentSync {
+    downloaded: usize,
+    /// Local copies removed because the server no longer has the attachment.
+    removed: usize,
+    /// Whether the page's attachments are not what its file last listed.
+    changed: bool,
+    warnings: Vec<String>,
+}
 
-    if reset {
-        // Compare the bytes on disk, since a reset exists to undo local changes.
-        return attachments::file_sha256(dest).ok().as_deref() != Some(recorded);
+/// How much of a sidecar that no longer matches what confed wrote there a
+/// pull puts back.
+#[derive(Clone, Copy, PartialEq)]
+enum Restore {
+    /// Nothing: what differs is local work.
+    Nothing,
+    /// A file that is not there, for a page whose sidecar may not have
+    /// followed it to a new path.
+    Missing,
+    /// Whatever differs, which is what a reset is for.
+    Changed,
+}
+
+impl Restore {
+    fn from_moved(moved: bool) -> Self {
+        if moved {
+            Restore::Missing
+        } else {
+            Restore::Nothing
+        }
     }
-    !record.downloaded
+}
+
+/// Does this attachment have to come down?
+///
+/// It does while the server has a file, or a version of one, that confed has
+/// not written here. Once it has, whatever the sidecar shows instead — an
+/// edited file, or none, which is how removing an attachment starts — is local
+/// work, and only a reset undoes that. A reset still downloads no more than
+/// what differs: re-fetching a file that already matches the server is pure
+/// waste, and on a page full of images it is the slowest part of the reset.
+fn needs_download(record: &AttachmentRecord, dest: &Path, restore: Restore) -> bool {
+    let Some(recorded) = record.sha256.as_deref().filter(|_| record.downloaded) else {
+        return true;
+    };
+    match restore {
+        Restore::Nothing => false,
+        Restore::Missing => !dest.exists(),
+        // Compare the bytes on disk, since a reset exists to undo local changes.
+        Restore::Changed => attachments::file_sha256(dest).ok().as_deref() != Some(recorded),
+    }
+}
+
+/// Whether the file at `dest` is the copy of this attachment confed last
+/// wrote there — the one thing in a sidecar a pull may replace unasked.
+fn is_our_copy(record: &AttachmentRecord, dest: &Path) -> bool {
+    record.sha256.is_some()
+        && attachments::file_sha256(dest).ok().as_deref() == record.sha256.as_deref()
+}
+
+/// Whether a pull would download this attachment: it has to come down, and
+/// nothing local is in the way — or the pull was told to discard what is.
+fn would_download(record: &AttachmentRecord, dest: &Path, restore: Restore, discard: bool) -> bool {
+    needs_download(record, dest, restore)
+        && (discard || !dest.exists() || is_our_copy(record, dest))
+}
+
+/// The attachments a page file lists in its frontmatter, if it can be read.
+fn listed_attachments(ws: &Workspace, page_path: &str) -> Option<Vec<AttachmentRef>> {
+    let content = std::fs::read_to_string(ws.absolute(page_path)).ok()?;
+    let file = crate::frontmatter::parse(&content, page_path).ok()?;
+    Some(file.frontmatter.managed?.attachments)
+}
+
+/// Whether two frontmatter lists name the same attachments. Sizes and hashes
+/// follow the copies in the sidecar and are not what makes a list different.
+fn same_refs(a: &[AttachmentRef], b: &[AttachmentRef]) -> bool {
+    let key = |refs: &[AttachmentRef]| {
+        let mut keys: Vec<_> = refs.iter().map(|r| (r.id.clone(), r.file.clone())).collect();
+        keys.sort();
+        keys
+    };
+    key(a) == key(b)
+}
+
+/// Make the `attachments` a page file lists the ones in the state, touching
+/// nothing but its frontmatter, and only when the list is not already that.
+/// Returns whether the file was naming other attachments than the state has.
+fn write_attachment_refs(ws: &Workspace, page_id: &str, page_path: &str) -> Result<bool> {
+    let abs = ws.absolute(page_path);
+    let Ok(content) = std::fs::read_to_string(&abs) else { return Ok(false) };
+    let Ok(mut file) = crate::frontmatter::parse(&content, page_path) else { return Ok(false) };
+    let Some(managed) = file.frontmatter.managed.as_mut() else { return Ok(false) };
+    let refs = attachments::to_refs(&ws.state().page_attachments(page_id)?);
+    if managed.attachments == refs {
+        return Ok(false);
+    }
+    let relisted = !same_refs(&managed.attachments, &refs);
+    managed.attachments = refs;
+
+    let Some((_, body)) = crate::frontmatter::split(&content) else { return Ok(false) };
+    write_atomic(&abs, &format!("{}\n{body}", file.render_frontmatter()?))?;
+    Ok(relisted)
+}
+
+/// Warnings for the comments of a page that show or link a file the page does
+/// not have — deleted on the server since, or never listed.
+fn missing_comment_attachments(ws: &Workspace, page: &PageRecord) -> Result<Vec<String>> {
+    let comments = ws.state().page_comments(&page.page_id)?;
+    if comments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let attached = ws.state().page_attachments(&page.page_id)?;
+    let mut out = Vec::new();
+    for comment in &comments {
+        let Some(storage) = comment.body_storage.as_deref() else { continue };
+        for file in confed_converter::attachment_references(storage) {
+            if !attached.iter().any(|a| a.filename == file) {
+                out.push(format!(
+                    "{}: comment {} references {file}, which is not among the page's \
+                     attachments",
+                    page.local_path, comment.comment_id
+                ));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// One API comment as confed stores it.
@@ -3203,7 +3855,19 @@ fn same_comments(before: &[CommentRecord], after: &[CommentRecord]) -> bool {
     key(before) == key(after)
 }
 
-/// A stored comment mark, if it can be searched from.
+/// Whether two snapshots of a page's attachments are the same files at the
+/// same versions. Where confed's local copies stand is left out.
+fn same_attachments(before: &[AttachmentRecord], after: &[AttachmentRecord]) -> bool {
+    let key = |records: &[AttachmentRecord]| {
+        let mut keys: Vec<_> =
+            records.iter().map(|r| (&r.attachment_id, &r.filename, r.version)).collect();
+        keys.sort();
+        keys.into_iter().map(|(id, file, v)| (id.clone(), file.clone(), v)).collect::<Vec<_>>()
+    };
+    key(before) == key(after)
+}
+
+/// A stored mark, if it can be searched from.
 ///
 /// A mark well in the future was stamped by a clock that has since been set
 /// back: how long ago the check really was is unknown, so it vouches for
@@ -3211,7 +3875,7 @@ fn same_comments(before: &[CommentRecord], after: &[CommentRecord]) -> bool {
 /// the search adds anyway is ordinary drift, and the overlap covers it.
 fn trusted_mark(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let mark = chrono::DateTime::parse_from_rfc3339(value).ok()?.with_timezone(&chrono::Utc);
-    let drift = chrono::Duration::minutes(COMMENT_CHECK_OVERLAP_MINUTES as i64);
+    let drift = chrono::Duration::minutes(CHECK_OVERLAP_MINUTES as i64);
     (mark <= chrono::Utc::now() + drift).then_some(mark)
 }
 

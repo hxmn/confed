@@ -3123,3 +3123,801 @@ async fn attachments_are_cached_even_when_the_comments_could_not_be_read() {
     assert_eq!(h.ws.state().page_attachments("1001").unwrap().len(), 1);
     assert_eq!(h.ws.state().page_comments("1001").unwrap().len(), 1);
 }
+
+// ---------------------------------- attachments that change on their own ----
+//
+// Attaching a file to a page — or uploading one while writing a comment on
+// it — gives the attachment a version and leaves the page's alone, exactly as
+// a comment does. Deleting one leaves nothing for a search to find.
+
+use confed_core::sync::ATTACHMENTS_CHECKED_AT_KEY;
+
+/// How many times a page's attachments were asked of the server.
+fn attachment_reads(h: &Harness, page_id: &str) -> usize {
+    h.mock.attachment_listings().iter().filter(|p| *p == page_id).count()
+}
+
+/// The pages a pull reports as updated, with what changed on each.
+fn updates(outcome: &confed_core::sync::PullOutcome) -> Vec<(&str, Vec<&str>)> {
+    outcome
+        .updated
+        .iter()
+        .map(|p| (p.page_id.as_str(), p.ops.iter().map(String::as_str).collect()))
+        .collect()
+}
+
+/// The files a page's frontmatter lists as its attachments.
+fn listed_files(h: &Harness, page_file: &str) -> Vec<String> {
+    let file = confed_core::frontmatter::parse(&h.read(page_file), page_file).unwrap();
+    file.frontmatter.managed.unwrap().attachments.into_iter().map(|a| a.file).collect()
+}
+
+async fn pull_with(h: &mut Harness, opts: PullOptions) -> confed_core::sync::PullOutcome {
+    h.engine.pull(&mut h.ws, &opts).await.expect("pull")
+}
+
+async fn pull_page(h: &mut Harness, page: &str) -> confed_core::sync::PullOutcome {
+    pull_with(h, PullOptions { scope: vec![page.to_string()], ..PullOptions::everything() }).await
+}
+
+fn push_attachments() -> PushOptions {
+    PushOptions { with_attachments: true, ..Default::default() }
+}
+
+// The report: a file attached in the browser, to a page nobody edited, has to
+// reach the workspace on a plain pull.
+both_flavors!(a_file_attached_on_the_server_is_pulled, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the files.</p>");
+    h.mock.seed_page("1002", "Quiet", None, "<p>Body.</p>");
+    h.mock.attach_directly("1002", "settled.txt", b"nobody touches this one");
+    h.pull().await;
+    assert!(listed_files(&h, "Diagrams.md").is_empty());
+
+    // Time passes; then a file is attached. The page stays at its version.
+    h.mock.age_attachments(24 * 60);
+    h.mock.attach_directly("1001", "report.pdf", b"quarterly numbers");
+    assert_eq!(h.mock.page_version("1001"), Some(1));
+    let quiet_reads = attachment_reads(&h, "1002");
+
+    let outcome = h.pull().await;
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert_eq!(outcome.updated[0].from_version, outcome.updated[0].to_version);
+    assert_eq!(outcome.attachments_downloaded, 1, "{outcome:?}");
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Diagrams/report.pdf")).unwrap(), b"quarterly numbers");
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["report.pdf"]);
+    assert_eq!(h.status("1001"), PageState::Unchanged, "an attachment is not a page edit");
+    assert_eq!(attachment_reads(&h, "1002"), quiet_reads, "only that page is listed again");
+
+    // Nothing to push back, nothing more to pull, and the file is left alone.
+    let plan = h.engine.plan_push(&h.ws, &push_attachments()).unwrap();
+    assert!(plan.is_empty(), "{plan:?}");
+    let written = std::fs::metadata(h.path("Diagrams.md")).unwrap().modified().unwrap();
+    let again = h.pull().await;
+    assert!(again.is_empty(), "{again:?}");
+    assert_eq!(again.attachments_downloaded, 0);
+    assert_eq!(std::fs::metadata(h.path("Diagrams.md")).unwrap().modified().unwrap(), written);
+});
+
+// A file dropped into a comment is stored on the page: the comment and the
+// file both arrive, and the comment's reference to it resolves.
+both_flavors!(a_file_uploaded_in_a_comment_is_pulled, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+    h.mock.age_comments(24 * 60);
+
+    h.mock.attach_directly("1001", "screenshot.png", b"png bytes");
+    h.mock.seed_comment(
+        "1001",
+        "<p>Like this: <ac:image><ri:attachment ri:filename=\"screenshot.png\"/></ac:image></p>",
+        CommentKind::Footer,
+    );
+    assert_eq!(h.mock.page_version("1001"), Some(1));
+
+    let outcome = h.pull().await;
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments", "comments"])], "{outcome:?}");
+    assert!(outcome.warnings.is_empty(), "the file the comment shows is here: {outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Discussed/screenshot.png")).unwrap(), b"png bytes");
+    assert_eq!(listed_files(&h, "Discussed.md"), ["screenshot.png"]);
+    assert!(h.read(".Discussed/comments.md").contains("screenshot.png"));
+    assert!(h.pull().await.is_empty(), "and then it is settled");
+});
+
+// A deleted attachment is in no search result. Naming the page lists what it
+// has now: the entry leaves the frontmatter and the copy leaves the sidecar.
+both_flavors!(an_attachment_deleted_on_the_server_is_removed_here, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the files.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Body.</p>");
+    let gone = h.mock.attach_directly("1001", "old.png", b"to be deleted");
+    h.mock.attach_directly("1001", "kept.png", b"stays");
+    h.pull().await;
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["kept.png", "old.png"]);
+    h.mock.age_attachments(24 * 60);
+    h.mock.delete_attachment_directly(&gone);
+
+    // A plain pull has no way to see it…
+    assert!(h.pull().await.is_empty());
+    assert!(h.path(".Diagrams/old.png").exists());
+
+    // …naming the page does, even with the search out of order.
+    h.mock.break_attachment_search(true);
+    let other_reads = attachment_reads(&h, "1002");
+    let outcome = pull_page(&mut h, "Diagrams.md").await;
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert_eq!(outcome.attachments_removed, 1, "{outcome:?}");
+    assert_eq!(outcome.warnings.len(), 1, "only the search is complained about: {outcome:?}");
+    assert!(outcome.warnings[0].contains("which attachments changed"), "{outcome:?}");
+    assert!(!h.path(".Diagrams/old.png").exists(), "the local copy is removed");
+    assert_eq!(std::fs::read(h.path(".Diagrams/kept.png")).unwrap(), b"stays");
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["kept.png"]);
+    assert_eq!(h.ws.state().page_attachments("1001").unwrap().len(), 1);
+    assert_eq!(attachment_reads(&h, "1002"), other_reads, "a page not named is not listed");
+
+    // Nothing is left to do, in either direction.
+    h.mock.break_attachment_search(false);
+    let settled = pull_page(&mut h, "1001").await;
+    assert!(settled.is_empty() && settled.warnings.is_empty(), "{settled:?}");
+    assert!(h.engine.plan_push(&h.ws, &push_attachments()).unwrap().is_empty());
+});
+
+/// `--force` and `--reset` list every page's attachments again, so they see a
+/// deletion too.
+#[tokio::test]
+async fn force_and_reset_list_attachments_whatever_the_page_version() {
+    for reset in [false, true] {
+        let mut h = Harness::new(Flavor::DataCenter);
+        h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+        let only = h.mock.attach_directly("1001", "only.png", b"the only file");
+        h.pull().await;
+        h.mock.age_attachments(24 * 60);
+        h.mock.delete_attachment_directly(&only);
+
+        let opts = PullOptions { force: !reset, reset, ..PullOptions::everything() };
+        let outcome = pull_with(&mut h, opts).await;
+        assert_eq!(outcome.attachments_removed, 1, "reset={reset}: {outcome:?}");
+        assert!(!h.path(".Diagrams/only.png").exists(), "reset={reset}");
+        assert!(listed_files(&h, "Diagrams.md").is_empty(), "reset={reset}");
+    }
+}
+
+/// A new version of a file replaces the copy here — and only that file is
+/// downloaded.
+#[tokio::test]
+async fn a_new_version_of_an_attachment_replaces_the_local_copy() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "chart.png", b"first");
+    h.mock.attach_directly("1001", "steady.png", b"never changes");
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+    let steady = std::fs::metadata(h.path(".Diagrams/steady.png")).unwrap().modified().unwrap();
+
+    h.mock.attach_directly("1001", "chart.png", b"second, longer");
+    let outcome = h.pull().await;
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert_eq!(outcome.attachments_downloaded, 1, "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Diagrams/chart.png")).unwrap(), b"second, longer");
+    assert_eq!(
+        std::fs::metadata(h.path(".Diagrams/steady.png")).unwrap().modified().unwrap(),
+        steady
+    );
+    let record = &h.ws.state().page_attachments("1001").unwrap()[0];
+    assert_eq!((record.version, record.downloaded), (2, true));
+    assert!(h.engine.plan_push(&h.ws, &push_attachments()).unwrap().is_empty());
+}
+
+/// An edit to the page does not bring its unchanged attachments down again.
+#[tokio::test]
+async fn an_edited_page_keeps_the_attachments_it_already_has() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "chart.png", b"bytes");
+    let first = h.pull().await;
+    assert_eq!(first.attachments_downloaded, 1);
+
+    h.mock.remote_edit("1001", "<p>Body, edited.</p>");
+    let outcome = h.pull().await;
+    assert_eq!(outcome.updated.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.attachments_downloaded, 0, "{outcome:?}");
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["chart.png"]);
+}
+
+/// A pull with nothing new on the server lists no page's attachments: the
+/// search is the only request the check costs.
+#[tokio::test]
+async fn a_quiet_pull_lists_no_attachments() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    for i in 1..=3 {
+        h.mock.seed_page(&format!("100{i}"), &format!("Page {i}"), None, "<p>Body.</p>");
+        h.mock.attach_directly(&format!("100{i}"), "settled.txt", b"settled");
+    }
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+
+    let before = h.mock.attachment_listings().len();
+    let outcome = h.pull().await;
+    assert!(outcome.is_empty(), "{outcome:?}");
+    assert_eq!(h.mock.attachment_listings().len(), before, "{:?}", h.mock.attachment_listings());
+}
+
+/// A workspace that has checked comments but never attachments — one last
+/// synced by confed 0.9.0 or older — lists every page's attachments once. That is what
+/// brings in a file attached long before any search window.
+#[tokio::test]
+async fn a_workspace_from_before_the_check_lists_every_pages_attachments_once() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.seed_page("1002", "Quiet", None, "<p>Body.</p>");
+    h.pull().await;
+
+    h.mock.attach_directly("1001", "old-news.pdf", b"attached long ago");
+    h.mock.age_attachments(400 * 24 * 60);
+    h.ws.state().delete_meta(ATTACHMENTS_CHECKED_AT_KEY).unwrap();
+    assert!(h.ws.state().get_meta(COMMENTS_CHECKED_AT_KEY).unwrap().is_some());
+    let comment_reads = h.mock.comment_listings().len();
+
+    let outcome = h.pull().await;
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert!(h.path(".Diagrams/old-news.pdf").exists());
+    assert!(h.ws.state().get_meta(ATTACHMENTS_CHECKED_AT_KEY).unwrap().is_some());
+    assert_eq!(h.mock.comment_listings().len(), comment_reads, "the comments had been checked");
+
+    let reads = h.mock.attachment_listings().len();
+    h.pull().await;
+    assert_eq!(h.mock.attachment_listings().len(), reads, "once is enough");
+}
+
+/// A search that cannot answer must not read as "nothing changed": the pull
+/// says so, and the next check still covers the gap.
+#[tokio::test]
+async fn a_failed_attachment_check_is_reported_and_made_up_for() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.pull().await;
+    let then = chrono::Utc::now() - chrono::Duration::minutes(60);
+    let mark = then.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    h.ws.state().set_meta(ATTACHMENTS_CHECKED_AT_KEY, &mark).unwrap();
+
+    h.mock.attach_directly("1001", "report.pdf", b"numbers");
+    h.mock.age_attachments(30);
+    h.mock.break_attachment_search(true);
+    let outcome = h.pull().await;
+    assert_eq!(outcome.warnings.len(), 1, "{outcome:?}");
+    assert!(outcome.warnings[0].contains("which attachments changed"), "{outcome:?}");
+    assert!(outcome.warnings[0].contains("search is unavailable"), "{outcome:?}");
+    assert!(!h.path(".Diagrams/report.pdf").exists());
+    assert_eq!(
+        h.ws.state().get_meta(ATTACHMENTS_CHECKED_AT_KEY).unwrap().as_deref(),
+        Some(mark.as_str()),
+        "the mark stays"
+    );
+
+    h.mock.break_attachment_search(false);
+    let outcome = h.pull().await;
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert!(h.path(".Diagrams/report.pdf").exists());
+}
+
+/// Attachments that cannot be listed are not attachments that are gone: the
+/// ones already here stay, the failure is reported, and the next fetch asks
+/// again — whether the page itself changed or not.
+#[tokio::test]
+async fn a_failed_attachment_listing_keeps_the_attachments_already_here() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "chart.png", b"bytes");
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+
+    // With the page itself changing…
+    h.mock.break_attachment_listing("1001", true);
+    h.mock.remote_edit("1001", "<p>Body, edited.</p>");
+    h.mock.attach_directly("1001", "second.png", b"more bytes");
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.fetched, 1, "the page itself came through: {outcome:?}");
+    assert_eq!(outcome.failed.len(), 1, "{outcome:?}");
+    assert!(outcome.failed[0].error.contains("attachments could not be listed"), "{outcome:?}");
+    assert_eq!(h.ws.state().page_attachments("1001").unwrap().len(), 1);
+    assert!(h.ws.state().removed_attachments("1001").unwrap().is_empty());
+
+    // …and without: the listing still owed fails again, and is still owed.
+    let outcome = h.pull().await;
+    assert_eq!(outcome.warnings.len(), 1, "{outcome:?}");
+    assert!(outcome.warnings[0].contains("could not be listed again"), "{outcome:?}");
+    assert!(h.read("Diagrams.md").contains("Body, edited."), "the page is not held back");
+    assert!(h.path(".Diagrams/chart.png").exists(), "nothing was taken for deleted");
+    assert_eq!(h.ws.state().pending_fetches().unwrap().len(), 1);
+
+    h.mock.break_attachment_listing("1001", false);
+    let outcome = h.pull().await;
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Diagrams/second.png")).unwrap(), b"more bytes");
+    assert!(h.ws.state().pending_fetches().unwrap().is_empty());
+}
+
+/// A file that will not download is a warning, not the end of the pull, and
+/// the next pull asks for it again.
+#[tokio::test]
+async fn a_failed_download_is_reported_and_retried() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "big.bin", b"a lot of bytes");
+    h.mock.attach_directly("1001", "small.txt", b"few");
+    h.mock.break_download("big.bin", true);
+
+    let outcome = h.pull().await;
+    assert_eq!(outcome.created.len(), 1, "the page is written all the same: {outcome:?}");
+    assert_eq!(outcome.attachments_downloaded, 1, "{outcome:?}");
+    assert_eq!(outcome.warnings.len(), 1, "{outcome:?}");
+    assert!(outcome.warnings[0].contains(".Diagrams/big.bin: could not be downloaded"));
+    assert!(h.path(".Diagrams/small.txt").exists());
+    // A file that never came down is not one somebody removed.
+    assert!(h.engine.plan_push(&h.ws, &push_attachments()).unwrap().is_empty());
+
+    h.mock.break_download("big.bin", false);
+    h.mock.age_attachments(24 * 60);
+    let outcome = h.pull().await;
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Diagrams/big.bin")).unwrap(), b"a lot of bytes");
+}
+
+/// A file changed here is local work. A pull neither overwrites it with the
+/// server's new version nor removes it because the server deleted its
+/// attachment — it says so. `--force` takes the server's side.
+#[tokio::test]
+async fn a_locally_changed_attachment_is_not_overwritten_or_removed() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "chart.png", b"server v1");
+    let doomed = h.mock.attach_directly("1001", "notes.txt", b"server notes");
+    h.pull().await;
+
+    std::fs::write(h.path(".Diagrams/chart.png"), b"my local edit").unwrap();
+    std::fs::write(h.path(".Diagrams/notes.txt"), b"my local notes").unwrap();
+    h.mock.attach_directly("1001", "chart.png", b"server v2");
+    h.mock.delete_attachment_directly(&doomed);
+
+    let outcome = pull_page(&mut h, "1001").await;
+    assert_eq!(std::fs::read(h.path(".Diagrams/chart.png")).unwrap(), b"my local edit");
+    assert_eq!(std::fs::read(h.path(".Diagrams/notes.txt")).unwrap(), b"my local notes");
+    assert_eq!((outcome.attachments_downloaded, outcome.attachments_removed), (0, 0));
+    assert_eq!(outcome.warnings.len(), 2, "{outcome:?}");
+    let about = |file: &str| outcome.warnings.iter().find(|w| w.contains(file)).unwrap();
+    assert!(about("chart.png").contains("newer version"), "{outcome:?}");
+    assert!(about("notes.txt").contains("deleted on the server"), "{outcome:?}");
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["chart.png"]);
+
+    // The newer version is still owed, and said again; the deleted one was
+    // settled by keeping the file, which is now simply a new local file.
+    let again = pull_page(&mut h, "1001").await;
+    assert_eq!(again.warnings.len(), 1, "{again:?}");
+    assert!(again.warnings[0].contains("chart.png"), "{again:?}");
+
+    let forced = pull_with(&mut h, PullOptions { force: true, ..PullOptions::everything() }).await;
+    assert!(forced.warnings.is_empty(), "{forced:?}");
+    assert_eq!(forced.attachments_downloaded, 1, "{forced:?}");
+    assert_eq!(std::fs::read(h.path(".Diagrams/chart.png")).unwrap(), b"server v2");
+    assert!(h.path(".Diagrams/notes.txt").exists(), "a new local file is not confed's to remove");
+}
+
+/// A file somebody else attached under a name already used here, by a file
+/// not pushed yet, is not written over it either.
+#[tokio::test]
+async fn a_local_file_is_not_overwritten_by_an_attachment_of_the_same_name() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.pull().await;
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/chart.png"), b"mine, not pushed").unwrap();
+    h.mock.attach_directly("1001", "chart.png", b"theirs");
+
+    let outcome = h.pull().await;
+    assert_eq!(outcome.warnings.len(), 1, "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Diagrams/chart.png")).unwrap(), b"mine, not pushed");
+}
+
+/// Removing a file from the sidecar is how deleting an attachment starts. A
+/// pull does not undo that by downloading it again.
+#[tokio::test]
+async fn an_attachment_removed_here_is_not_brought_back_by_a_pull() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "chart.png", b"bytes");
+    h.pull().await;
+    std::fs::remove_file(h.path(".Diagrams/chart.png")).unwrap();
+
+    let outcome = pull_page(&mut h, "1001").await;
+    assert!(outcome.is_empty(), "{outcome:?}");
+    assert!(!h.path(".Diagrams/chart.png").exists());
+    let plan = h.engine.plan_push(&h.ws, &push_attachments()).unwrap();
+    assert_eq!(plan.attachment_ops.len(), 1, "the deletion is still there to push: {plan:?}");
+}
+
+/// Between a fetch that saw an attachment deleted and the pull that removes
+/// the copy, a push must not upload that copy back.
+#[tokio::test]
+async fn a_push_does_not_upload_back_what_the_server_deleted() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    let gone = h.mock.attach_directly("1001", "old.png", b"bytes");
+    h.pull().await;
+    h.mock.delete_attachment_directly(&gone);
+
+    let opts = confed_core::sync::FetchOptions { pages: vec!["1001".into()], since: None };
+    let outcome = h.engine.fetch(&mut h.ws, &opts).await.expect("fetch");
+    assert_eq!(outcome.attachments_refreshed, 1, "{outcome:?}");
+    assert_eq!(outcome.attachments_changed, ["1001"], "{outcome:?}");
+    assert!(h.path(".Diagrams/old.png").exists(), "a fetch touches no working file");
+
+    let pushed = h.engine.push(&mut h.ws, &push_attachments()).await.expect("push");
+    assert!(pushed.attachments_uploaded.is_empty(), "{pushed:?}");
+    assert!(h.mock.calls().iter().all(|c| !c.starts_with("upload_attachment")));
+    let skipped = pushed.skipped.iter().find(|s| s.path == ".Diagrams/old.png").unwrap();
+    assert!(skipped.reason.contains("deleted on the server"), "{skipped:?}");
+
+    let outcome = h
+        .engine
+        .pull(&mut h.ws, &PullOptions { no_fetch: true, ..PullOptions::everything() })
+        .await
+        .expect("pull");
+    assert_eq!(outcome.attachments_removed, 1, "{outcome:?}");
+    assert!(!h.path(".Diagrams/old.png").exists());
+    assert!(h.engine.plan_push(&h.ws, &push_attachments()).unwrap().is_empty());
+}
+
+/// An attachment a fetch has listed and no pull has downloaded is missing
+/// from the sidecar because it never arrived. `push --allow-delete` must not
+/// take that for a deletion and remove it from the server.
+#[tokio::test]
+async fn an_attachment_not_downloaded_yet_is_not_deleted_by_a_push() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.pull().await;
+    h.mock.attach_directly("1001", "theirs.pdf", b"a colleague's file");
+    h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(h.ws.state().page_attachments("1001").unwrap().len(), 1);
+
+    let opts = PushOptions { allow_delete: true, ..push_attachments() };
+    let pushed = h.engine.push(&mut h.ws, &opts).await.expect("push");
+    assert!(pushed.attachments_deleted.is_empty(), "{pushed:?}");
+    assert!(h.mock.calls().iter().all(|c| !c.starts_with("delete_attachment")));
+    let remote =
+        h.engine.client().list_attachments(&confed_api::PageId::new("1001")).await.unwrap();
+    assert_eq!(remote.len(), 1, "the file is still on the server");
+}
+
+// A push is a visit to the page, so it lists what is attached there now —
+// which matters most on Data Center, where the push takes the page's new
+// version itself and no later fetch would think to look.
+both_flavors!(a_push_lists_the_attachments_of_the_page_it_pushed, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    let gone = h.mock.attach_directly("1001", "old.png", b"old");
+    h.pull().await;
+
+    // Attached and deleted by a colleague, longer ago than any search looks.
+    h.mock.attach_directly("1001", "theirs.pdf", b"a colleague's file");
+    h.mock.delete_attachment_directly(&gone);
+    h.mock.age_attachments(24 * 60);
+    assert!(h.pull().await.is_empty(), "nothing tells a plain pull");
+
+    h.edit_body("Diagrams.md", "\nA new paragraph.\n");
+    let pushed = h.engine.push(&mut h.ws, &push_attachments()).await.expect("push");
+    assert_eq!(pushed.pushed.len(), 1, "{pushed:?}");
+    assert!(pushed.attachments_uploaded.is_empty(), "{pushed:?}");
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["theirs.pdf"], "the page file lists them");
+    assert!(h.path(".Diagrams/old.png").exists(), "a push removes nothing here");
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+
+    // The pull that follows does the file work.
+    let outcome = h.pull().await;
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert_eq!((outcome.attachments_downloaded, outcome.attachments_removed), (1, 1));
+    assert_eq!(std::fs::read(h.path(".Diagrams/theirs.pdf")).unwrap(), b"a colleague's file");
+    assert!(!h.path(".Diagrams/old.png").exists());
+});
+
+/// A file attached from here is listed in the page's frontmatter as soon as
+/// it is pushed, and costs no download afterwards.
+#[tokio::test]
+async fn an_uploaded_attachment_is_listed_in_the_page_file() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.pull().await;
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/mine.png"), b"my file").unwrap();
+
+    let pushed = h.engine.push(&mut h.ws, &push_attachments()).await.expect("push");
+    assert_eq!(pushed.attachments_uploaded, [".Diagrams/mine.png"]);
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["mine.png"]);
+
+    let outcome = h.pull().await;
+    assert!(outcome.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.attachments_downloaded, 0);
+}
+
+/// A file deleted on the server and attached again under its name is a new
+/// attachment; the copy here is brought up to it.
+#[tokio::test]
+async fn a_file_deleted_and_attached_again_is_one_file_here() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    let first = h.mock.attach_directly("1001", "chart.png", b"first");
+    h.pull().await;
+    h.mock.delete_attachment_directly(&first);
+    let second = h.mock.attach_directly("1001", "chart.png", b"second");
+    assert_ne!(first, second);
+
+    let outcome = h.pull().await;
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert_eq!((outcome.attachments_downloaded, outcome.attachments_removed), (1, 0));
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Diagrams/chart.png")).unwrap(), b"second");
+    let records = h.ws.state().page_attachments("1001").unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].attachment_id, second.0);
+}
+
+/// A dry run says a page's attachments would be updated, and downloads and
+/// removes nothing.
+#[tokio::test]
+async fn a_dry_run_reports_changed_attachments_without_touching_them() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    let gone = h.mock.attach_directly("1001", "old.png", b"old");
+    h.pull().await;
+    h.mock.delete_attachment_directly(&gone);
+    h.mock.attach_directly("1001", "new.png", b"new");
+
+    let opts =
+        PullOptions { dry_run: true, scope: vec!["1001".into()], ..PullOptions::everything() };
+    let dry = pull_with(&mut h, opts).await;
+    assert_eq!(updates(&dry), [("1001", vec!["attachments"])], "{dry:?}");
+    assert_eq!((dry.attachments_downloaded, dry.attachments_removed), (0, 0));
+    assert!(h.path(".Diagrams/old.png").exists(), "nothing was removed");
+    assert!(!h.path(".Diagrams/new.png").exists(), "nothing was downloaded");
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["old.png"], "nothing was written");
+
+    // The fetch already happened; the state alone is enough to work from.
+    let outcome = h
+        .engine
+        .pull(&mut h.ws, &PullOptions { no_fetch: true, ..PullOptions::everything() })
+        .await
+        .expect("pull");
+    assert_eq!(updates(&outcome), [("1001", vec!["attachments"])], "{outcome:?}");
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["new.png"]);
+}
+
+/// `pull --no-attachments` leaves the sidecar's files alone, and the pull
+/// after it does what was put off.
+#[tokio::test]
+async fn attachments_put_off_are_pulled_later() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "chart.png", b"bytes");
+    let outcome =
+        pull_with(&mut h, PullOptions { with_comments: true, ..Default::default() }).await;
+    assert_eq!(outcome.attachments_downloaded, 0);
+    assert!(!h.path(".Diagrams/chart.png").exists());
+
+    h.mock.age_attachments(24 * 60);
+    let outcome = h.pull().await;
+    assert_eq!(outcome.attachments_downloaded, 1, "{outcome:?}");
+    assert!(h.path(".Diagrams/chart.png").exists());
+}
+
+/// A comment that shows a file the page does not have cannot be read in full
+/// here. The pull that brings the comment says so; a quiet one does not go on
+/// about it, and naming the page asks again.
+#[tokio::test]
+async fn a_comment_referring_to_a_missing_attachment_is_pointed_out() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "here.png", b"present");
+    let id = h.mock.seed_comment(
+        "1001",
+        "<p><ac:image><ri:attachment ri:filename=\"here.png\"/></ac:image> and \
+         <ac:link><ri:attachment ri:filename=\"lost.pdf\"/></ac:link>, unlike \
+         <ac:link><ri:attachment ri:filename=\"elsewhere.pdf\">\
+         <ri:page ri:content-title=\"Team Handbook\"/></ri:attachment></ac:link>.</p>",
+        CommentKind::Footer,
+    );
+
+    let outcome = h.pull().await;
+    let expected = format!(
+        "Discussed.md: comment {id} references lost.pdf, which is not among the page's attachments"
+    );
+    assert_eq!(outcome.warnings, std::slice::from_ref(&expected), "{outcome:?}");
+
+    h.mock.age_comments(24 * 60);
+    h.mock.age_attachments(24 * 60);
+    assert!(h.pull().await.warnings.is_empty(), "nothing new, nothing repeated");
+    assert_eq!(pull_page(&mut h, "1001").await.warnings, [expected]);
+}
+
+/// `fetch --page` lists the named page's attachments, and leaves the
+/// space-wide mark alone: it has not looked at the space.
+#[tokio::test]
+async fn fetching_a_named_page_lists_its_attachments() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Body.</p>");
+    h.pull().await;
+    let mark = h.ws.state().get_meta(ATTACHMENTS_CHECKED_AT_KEY).unwrap();
+    assert!(mark.is_some());
+    h.mock.attach_directly("1001", "report.pdf", b"numbers");
+    h.mock.age_attachments(24 * 60);
+
+    let opts = confed_core::sync::FetchOptions { pages: vec!["1001".into()], since: None };
+    let outcome = h.engine.fetch(&mut h.ws, &opts).await.expect("fetch");
+    assert_eq!(outcome.attachments_refreshed, 1, "{outcome:?}");
+    assert_eq!(outcome.attachments_changed, ["1001"], "{outcome:?}");
+    assert_eq!(outcome.fetched, 0, "the page body was not downloaded again");
+    assert_eq!(attachment_reads(&h, "1002"), 1, "the other page was listed once, when pulled");
+    assert_eq!(h.ws.state().get_meta(ATTACHMENTS_CHECKED_AT_KEY).unwrap(), mark);
+
+    // Listed, not downloaded: that is the pull's part.
+    let record = &h.ws.state().page_attachments("1001").unwrap()[0];
+    assert!(!record.downloaded);
+    assert!(!h.path(".Diagrams/report.pdf").exists());
+}
+
+/// A state rebuilt from the cache gets the cache's attachment lists, and then
+/// asks the server what changed since the cache last knew — not for every
+/// page again.
+#[tokio::test]
+async fn attachments_restored_from_the_cache_are_brought_up_to_date() {
+    let mut h = Harness::new(Flavor::Cloud);
+    for i in 1..=3 {
+        h.mock.seed_page(&format!("100{i}"), &format!("Page {i}"), None, "<p>Body.</p>");
+    }
+    h.mock.attach_directly("1001", "first.png", b"one");
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+
+    let forget = |h: &Harness| {
+        h.ws.state().conn().execute("DELETE FROM remote_pages", []).unwrap();
+        h.ws.state().conn().execute("DELETE FROM attachments", []).unwrap();
+        h.ws.state().delete_meta(ATTACHMENTS_CHECKED_AT_KEY).unwrap();
+        h.ws.state().delete_meta(COMMENTS_CHECKED_AT_KEY).unwrap();
+    };
+
+    forget(&h);
+    h.mock.attach_directly("1001", "second.png", b"two");
+    let before = h.mock.attachment_listings().len();
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!((outcome.fetched, outcome.from_cache), (0, 3), "{outcome:?}");
+    assert_eq!(outcome.attachments_changed, ["1001"], "{outcome:?}");
+    assert_eq!(h.mock.attachment_listings().len(), before + 1, "only the page that changed");
+    assert_eq!(h.ws.state().page_attachments("1001").unwrap().len(), 2);
+
+    // A cache that does not say how current its lists are — one written by an
+    // older confed — is not taken at its word.
+    forget(&h);
+    rusqlite::Connection::open(h.path(".pages.db"))
+        .unwrap()
+        .execute("DELETE FROM cache_meta WHERE key = 'attachments_checked_at'", [])
+        .unwrap();
+    let before = h.mock.attachment_listings().len();
+    let outcome = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(outcome.from_cache, 3, "{outcome:?}");
+    assert_eq!(h.mock.attachment_listings().len(), before + 3, "every restored page is listed");
+}
+
+/// A page renamed on the server takes its attachments along with its sidecar:
+/// nothing is downloaded again — and the copy of an attachment deleted in the
+/// meantime is removed, not carried over to be pushed back.
+#[tokio::test]
+async fn a_renamed_page_keeps_its_attachments_and_loses_the_deleted_ones() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Before", None, "<p>Body.</p>");
+    h.mock.attach_directly("1001", "kept.png", b"stays");
+    let gone = h.mock.attach_directly("1001", "old.png", b"goes");
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+
+    h.mock.rename_page("1001", "After");
+    h.mock.delete_attachment_directly(&gone);
+    let outcome = h.pull().await;
+    assert_eq!(outcome.moved.len(), 1, "{outcome:?}");
+    assert_eq!((outcome.attachments_downloaded, outcome.attachments_removed), (0, 1));
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".After/kept.png")).unwrap(), b"stays");
+    assert!(!h.path(".After/old.png").exists(), "the deleted attachment's copy did not move in");
+    assert!(!h.path(".Before").exists());
+    assert_eq!(listed_files(&h, "After.md"), ["kept.png"]);
+    assert!(h.engine.plan_push(&h.ws, &push_attachments()).unwrap().is_empty());
+}
+
+/// When two pages swap titles neither sidecar can simply follow its page. The
+/// attachments that did not come along are downloaded, not taken for removed.
+#[tokio::test]
+async fn pages_that_swap_titles_keep_their_attachments() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Alpha", None, "<p>First.</p>");
+    h.mock.seed_page("1002", "Beta", None, "<p>Second.</p>");
+    h.mock.attach_directly("1001", "alpha.png", b"of the first page");
+    h.mock.attach_directly("1002", "beta.png", b"of the second page");
+    h.pull().await;
+    h.mock.age_attachments(24 * 60);
+
+    h.mock.rename_page("1001", "Temporary");
+    h.mock.rename_page("1002", "Alpha");
+    h.mock.rename_page("1001", "Beta");
+    let outcome = h.pull().await;
+    assert_eq!(outcome.moved.len(), 2, "{outcome:?}");
+    assert_eq!(std::fs::read(h.path(".Beta/alpha.png")).unwrap(), b"of the first page");
+    assert_eq!(std::fs::read(h.path(".Alpha/beta.png")).unwrap(), b"of the second page");
+    let plan = h.engine.plan_push(&h.ws, &push_attachments()).unwrap();
+    assert!(
+        plan.attachment_ops.iter().all(|op| op.kind != confed_core::sync::AttachmentOpKind::Delete),
+        "no attachment is taken for removed: {plan:?}"
+    );
+}
+
+/// A file a fetch listed and the server deleted before any pull downloaded it
+/// is not waited for on every pull from then on: asking the page for its
+/// download links is also hearing that the file is gone.
+#[tokio::test]
+async fn a_file_deleted_before_it_was_downloaded_is_let_go() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.pull().await;
+    let brief = h.mock.attach_directly("1001", "brief.pdf", b"here and gone");
+    h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert_eq!(h.ws.state().page_attachments("1001").unwrap().len(), 1);
+    h.mock.delete_attachment_directly(&brief);
+
+    let offline = PullOptions { no_fetch: true, ..PullOptions::everything() };
+    let outcome = pull_with(&mut h, offline.clone()).await;
+    assert!(outcome.is_empty() && outcome.warnings.is_empty(), "{outcome:?}");
+    assert!(h.ws.state().page_attachments("1001").unwrap().is_empty());
+    assert!(listed_files(&h, "Diagrams.md").is_empty());
+
+    let reads = attachment_reads(&h, "1001");
+    pull_with(&mut h, offline).await;
+    assert_eq!(attachment_reads(&h, "1001"), reads, "nothing is left to ask about");
+}
+
+/// A file confed never wrote is not confed's to remove, whatever its name and
+/// whatever the pull was told to discard.
+#[tokio::test]
+async fn a_file_that_only_shares_a_deleted_attachments_name_is_left_alone() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.pull().await;
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/chart.png"), b"mine, never pushed").unwrap();
+
+    // Somebody attaches a file by that name, and deletes it again.
+    let theirs = h.mock.attach_directly("1001", "chart.png", b"theirs");
+    let kept = h.pull().await;
+    assert_eq!(kept.warnings.len(), 1, "{kept:?}");
+    h.mock.delete_attachment_directly(&theirs);
+
+    let forced = pull_with(&mut h, PullOptions { reset: true, ..PullOptions::everything() }).await;
+    assert_eq!(forced.attachments_removed, 0, "{forced:?}");
+    assert_eq!(std::fs::read(h.path(".Diagrams/chart.png")).unwrap(), b"mine, never pushed");
+    assert!(h.ws.state().removed_attachments("1001").unwrap().is_empty());
+}
+
+/// An attachment's name becomes a path in the sidecar. One that would leave
+/// it, or land on one of confed's own files there, is not followed.
+#[tokio::test]
+async fn an_attachment_whose_name_is_not_a_file_name_is_left_out() {
+    let mut h = Harness::new(Flavor::DataCenter);
+    h.mock.seed_page("1001", "Diagrams", None, "<p>Body.</p>");
+    h.mock.seed_comment("1001", "<p>A comment.</p>", CommentKind::Footer);
+    h.mock.attach_directly("1001", "../Escaped.md", b"not a page");
+    h.mock.attach_directly("1001", "comments.md", b"not the comments");
+    h.mock.attach_directly("1001", "fine.txt", b"an ordinary file");
+
+    let outcome = h.pull().await;
+    assert_eq!(outcome.attachments_downloaded, 1, "{outcome:?}");
+    assert!(!h.path("Escaped.md").exists());
+    assert!(h.read(".Diagrams/comments.md").contains("A comment."));
+    assert_eq!(listed_files(&h, "Diagrams.md"), ["fine.txt"]);
+}

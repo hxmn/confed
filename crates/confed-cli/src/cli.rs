@@ -468,7 +468,7 @@ pub struct AttachArgs {
     /// Files to attach.
     pub files: Vec<PathBuf>,
 
-    /// List the page's attachments, as of the last fetch.
+    /// List the page's attachments, as of the last fetch or pull.
     #[arg(long)]
     pub list: bool,
 

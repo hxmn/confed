@@ -4,7 +4,7 @@
   "title": "confed pull result",
   "description": "The `result` of `confed pull --json`. With --dry-run the lists describe what would have been written and `dry_run` is true.",
   "type": "object",
-  "required": ["created", "updated", "merged", "conflicted", "deleted", "moved", "skipped_dirty", "attachments_downloaded", "dry_run"],
+  "required": ["created", "updated", "merged", "conflicted", "deleted", "moved", "skipped_dirty", "attachments_downloaded", "attachments_removed", "dry_run"],
   "properties": {
     "created": {
       "type": "array",
@@ -13,7 +13,7 @@
     },
     "updated": {
       "type": "array",
-      "description": "Pages overwritten from the server because there was nothing local to lose — and pages whose comments changed on the server while the page did not: those have `ops: [\"comments\"]` and equal versions, and only comments.md and the comment marks in the page body were rewritten.",
+      "description": "Pages overwritten from the server because there was nothing local to lose — and pages whose attachments or comments changed on the server while the page did not: those have `ops` of `\"attachments\"`, `\"comments\"` or both, and equal versions. For attachments, files in the sidecar were downloaded or removed and `confed.attachments` in the frontmatter rewritten; for comments, comments.md and the comment marks in the page body. The page's text is as it was.",
       "items": { "$ref": "#/$defs/page_change" }
     },
     "merged": {
@@ -49,7 +49,16 @@
       "description": "Pages pull refused to touch. Non-empty means the whole command failed with exit 7 unless --force was given.",
       "items": { "$ref": "#/$defs/blocked_page" }
     },
-    "attachments_downloaded": { "type": "integer", "minimum": 0 },
+    "attachments_downloaded": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Attachment files written to sidecars: new ones, and new versions of ones already there."
+    },
+    "attachments_removed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Local copies removed because the attachment was deleted on the server. A copy changed locally is kept, with a warning."
+    },
     "dry_run": { "type": "boolean" }
   },
   "$defs": {
@@ -64,7 +73,7 @@
         "to_version": { "type": ["integer", "null"], "description": "Base version after it; null for a deletion." },
         "ops": {
           "type": "array",
-          "description": "Omitted on the pull side, which always rewrites the whole file — except `[\"comments\"]`, for a page whose comments changed and nothing else.",
+          "description": "Omitted on the pull side, which always rewrites the whole file — except for a page of which only the attachments, the comments, or both changed: `[\"attachments\"]`, `[\"comments\"]`, `[\"attachments\", \"comments\"]`.",
           "items": { "type": "string" }
         }
       }

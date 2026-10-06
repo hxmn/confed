@@ -68,6 +68,22 @@ pub trait ConfluenceClient: Send + Sync {
         existing: Option<&AttachmentId>,
     ) -> ApiResult<Attachment>;
     async fn delete_attachment(&self, id: &AttachmentId) -> ApiResult<()>;
+    /// Where in `space` an attachment was added, or given a new version, in
+    /// the last `minutes` minutes.
+    ///
+    /// An attachment has a version of its own, like a comment: attaching a
+    /// file to a page — or uploading one while writing a comment on it —
+    /// leaves the page's version alone. This is how `fetch` finds the
+    /// unchanged pages whose attachments it has to list again. A deleted
+    /// attachment is in no search result, so a deletion is not found this way.
+    async fn recent_attachment_activity(
+        &self,
+        space: &SpaceId,
+        minutes: u64,
+    ) -> ApiResult<ContentActivity> {
+        let _ = (space, minutes);
+        Err(crate::error::ApiError::unsupported(self.flavor(), "find recently changed attachments"))
+    }
 
     async fn list_comments(&self, page: &PageId) -> ApiResult<Vec<Comment>>;
     /// Where in `space` a comment was added or edited in the last `minutes`

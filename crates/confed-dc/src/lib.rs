@@ -528,6 +528,14 @@ impl ConfluenceClient for DcClient {
         self.http.delete(&format!("rest/api/content/{id}")).await
     }
 
+    async fn recent_attachment_activity(
+        &self,
+        space: &SpaceId,
+        minutes: u64,
+    ) -> ApiResult<ContentActivity> {
+        v1::recent_attachment_activity(&self.http, &space.key, minutes).await
+    }
+
     async fn list_comments(&self, page: &PageId) -> ApiResult<Vec<Comment>> {
         let raw: Vec<v1::Content> = collect_offset(
             &self.http,

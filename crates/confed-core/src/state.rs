@@ -28,6 +28,21 @@ CREATE TABLE users (
 ALTER TABLE pages ADD COLUMN render_key TEXT NOT NULL DEFAULT '';
 "#;
 
+/// Tables added since, in a form any build can live with: created when
+/// missing, and never looked at by a confed that does not know them. That is
+/// what lets them arrive without a schema version of their own.
+const SCHEMA_ADDITIONS: &str = r#"
+-- Attachments the server no longer lists, whose local copies a pull has yet to
+-- remove. `sha256` is the copy confed last wrote, so a file changed since is
+-- not taken for it.
+CREATE TABLE IF NOT EXISTS removed_attachments (
+  page_id  TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  sha256   TEXT,
+  PRIMARY KEY (page_id, filename)
+);
+"#;
+
 const SCHEMA_V1: &str = r#"
 CREATE TABLE meta (
   key   TEXT PRIMARY KEY,
@@ -199,9 +214,23 @@ pub struct AttachmentRecord {
     pub filename: String,
     pub media_type: Option<String>,
     pub file_size: Option<u64>,
+    /// The server's version of the attachment, as last listed.
     pub version: u32,
+    /// Hash of the local copy as confed last downloaded or uploaded it: what
+    /// tells a file edited since from one that is merely out of date.
     pub sha256: Option<String>,
+    /// Whether that copy is the server's current version.
     pub downloaded: bool,
+}
+
+/// An attachment that is gone from the server while its local copy may still
+/// be in the sidecar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemovedAttachment {
+    pub page_id: String,
+    pub filename: String,
+    /// Hash of the copy confed last wrote, if it ever wrote one.
+    pub sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -327,6 +356,7 @@ impl StateDb {
         if current != SCHEMA_VERSION {
             self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
         }
+        self.conn.execute_batch(SCHEMA_ADDITIONS)?;
         Ok(())
     }
 
@@ -412,6 +442,8 @@ impl StateDb {
     pub fn delete_page(&self, page_id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM pages WHERE page_id = ?1", params![page_id])?;
         self.conn.execute("DELETE FROM attachments WHERE page_id = ?1", params![page_id])?;
+        self.conn
+            .execute("DELETE FROM removed_attachments WHERE page_id = ?1", params![page_id])?;
         self.conn.execute("DELETE FROM comments WHERE page_id = ?1", params![page_id])?;
         Ok(())
     }
@@ -513,6 +545,47 @@ impl StateDb {
     pub fn delete_attachment(&self, attachment_id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM attachments WHERE attachment_id = ?1", params![attachment_id])?;
+        Ok(())
+    }
+
+    pub fn clear_page_attachments(&self, page_id: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM attachments WHERE page_id = ?1", params![page_id])?;
+        Ok(())
+    }
+
+    /// Remember that the server no longer has this attachment, so the next
+    /// pull removes the copy in the sidecar and a push does not upload it back.
+    pub fn note_removed_attachment(
+        &self,
+        page_id: &str,
+        filename: &str,
+        sha256: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO removed_attachments (page_id, filename, sha256) VALUES (?1, ?2, ?3)
+             ON CONFLICT(page_id, filename) DO UPDATE SET sha256 = excluded.sha256",
+            params![page_id, filename, sha256],
+        )?;
+        Ok(())
+    }
+
+    pub fn removed_attachments(&self, page_id: &str) -> Result<Vec<RemovedAttachment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT page_id, filename, sha256 FROM removed_attachments
+             WHERE page_id = ?1 ORDER BY filename",
+        )?;
+        let rows = stmt.query_map(params![page_id], |r| {
+            Ok(RemovedAttachment { page_id: r.get(0)?, filename: r.get(1)?, sha256: r.get(2)? })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// The removal was dealt with, or the name is an attachment again.
+    pub fn forget_removed_attachment(&self, page_id: &str, filename: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM removed_attachments WHERE page_id = ?1 AND filename = ?2",
+            params![page_id, filename],
+        )?;
         Ok(())
     }
 
@@ -637,6 +710,14 @@ impl StateDb {
         Ok(())
     }
 
+    /// Ask for more of a page without dropping what is already owed for it.
+    pub fn enqueue_fetch_also(&self, page_id: &str, needs: &[&str]) -> Result<()> {
+        let owed = self.pending_fetch(page_id)?.unwrap_or_default();
+        let mut all: Vec<&str> = owed.iter().map(String::as_str).collect();
+        all.extend(needs.iter().filter(|n| !owed.iter().any(|o| o == *n)));
+        self.enqueue_fetch(page_id, &all)
+    }
+
     pub fn pending_fetches(&self) -> Result<Vec<(String, Vec<String>)>> {
         let mut stmt = self
             .conn
@@ -659,18 +740,40 @@ impl StateDb {
         Ok(())
     }
 
-    /// A page's comments were read: settle its entry if comments were all it
-    /// asked for. An entry still waiting for the body stays, or the page
-    /// would never be fetched.
-    pub fn mark_comments_fetched(&self, page_id: &str) -> Result<()> {
-        let comments_only = self
-            .pending_fetches()?
-            .into_iter()
-            .any(|(id, needs)| id == page_id && !needs.iter().any(|n| n == "body"));
-        if comments_only {
-            self.mark_fetch_done(page_id)?;
+    /// What is still owed for one page, if anything is.
+    pub fn pending_fetch(&self, page_id: &str) -> Result<Option<Vec<String>>> {
+        let needs: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT needs FROM fetch_queue WHERE page_id = ?1 AND done = 0",
+                params![page_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(needs.map(|needs| serde_json::from_str(&needs).unwrap_or_default()))
+    }
+
+    /// Part of what a page's entry asked for was read — its `attachments`, its
+    /// `comments` — without the page itself: take that off the entry, and
+    /// settle it once nothing is left. An entry still waiting for the body
+    /// stays whole, or the page would never be fetched.
+    pub fn mark_fetched(&self, page_id: &str, read: &[&str]) -> Result<()> {
+        let Some(needs) = self.pending_fetch(page_id)? else { return Ok(()) };
+        if needs.iter().any(|n| n == "body") {
+            return Ok(());
         }
-        Ok(())
+        let left: Vec<&str> =
+            needs.iter().map(String::as_str).filter(|n| !read.contains(n)).collect();
+        if left.is_empty() {
+            self.mark_fetch_done(page_id)
+        } else {
+            self.enqueue_fetch(page_id, &left)
+        }
+    }
+
+    /// [`Self::mark_fetched`] for a page's comments.
+    pub fn mark_comments_fetched(&self, page_id: &str) -> Result<()> {
+        self.mark_fetched(page_id, &["comments"])
     }
 
     pub fn clear_fetch_queue(&self) -> Result<()> {
@@ -958,9 +1061,47 @@ mod tests {
         })
         .unwrap();
 
+        db.note_removed_attachment("1", "old.png", Some("def")).unwrap();
+
         db.delete_page("1").unwrap();
         assert!(db.page_attachments("1").unwrap().is_empty());
+        assert!(db.removed_attachments("1").unwrap().is_empty());
         assert!(db.page_comments("1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_removed_attachment_is_remembered_until_it_is_dealt_with() {
+        let db = StateDb::open_in_memory().unwrap();
+        db.note_removed_attachment("1", "old.png", Some("abc")).unwrap();
+        db.note_removed_attachment("1", "never-downloaded.png", None).unwrap();
+        db.note_removed_attachment("2", "other.png", None).unwrap();
+        // Noted twice, it is still one removal, with the later hash.
+        db.note_removed_attachment("1", "old.png", Some("def")).unwrap();
+
+        let removed = db.removed_attachments("1").unwrap();
+        let names: Vec<&str> = removed.iter().map(|r| r.filename.as_str()).collect();
+        assert_eq!(names, ["never-downloaded.png", "old.png"]);
+        assert_eq!(removed[1].sha256.as_deref(), Some("def"));
+
+        db.forget_removed_attachment("1", "old.png").unwrap();
+        assert_eq!(db.removed_attachments("1").unwrap().len(), 1);
+        assert_eq!(db.removed_attachments("2").unwrap().len(), 1, "another page's is untouched");
+    }
+
+    #[test]
+    fn a_state_from_before_removals_were_tracked_gains_the_table_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db = StateDb::create(dir.path()).unwrap();
+            db.conn().execute("DROP TABLE removed_attachments", []).unwrap();
+        }
+        let db = StateDb::open(dir.path()).unwrap();
+        assert!(db.removed_attachments("1").unwrap().is_empty());
+        assert_eq!(
+            db.get_meta("schema_version").unwrap().as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str()),
+            "an older confed can still open it"
+        );
     }
 
     #[test]
@@ -1039,6 +1180,26 @@ mod tests {
         let pending: Vec<String> =
             db.pending_fetches().unwrap().into_iter().map(|(id, _)| id).collect();
         assert_eq!(pending, ["1", "2"], "the body of page 1 is still owed");
+
+        // Half of what was asked for leaves the other half owed.
+        db.enqueue_fetch("4", &["attachments", "comments"]).unwrap();
+        db.mark_fetched("4", &["attachments"]).unwrap();
+        assert_eq!(db.pending_fetch("4").unwrap(), Some(vec!["comments".to_string()]));
+        db.mark_fetched("4", &["comments"]).unwrap();
+        assert_eq!(db.pending_fetch("4").unwrap(), None);
+        db.mark_fetched("1", &["attachments", "comments"]).unwrap();
+        assert_eq!(db.pending_fetch("1").unwrap(), Some(vec!["body".to_string()]));
+        db.mark_fetched("nobody", &["comments"]).unwrap();
+
+        // Asking for more of a page keeps what it was already owed.
+        db.enqueue_fetch("5", &["comments"]).unwrap();
+        db.enqueue_fetch_also("5", &["attachments", "comments"]).unwrap();
+        db.enqueue_fetch_also("6", &["attachments"]).unwrap();
+        db.enqueue_fetch_also("1", &["attachments"]).unwrap();
+        let needs = |id: &str| db.pending_fetch(id).unwrap().unwrap();
+        assert_eq!(needs("5"), ["comments", "attachments"]);
+        assert_eq!(needs("6"), ["attachments"]);
+        assert_eq!(needs("1"), ["body", "attachments"]);
     }
 
     #[test]

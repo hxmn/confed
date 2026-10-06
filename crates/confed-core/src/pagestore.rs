@@ -5,7 +5,7 @@
 //! survives everything that rebuilds sync state — a fresh clone of a repository
 //! that tracks the Markdown but not the state, a `confed init` over an existing
 //! tree, a version that goes back to one seen before — and `fetch` degenerates
-//! to asking which versions exist and which comments changed.
+//! to asking which versions exist and which attachments and comments changed.
 //!
 //! Nothing here is authoritative. Deleting the file costs bandwidth, not
 //! correctness.
@@ -43,8 +43,9 @@ CREATE TABLE IF NOT EXISTS page_extras (
   fetched_at  TEXT NOT NULL
 );
 
--- What the cache knows about itself. `comments_checked_at` is when the comments
--- in `page_extras` were last known to be current, so a state rebuilt from the
+-- What the cache knows about itself. `comments_checked_at` and
+-- `attachments_checked_at` are when the comments and the attachments in
+-- `page_extras` were last known to be current, so a state rebuilt from the
 -- cache can ask the server for what changed since, instead of for everything.
 CREATE TABLE IF NOT EXISTS cache_meta (
   key   TEXT PRIMARY KEY,
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS cache_meta (
 "#;
 
 const COMMENTS_CHECKED_AT: &str = "comments_checked_at";
+const ATTACHMENTS_CHECKED_AT: &str = "attachments_checked_at";
 
 /// Attachment and comment snapshots for one page, as JSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -186,23 +188,53 @@ impl PageStore {
         Ok(())
     }
 
+    /// Replace the attachment snapshot taken at this version, leaving the
+    /// comments beside it alone — [`Self::put_comments`] the other way round,
+    /// and as careful not to write half a snapshot.
+    pub fn refresh_attachments(
+        &self,
+        page_id: &str,
+        version: u32,
+        attachments: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE page_extras SET attachments = ?3, fetched_at = ?4
+             WHERE page_id = ?1 AND version = ?2",
+            params![page_id, version, attachments, crate::state::now()],
+        )?;
+        Ok(())
+    }
+
     /// When the cached comments were last known to be current, if ever.
     pub fn comments_checked_at(&self) -> Result<Option<String>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT value FROM cache_meta WHERE key = ?1",
-                params![COMMENTS_CHECKED_AT],
-                |r| r.get(0),
-            )
-            .optional()?)
+        self.meta(COMMENTS_CHECKED_AT)
     }
 
     pub fn set_comments_checked_at(&self, when: &str) -> Result<()> {
+        self.set_meta(COMMENTS_CHECKED_AT, when)
+    }
+
+    /// When the cached attachment lists were last known to be current, if ever.
+    pub fn attachments_checked_at(&self) -> Result<Option<String>> {
+        self.meta(ATTACHMENTS_CHECKED_AT)
+    }
+
+    pub fn set_attachments_checked_at(&self, when: &str) -> Result<()> {
+        self.set_meta(ATTACHMENTS_CHECKED_AT, when)
+    }
+
+    fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM cache_meta WHERE key = ?1", params![key], |r| r.get(0))
+            .optional()?)
+    }
+
+    fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO cache_meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![COMMENTS_CHECKED_AT, when],
+            params![key, value],
         )?;
         Ok(())
     }
@@ -313,6 +345,17 @@ mod tests {
         store.put_comments("2", 1, "[9]").unwrap();
         assert_eq!(store.extras("1", 7).unwrap().unwrap().comments, "[1,2]");
         assert!(store.extras("2", 1).unwrap().is_none());
+
+        // And the same the other way round, for attachments listed again.
+        store.refresh_attachments("1", 7, "[\"a\",\"c\"]").unwrap();
+        store.refresh_attachments("1", 8, "[]").unwrap();
+        store.refresh_attachments("2", 1, "[\"z\"]").unwrap();
+        let stored = store.extras("1", 7).unwrap().unwrap();
+        assert_eq!(
+            (stored.attachments.as_str(), stored.comments.as_str()),
+            ("[\"a\",\"c\"]", "[1,2]")
+        );
+        assert!(store.extras("2", 1).unwrap().is_none());
     }
 
     #[test]
@@ -323,8 +366,18 @@ mod tests {
         store.set_comments_checked_at("2026-02-02T00:00:00Z").unwrap();
         assert_eq!(store.comments_checked_at().unwrap().as_deref(), Some("2026-02-02T00:00:00Z"));
 
+        // The attachments have a mark of their own.
+        assert_eq!(store.attachments_checked_at().unwrap(), None);
+        store.set_attachments_checked_at("2026-03-03T00:00:00Z").unwrap();
+        assert_eq!(
+            store.attachments_checked_at().unwrap().as_deref(),
+            Some("2026-03-03T00:00:00Z")
+        );
+        assert_eq!(store.comments_checked_at().unwrap().as_deref(), Some("2026-02-02T00:00:00Z"));
+
         store.clear().unwrap();
         assert_eq!(store.comments_checked_at().unwrap(), None, "an empty cache knows nothing");
+        assert_eq!(store.attachments_checked_at().unwrap(), None);
     }
 
     #[test]

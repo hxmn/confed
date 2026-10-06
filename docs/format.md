@@ -244,6 +244,12 @@ what was last downloaded or uploaded. Drop a new file into the sidecar and `push
 it; change a file and `push` uploads a new version of the same attachment rather than a
 duplicate. `confed attach` is the convenient front end for both.
 
+The list follows the server. `pull` rewrites it — and nothing else in the file — when a
+file was attached to the page, replaced or deleted in Confluence, whether or not the page
+itself changed, and downloads or removes the copies in the sidecar to match. An entry
+without a `sha256` is a file the server has that has not been downloaded here yet. See
+[sync.md](sync.md#attachments-change-without-their-page).
+
 ## Comment sidecars
 
 ## The Confluence markup copy

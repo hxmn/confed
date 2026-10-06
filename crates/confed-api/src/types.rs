@@ -327,14 +327,18 @@ pub struct Comment {
     pub anchor: Option<InlineAnchor>,
 }
 
-/// Where comments changed recently, as far as the server can say.
+/// Where something a page carries beside its body — its comments, or its
+/// attachments — changed recently, as far as the server can say.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CommentActivity {
-    /// The pages with a comment added or edited in the window.
+pub enum ContentActivity {
+    /// The pages with one added or edited in the window.
     Pages(Vec<PageId>),
     /// More changes than the server will list: any page may be among them.
     Unbounded,
 }
+
+/// [`ContentActivity`], by the name it had while comments were all it described.
+pub type CommentActivity = ContentActivity;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VersionInfo {

@@ -509,19 +509,21 @@ impl SearchResult {
     }
 }
 
-/// What a comment search must expand for a hit to name the page it is on.
+/// What a comment or attachment search must expand for a hit to name the page
+/// it is on.
 pub const COMMENT_SEARCH_EXPAND: &str = "content.container";
 
-/// Hits a comment search is followed for. Past this many, the answer is
-/// "comments changed all over the space" rather than a list.
-const MAX_COMMENT_HITS: usize = 2_000;
+/// Hits a search for recent changes is followed for. Past this many, the answer
+/// is "changed all over the space" rather than a list.
+const MAX_ACTIVITY_HITS: usize = 2_000;
 
-/// CQL for the comments of a space added or edited in the last `minutes`.
+/// CQL for the content of one type in a space added or edited in the last
+/// `minutes`.
 ///
 /// The age is relative to the server's own clock (`now("-90m")`). A date
 /// literal would be read in the time zone of whoever is searching, which the
 /// client has no way to know.
-pub fn recent_comments_cql(space_key: &str, minutes: u64) -> String {
+fn recent_content_cql(space_key: &str, kind: &str, minutes: u64) -> String {
     let minutes = minutes.max(1);
     let age = match minutes {
         m if m <= 2 * 24 * 60 => format!("-{m}m"),
@@ -529,7 +531,18 @@ pub fn recent_comments_cql(space_key: &str, minutes: u64) -> String {
         m => format!("-{}d", m.div_ceil(24 * 60)),
     };
     let space = space_key.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("space = \"{space}\" and type = comment and lastmodified >= now(\"{age}\")")
+    format!("space = \"{space}\" and type = {kind} and lastmodified >= now(\"{age}\")")
+}
+
+/// CQL for the comments of a space added or edited in the last `minutes`.
+pub fn recent_comments_cql(space_key: &str, minutes: u64) -> String {
+    recent_content_cql(space_key, "comment", minutes)
+}
+
+/// CQL for the attachments of a space added, or given a new version, in the
+/// last `minutes`.
+pub fn recent_attachments_cql(space_key: &str, minutes: u64) -> String {
+    recent_content_cql(space_key, "attachment", minutes)
 }
 
 /// The pages of a space with a comment added or edited in the last `minutes`,
@@ -543,27 +556,50 @@ pub async fn recent_comment_activity(
     http: &crate::http::Http,
     space_key: &str,
     minutes: u64,
-) -> ApiResult<CommentActivity> {
+) -> ApiResult<ContentActivity> {
+    recent_activity(http, space_key, "comment", minutes).await
+}
+
+/// The pages of a space with an attachment added, or given a new version, in
+/// the last `minutes` — found the way [`recent_comment_activity`] finds
+/// comments, and with the same care for a hit that does not say where it is.
+///
+/// A file uploaded while writing a comment is an attachment of the page the
+/// comment is on, so it is found here too.
+pub async fn recent_attachment_activity(
+    http: &crate::http::Http,
+    space_key: &str,
+    minutes: u64,
+) -> ApiResult<ContentActivity> {
+    recent_activity(http, space_key, "attachment", minutes).await
+}
+
+async fn recent_activity(
+    http: &crate::http::Http,
+    space_key: &str,
+    kind: &str,
+    minutes: u64,
+) -> ApiResult<ContentActivity> {
     let hits: Vec<SearchResult> = crate::paginate::collect_offset(
         http,
         "rest/api/search",
         &[
-            ("cql", recent_comments_cql(space_key, minutes)),
+            ("cql", recent_content_cql(space_key, kind, minutes)),
             ("expand", COMMENT_SEARCH_EXPAND.to_string()),
         ],
         100,
-        Some(MAX_COMMENT_HITS + 1),
+        Some(MAX_ACTIVITY_HITS + 1),
     )
     .await?;
-    if hits.len() > MAX_COMMENT_HITS {
-        return Ok(CommentActivity::Unbounded);
+    if hits.len() > MAX_ACTIVITY_HITS {
+        return Ok(ContentActivity::Unbounded);
     }
 
     let mut pages: Vec<PageId> = Vec::new();
     for content in hits.into_iter().filter_map(|hit| hit.content) {
         // A server that ignores the `type` clause must not have its pages
-        // mistaken for comments.
-        if content.kind.as_deref().is_some_and(|k| k != "comment") {
+        // mistaken for what was asked about.
+        if content.kind.as_deref().is_some_and(|k| k != kind) {
             continue;
         }
         let container = match content.container {
@@ -579,14 +615,15 @@ pub async fn recent_comment_activity(
                 match looked_up {
                     Ok(Content { container: Some(container), .. }) => container,
                     // It changed somewhere, and nothing says where.
-                    Ok(_) => return Ok(CommentActivity::Unbounded),
+                    Ok(_) => return Ok(ContentActivity::Unbounded),
                     // Deleted since the search listed it.
                     Err(ApiError::NotFound(_)) => continue,
                     Err(e) => return Err(e),
                 }
             }
         };
-        // Comments on blog posts and attachments are not page comments.
+        // Comments and files on blog posts, and comments on attachments, are
+        // not a page's.
         if container.kind.as_deref().is_some_and(|k| k != "page") {
             continue;
         }
@@ -595,7 +632,7 @@ pub async fn recent_comment_activity(
             pages.push(page);
         }
     }
-    Ok(CommentActivity::Pages(pages))
+    Ok(ContentActivity::Pages(pages))
 }
 
 #[cfg(test)]
@@ -613,6 +650,15 @@ mod tests {
         assert!(recent_comments_cql("DOCS", 90 * 24 * 60 + 1).ends_with(r#"now("-91d")"#));
         assert!(recent_comments_cql("DOCS", 0).ends_with(r#"now("-1m")"#));
         assert!(recent_comments_cql("~alice.ng", 5).starts_with(r#"space = "~alice.ng" and"#));
+    }
+
+    #[test]
+    fn the_attachment_search_asks_the_same_way_for_another_type() {
+        assert_eq!(
+            recent_attachments_cql("DOCS", 90),
+            r#"space = "DOCS" and type = attachment and lastmodified >= now("-90m")"#
+        );
+        assert!(recent_attachments_cql("DOCS", 3 * 24 * 60 + 1).ends_with(r#"now("-73h")"#));
     }
 
     fn page_json() -> serde_json::Value {

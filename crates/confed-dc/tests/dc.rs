@@ -5,8 +5,8 @@
 
 use confed_api::{
     ApiError, Attachment, AttachmentId, Auth, BodyFormat, CommentActivity, CommentId, CommentKind,
-    ConfluenceClient, Http, InlineAnchor, NewPage, PageId, PageStatus, PageUpdate, Position,
-    RetryPolicy, Secret, SpaceId,
+    ConfluenceClient, ContentActivity, Http, InlineAnchor, NewPage, PageId, PageStatus, PageUpdate,
+    Position, RetryPolicy, Secret, SpaceId,
 };
 use confed_dc::DcClient;
 use serde_json::json;
@@ -1288,4 +1288,81 @@ async fn more_comment_changes_than_can_be_listed_are_reported_as_such() {
     let activity =
         client(&server).recent_comment_activity(&SpaceId::from_key("DOCS"), 90).await.unwrap();
     assert_eq!(activity, CommentActivity::Unbounded);
+}
+
+// --------------------------------------------- attachments that changed ----
+//
+// An attachment has its own version too: a file attached to a page, or
+// uploaded while writing a comment on it, leaves the page's alone.
+
+fn attachment_hit(id: &str, file: &str, container: Option<(&str, &str)>) -> serde_json::Value {
+    let mut content = json!({ "id": id, "type": "attachment", "status": "current", "title": file });
+    if let Some((page, kind)) = container {
+        content["container"] = json!({ "id": page, "type": kind, "title": "Team Handbook" });
+    }
+    json!({
+        "content": content,
+        "title": file,
+        "url": format!("/pages/viewpage.action?pageId=1001&preview=%2F1001%2F{id}%2F{file}"),
+        "lastModified": "2026-08-30T09:00:00.000Z"
+    })
+}
+
+#[tokio::test]
+async fn recent_attachment_activity_names_the_pages_attached_to() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/search"))
+        .and(query_param(
+            "cql",
+            r#"space = "DOCS" and type = attachment and lastmodified >= now("-90m")"#,
+        ))
+        .and(query_param("expand", "content.container"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                attachment_hit("3001", "diagram.png", Some(("1001", "page"))),
+                // A second file on the same page names it once.
+                attachment_hit("3002", "notes.txt", Some(("1001", "page"))),
+                // A file on a blog post is not a page's.
+                attachment_hit("3003", "photo.jpg", Some(("7001", "blogpost"))),
+                // A hit that does not say where it is gets asked.
+                attachment_hit("3004", "report.pdf", None),
+                // And a server that ignored `type = attachment` is not believed.
+                comment_hit("2001", Some(("1003", "page"))),
+            ],
+            "start": 0, "limit": 100, "size": 5, "_links": {}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/3004"))
+        .and(query_param("expand", "container"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "3004", "type": "attachment",
+            "container": { "id": 1002, "type": "page" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let activity =
+        client(&server).recent_attachment_activity(&SpaceId::from_key("DOCS"), 90).await.unwrap();
+    assert_eq!(activity, ContentActivity::Pages(vec![PageId::new("1001"), PageId::new("1002")]));
+}
+
+#[tokio::test]
+async fn an_attachment_search_that_fails_is_an_error_not_an_empty_answer() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/search"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("Could not parse cql"))
+        .mount(&server)
+        .await;
+
+    let err = client(&server)
+        .recent_attachment_activity(&SpaceId::from_key("DOCS"), 90)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ApiError::Server { status: 400, .. }), "got {err:?}");
 }

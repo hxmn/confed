@@ -54,6 +54,14 @@ pub mod fetch {
                 ))
             );
         }
+        if outcome.attachments_refreshed > 0 {
+            let _ = writeln!(
+                human,
+                "Listed the attachments of {} again; {} changed.",
+                plural(outcome.attachments_refreshed, "unchanged page", "unchanged pages"),
+                outcome.attachments_changed.len()
+            );
+        }
         if outcome.comments_refreshed > 0 {
             let _ = writeln!(
                 human,
@@ -62,7 +70,10 @@ pub mod fetch {
                 outcome.comments_changed.len()
             );
         }
-        if outcome.fetched > 0 || !outcome.comments_changed.is_empty() {
+        if outcome.fetched > 0
+            || !outcome.attachments_changed.is_empty()
+            || !outcome.comments_changed.is_empty()
+        {
             let _ =
                 writeln!(human, "{}", style.dim("Run `confed pull` to write the changes to disk."));
         }
@@ -72,9 +83,7 @@ pub mod fetch {
         for failure in &outcome.failed {
             output = output.warn(format!("{}: {}", failure.page_id, failure.error));
         }
-        if let Some(warning) = outcome.comment_check_warning() {
-            output = output.warn(warning);
-        }
+        output = output.warn_all(outcome.check_warnings());
         if failures > 0 {
             output.exit = ExitCode::Partial;
         }
@@ -130,11 +139,11 @@ pub mod pull {
             ("deleted", &outcome.deleted),
         ] {
             for page in pages {
-                // A page whose comments changed and nothing else.
-                let what = if page.ops == ["comments"] {
-                    style.dim("  (comments)")
-                } else {
+                // A page whose attachments or comments changed and nothing else.
+                let what = if page.ops.is_empty() {
                     String::new()
+                } else {
+                    style.dim(&format!("  ({})", page.ops.join(", ")))
                 };
                 let _ = writeln!(human, "  {:<8} {}{}", label, page.path, what);
             }
@@ -159,10 +168,11 @@ pub mod pull {
                 outcome.updated.len(),
                 outcome.merged.len(),
                 outcome.deleted.len(),
-                if outcome.attachments_downloaded > 0 {
-                    format!(", {} attachments", outcome.attachments_downloaded)
-                } else {
-                    String::new()
+                match (outcome.attachments_downloaded, outcome.attachments_removed) {
+                    (0, 0) => String::new(),
+                    (downloaded, 0) => format!(", {downloaded} attachments"),
+                    (downloaded, removed) =>
+                        format!(", {downloaded} attachments ({removed} removed)"),
                 }
             );
         }

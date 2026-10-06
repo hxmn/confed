@@ -17,6 +17,20 @@ pub fn is_partial(name: &str) -> bool {
     name.ends_with(PARTIAL_SUFFIX)
 }
 
+/// Is this a name confed can keep an attachment under in a sidecar?
+///
+/// The name is the server's, and it becomes a path: one that would leave the
+/// sidecar, or that is one of confed's own files in it, is not followed there.
+pub fn is_storable(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\'])
+        && name != crate::comments::COMMENTS_FILENAME
+        && name != crate::paths::STORAGE_FILENAME
+        && !is_partial(name)
+}
+
 /// Delete stale partial downloads left in a sidecar directory by an interrupted
 /// pull. Returns how many went. Unreadable entries are left alone.
 pub fn remove_stale_partials(sidecar_dir: &Path) -> usize {
@@ -86,7 +100,10 @@ impl AttachmentAction {
 ///
 /// Files whose hash matches the recorded one are left alone; changed files are
 /// re-uploaded as a new version; recorded attachments with no local file are
-/// deletions. Files confed cannot read are skipped rather than fatal.
+/// deletions — once their current version has been here to delete. One the
+/// server has that was never downloaded, or has replaced since, is missing
+/// because no pull brought it, not because anybody removed it. Files confed
+/// cannot read are skipped rather than fatal.
 pub fn diff_attachments(
     sidecar_dir: &Path,
     recorded: &[AttachmentRecord],
@@ -136,7 +153,7 @@ pub fn diff_attachments(
     }
 
     for record in recorded {
-        if !local.iter().any(|(name, _)| name == &record.filename) {
+        if record.downloaded && !local.iter().any(|(name, _)| name == &record.filename) {
             actions.push(AttachmentAction::Delete {
                 attachment_id: record.attachment_id.clone(),
                 filename: record.filename.clone(),
@@ -148,6 +165,10 @@ pub fn diff_attachments(
 }
 
 /// Frontmatter entries for a page's attachments.
+///
+/// The hash is given once the copy in the sidecar is the server's current
+/// version: until then the recorded one describes an older file than the size
+/// beside it.
 pub fn to_refs(records: &[AttachmentRecord]) -> Vec<AttachmentRef> {
     records
         .iter()
@@ -155,7 +176,7 @@ pub fn to_refs(records: &[AttachmentRecord]) -> Vec<AttachmentRef> {
             id: r.attachment_id.clone(),
             file: r.filename.clone(),
             size: r.file_size,
-            sha256: r.sha256.clone(),
+            sha256: r.sha256.clone().filter(|_| r.downloaded),
         })
         .collect()
 }
@@ -174,6 +195,26 @@ mod tests {
             version: 1,
             sha256: Some(sha.into()),
             downloaded: true,
+        }
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_plain_file_in_the_sidecar_is_not_storable() {
+        for name in ["diagram.png", "quarterly report (final).pdf", "Отчёт.txt", ".hidden"] {
+            assert!(is_storable(name), "{name}");
+        }
+        for name in [
+            "",
+            ".",
+            "..",
+            "../Other.md",
+            "nested/file.png",
+            "nested\\file.png",
+            crate::comments::COMMENTS_FILENAME,
+            crate::paths::STORAGE_FILENAME,
+            ".video.webm.confed-part",
+        ] {
+            assert!(!is_storable(name), "{name:?}");
         }
     }
 
@@ -217,6 +258,32 @@ mod tests {
             attachment_id: "att1".into(),
             filename: "gone.png".into()
         }));
+    }
+
+    #[test]
+    fn an_attachment_that_never_came_down_is_not_one_somebody_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        // Listed by a fetch, not downloaded yet: nothing here to have removed.
+        let mut unseen = record("att1", "new.png", "h");
+        unseen.sha256 = None;
+        unseen.downloaded = false;
+        // Downloaded once, replaced on the server since, and gone locally.
+        let mut replaced = record("att2", "replaced.png", "h");
+        replaced.downloaded = false;
+
+        let actions = diff_attachments(dir.path(), &[unseen, replaced]).unwrap();
+        assert!(actions.is_empty(), "neither is a deletion to push: {actions:?}");
+    }
+
+    #[test]
+    fn the_frontmatter_gives_a_hash_only_for_the_copy_it_describes() {
+        let current = record("att1", "a.png", "abc");
+        let mut stale = record("att2", "b.png", "old");
+        stale.downloaded = false;
+        let refs = to_refs(&[current, stale]);
+        assert_eq!(refs[0].sha256.as_deref(), Some("abc"));
+        assert_eq!(refs[1].sha256, None, "the size beside it is the new version's");
+        assert_eq!(refs[1].file, "b.png");
     }
 
     #[test]

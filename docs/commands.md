@@ -162,7 +162,7 @@ safe way to find out what changed. Interrupted fetches resume rather than restar
 
 | Flag | Meaning |
 |---|---|
-| `--page <PAGE>` | Restrict to these pages (path or id), and read their comments again. Repeatable. |
+| `--page <PAGE>` | Restrict to these pages (path or id), and read their attachments and comments again. Repeatable. |
 | `--since <RFC3339>` | Only pages modified at or after this timestamp. |
 
 A comment added or edited in Confluence does not change its page's version, so `fetch`
@@ -172,9 +172,17 @@ lists the ones that had changed. `--page` reads the named pages' comments regard
 which is also what sees a deleted comment. `--since` skips the check. See
 [sync.md](sync.md#comments-change-without-their-page).
 
-Exits 8 if some pages failed after retries, or the comments of some could not be read;
-the failures are listed in `result.failed` and repeated as warnings. A comment search that
-fails is a warning (`result.comment_check_failed`), not a failure.
+Attachments are looked for the same way, for the same reason — attaching a file to a
+page, or uploading one into a comment on it, changes no page version:
+`result.attachments_refreshed` counts the unchanged pages whose attachments were listed
+again and `result.attachments_changed` lists the ones where the list had changed. `fetch`
+only records that; the files are downloaded, and the copies of deleted ones removed, by
+`pull`. See [sync.md](sync.md#attachments-change-without-their-page).
+
+Exits 8 if some pages failed after retries, or the attachments or comments of some could
+not be read; the failures are listed in `result.failed` and repeated as warnings. A search
+that fails is a warning (`result.attachment_check_failed`, `result.comment_check_failed`),
+not a failure.
 
 ```bash
 confed fetch
@@ -209,6 +217,18 @@ added or edited on the server is listed in `result.updated` with `"ops": ["comme
 Naming pages (paths, `--page`, `--label`, `--cql`), `--force` and `--reset` read the
 comments of every page in scope directly, which is what also picks up a comment deleted
 on the server. See [sync.md](sync.md#comments-change-without-their-page).
+
+Attachments are pulled the same way. A page that had a file attached or replaced on the
+server — on the page, or through a comment — is listed in `result.updated` with `"ops":
+["attachments"]` (or `["attachments", "comments"]`): the file is downloaded into the
+sidecar and `confed.attachments` in the page's frontmatter is rewritten, while the page's
+text and version stay as they were. `result.attachments_downloaded` counts the files
+written. An attachment **deleted** on the server is found when the page is named, or
+under `--force` or `--reset`: its entry leaves the frontmatter, its copy leaves the
+sidecar, and `result.attachments_removed` counts it. A file you changed locally is never
+overwritten or removed by a plain pull — it is kept, with a warning saying what the
+server has. A file that fails to download is a warning too, and the next pull asks for it
+again. See [sync.md](sync.md#attachments-change-without-their-page).
 
 ```bash
 confed pull                                  # the whole space
@@ -390,13 +410,16 @@ uploaded by the next `push`.
 | Flag | Meaning |
 |---|---|
 | *(positional)* | `<PAGE> [FILES...]` |
-| `--list` | List the page's attachments as of the last fetch. |
+| `--list` | List the page's attachments as of the last fetch or pull. |
 | `--remote` | With `--list`, ask the server instead of the local state. |
 | `--rm <FILENAME>` | Remove an attachment by filename. |
 | `--push` | Upload immediately; with `--rm`, delete on the server immediately. |
 
 `--list` reads the local state, so it is only as fresh as the last `fetch`; the JSON
-says which it is in `result.source` (`cache` or `server`).
+says which it is in `result.source` (`cache` or `server`). Each local entry says whether
+the file is in the sidecar (`downloaded`); one that is not arrives with the next `confed
+pull`. A plain `pull` brings in files added to any page, and `confed pull <page>` also
+notices one deleted from that page.
 
 `--rm` always removes the local file, and reports what happened on the server rather
 than assuming. With `--push` it deletes the attachment there and then, and
@@ -404,7 +427,9 @@ than assuming. With `--push` it deletes the attachment there and then, and
 `result.staged` is `true`, and the next `confed push --allow-delete` applies it.
 Removing a name that is neither in the sidecar nor on the page is exit 6, not a
 silent success. `--rm --push` cannot delete the page itself, whatever else is
-staged for it — only the attachment.
+staged for it — only the attachment. An attachment the server has in a version that
+was never pulled here is refused with exit 7: `confed pull` the page first, so that
+what is deleted is a file this workspace has seen.
 
 ```bash
 confed attach "Team Handbook/Onboarding.md" ./diagram.png

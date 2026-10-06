@@ -4,7 +4,7 @@
   "title": "confed fetch result",
   "description": "The `result` of `confed fetch --json`. fetch only updates .state.db; it never writes a page file.",
   "type": "object",
-  "required": ["fetched", "unchanged", "deleted_on_remote", "failed", "resumed", "comments_refreshed", "comments_changed"],
+  "required": ["fetched", "unchanged", "deleted_on_remote", "failed", "resumed", "comments_refreshed", "comments_changed", "attachments_refreshed", "attachments_changed"],
   "properties": {
     "fetched": { "type": "integer", "minimum": 0, "description": "Pages whose body was downloaded." },
     "unchanged": { "type": "integer", "minimum": 0, "description": "Pages already at the server's version." },
@@ -15,7 +15,7 @@
     },
     "failed": {
       "type": "array",
-      "description": "Pages that could not be fetched, or whose comments could not be read. Non-empty means exit 8.",
+      "description": "Pages that could not be fetched, or whose attachments or comments could not be read. Non-empty means exit 8.",
       "items": {
         "type": "object",
         "required": ["page_id", "title", "error"],
@@ -43,6 +43,20 @@
     "comment_check_failed": {
       "type": "string",
       "description": "Present when the server could not be asked which comments changed, with the reason. Comments of unchanged pages may then be out of date; the same is in `warnings`."
+    },
+    "attachments_refreshed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Pages at an unchanged version whose attachments were listed again. An attachment has a version of its own: attaching a file to a page, or uploading one into a comment on it, does not change the page's."
+    },
+    "attachments_changed": {
+      "type": "array",
+      "description": "Of those, the page ids whose attachments had changed. `confed pull` downloads the new files, removes the local copies of deleted ones and updates the page's frontmatter.",
+      "items": { "type": "string" }
+    },
+    "attachment_check_failed": {
+      "type": "string",
+      "description": "Present when the server could not be asked which attachments changed, with the reason. Attachments of unchanged pages may then be out of date; the same is in `warnings`."
     }
   }
 }

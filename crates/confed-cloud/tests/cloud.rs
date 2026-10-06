@@ -5,8 +5,8 @@
 
 use confed_api::{
     ApiError, Attachment, AttachmentId, Auth, BodyFormat, CommentActivity, CommentKind,
-    ConfluenceClient, Http, InlineAnchor, NewPage, PageId, PageStatus, PageUpdate, Position,
-    RetryPolicy, SpaceId,
+    ConfluenceClient, ContentActivity, Http, InlineAnchor, NewPage, PageId, PageStatus, PageUpdate,
+    Position, RetryPolicy, SpaceId,
 };
 use confed_cloud::CloudClient;
 use serde_json::json;
@@ -752,5 +752,44 @@ async fn recent_comment_activity_searches_the_space_by_key() {
     {
         let activity = c.recent_comment_activity(&space, 20).await.unwrap();
         assert_eq!(activity, CommentActivity::Pages(vec![PageId::new("1001")]));
+    }
+}
+
+/// The same for attachments: v2 lists them page by page, so the pages with a
+/// file added or replaced are asked of CQL too.
+#[tokio::test]
+async fn recent_attachment_activity_searches_the_space_by_key() {
+    let server = MockServer::start().await;
+    mount_space_lookup(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/wiki/rest/api/search"))
+        .and(query_param(
+            "cql",
+            r#"space = "DOCS" and type = attachment and lastmodified >= now("-20m")"#,
+        ))
+        .and(query_param("expand", "content.container"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "content": {
+                    "id": "att3001", "type": "attachment", "status": "current",
+                    "title": "diagram.png",
+                    "container": { "id": "1001", "type": "page", "title": "Team Handbook" }
+                },
+                "title": "diagram.png",
+                "url": "/spaces/DOCS/pages/1001/Team+Handbook?preview=%2F1001%2F3001%2Fdiagram.png",
+                "lastModified": "2026-08-30T09:00:00.000Z"
+            }],
+            "start": 0, "limit": 100, "size": 1, "_links": {}
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    for space in
+        [SpaceId::from_key("DOCS"), SpaceId { key: String::new(), numeric: Some("500".into()) }]
+    {
+        let activity = c.recent_attachment_activity(&space, 20).await.unwrap();
+        assert_eq!(activity, ContentActivity::Pages(vec![PageId::new("1001")]));
     }
 }

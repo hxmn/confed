@@ -164,8 +164,9 @@ it.
 
 **Symptom.** `confed fetch` or `confed push` finishes, reports some successes, and exits 8.
 `result.failed` lists each page with its error. For a fetch, that includes a page whose
-comments could not be read: the comments already in the workspace are kept, and the next
-fetch asks again.
+attachments or comments could not be read: the ones already in the workspace are kept —
+a list that could not be read is never taken for an empty one — and the next fetch asks
+again.
 
 **Cause.** Some operations succeeded and some did not. confed does not roll back the
 successes: a fetch that could not read one restricted page still updated the other three
@@ -353,6 +354,34 @@ confed comment list 1001 --refresh
 
 `confed comment list --json` reports `checked_at`: when confed last asked the server
 about comment changes. See [sync.md](sync.md#comments-change-without-their-page).
+
+### A file attached in Confluence is not here, or a deleted one still is
+
+**Symptom.** A file somebody attached to a page — or dropped into a comment on it — is
+missing from the page's sidecar and from `confed attach <page> --list`, while `confed
+attach <page> --list --remote` shows it. Or the other way round: a file deleted in the
+browser is still in the sidecar.
+
+**Cause.** An attachment has a version of its own; attaching, replacing or deleting one
+does not change its page's. `pull` finds files that were **added or replaced** by
+searching for them, on every run, and downloads them. It cannot find one that was
+**deleted** — a search does not return what is gone. A pull that printed `could not ask
+the server which attachments changed` did not search at all. (confed 0.9.0 and older did
+not look at all unless the page itself changed; the first fetch after upgrading lists
+every page's attachments once and catches up.)
+
+**Fix.** Name the page. Each of these lists its attachments directly, downloads what is
+new and removes the copy of what was deleted:
+
+```bash
+confed pull "Team Handbook/Onboarding.md"
+confed pull --page 1001
+```
+
+If the pull instead warns that a file `is not the copy confed downloaded, so it is kept`,
+the file was changed locally and confed will not overwrite or remove it on its own:
+`confed pull --force <page>` takes the server's version, `confed push` uploads yours.
+See [sync.md](sync.md#attachments-change-without-their-page).
 
 ### Files that confed seems to ignore
 

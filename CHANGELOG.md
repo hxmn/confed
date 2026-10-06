@@ -20,6 +20,86 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-06
+
+### Fixed
+
+- **A file attached to a page in Confluence never reached the workspace unless the page
+  changed too** — and neither did a file uploaded while writing a comment, which
+  Confluence stores as an attachment of the page. An attachment has a version of its own,
+  like a comment: attaching one leaves the page's version where it was, and confed
+  listed a page's attachments only when that version moved. Such files were missing from
+  the sidecar, from `confed.attachments` in the frontmatter and from `attach --list`;
+  `pull`, `pull --page <id>` and `pull --force --page <id>` all answered `updated: []`
+  and `attachments_downloaded: 0`, and said nothing. On Data Center a push made it
+  permanent, since the push takes the page's new version itself. Now:
+  - Every `fetch` (so every `pull`) asks the server which pages had a file attached or
+    replaced since its last check — one more CQL search, by age on the server's own
+    clock — and lists those pages' attachments again. `fetch` reports them as
+    `attachments_refreshed` and `attachments_changed`.
+  - A page that is named has its attachments listed whatever the search says: `pull
+    <page>`, `pull --page`, `--label`, `--cql`, `fetch --page`, and every page in scope
+    under `pull --force` or `--reset`. This is also what picks up an attachment
+    **deleted** on the server, which no search can return.
+  - `push` lists the attachments of every page it wrote to.
+  - `pull` brings the sidecar of every page in scope in line, not only of the pages it
+    rewrote: new files and new versions are downloaded, and `confed.attachments` in the
+    frontmatter is rewritten — that block and nothing else, so the page does not become
+    modified. Such a page is listed under `updated` with `"ops": ["attachments"]` (or
+    `["attachments", "comments"]`) and equal versions; a `--dry-run` says so too.
+  - If the search fails, the fetch still succeeds and warns that attachments of
+    unchanged pages may be out of date; the next check covers the gap.
+  - The first fetch after upgrading lists every page's attachments once, which is what
+    brings in files attached before the upgrade, however long ago.
+- **An attachment deleted on the server stayed in the workspace for good**: its entry in
+  the frontmatter, its row in `attach --list`, and its file in the sidecar. The stored
+  list is now replaced by what the server lists rather than only added to; the entry
+  goes, and `pull` removes the local copy and counts it in `attachments_removed`. Until
+  that pull, `push` reports the copy as skipped instead of uploading it back.
+- A fetch that could not list a page's attachments recorded nothing and reported
+  nothing. The page is now listed under `failed`, what the workspace has is kept, and
+  the next fetch asks again.
+- **`push --allow-delete` could delete an attachment nobody had removed.** An attachment
+  a fetch had listed and no pull had downloaded yet was missing from the sidecar, which
+  read as "deleted locally". Only a file whose current version was downloaded here, and
+  is gone since, is a deletion; `attach --rm` on one that was never pulled is refused
+  (exit 7) with the instruction to pull first.
+- `pull` overwrote an attachment you had edited locally whenever its page changed on the
+  server, and downloaded again one you had removed in order to delete it. A file in the
+  sidecar that is not the copy confed wrote is local work: a plain pull keeps it and
+  warns when the server has a newer version or has deleted the attachment. `pull
+  --force` takes the server's side, and `pull --reset` restores what was changed or
+  removed, as before.
+- An attachment that failed to download ended the pull with an error after its page had
+  been written, and was not asked for again until the page next changed. It is now a
+  warning, the rest of the pull stands, and the next pull retries it.
+- A file attached from here was not listed in the page's frontmatter until the page was
+  next pulled; `push` now lists it straight away.
+- An attachment deleted on the server and attached again under the same name stopped the
+  fetch with a database error.
+- A page renamed on the server had all its attachments downloaded again; they now move
+  with the sidecar.
+- An attachment whose name could not be a file in the sidecar — one containing a path
+  separator, or called `comments.md` or `storage.xml` — was written wherever that name
+  led. It is now left out, with a log line saying so.
+
+### Changed
+
+- `pull` no longer downloads the unchanged attachments of a page again each time the
+  page is edited on the server.
+- `confed.attachments` in the frontmatter gives a `sha256` only for a file that is in the
+  sidecar at the server's current version. An entry without one is a file the next pull
+  downloads.
+
+### Added
+
+- `pull` warns when a comment shows or links a file that is not among its page's
+  attachments — `comment <id> references <file>, which is not among the page's
+  attachments` — for the pages it changed or was pointed at.
+- `pull` reports `attachments_removed`; `fetch` reports `attachments_refreshed`,
+  `attachments_changed` and, when the search failed, `attachment_check_failed`.
+- The agent guide says that attachments go stale on their own, and how to check.
+
 ## [0.9.0] - 2026-10-06
 
 ### Added
@@ -616,7 +696,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/hxmn/confed/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/hxmn/confed/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/hxmn/confed/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/hxmn/confed/compare/v0.8.0...v0.8.1

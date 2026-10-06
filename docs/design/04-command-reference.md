@@ -104,13 +104,14 @@ touching working files. Resumable (`fetch_queue`); re-run continues after interr
 
 - Flags: `--page <path|id>…`, `--since <ISO8601>` (CQL `lastmodified >=` narrowing),
   `--prune` is implicit (deletions are recorded, files untouched).
-- Comments have their own versions, so fetch also asks which pages were commented on
-  since its last check (CQL) and re-reads those pages' comments; `--page` re-reads the
-  named pages' regardless.
+- Comments and attachments have their own versions, so fetch also asks which pages were
+  commented on, and which had a file attached, since its last check (CQL) and re-reads
+  those pages' comments and attachment lists; `--page` re-reads the named pages'
+  regardless.
 - Exit: 0; 5 network; 8 if some pages failed after retries.
 - JSON `result`: `{ "fetched": 42, "unchanged": 310, "deleted_on_remote": 2,
   "failed": [], "resumed": false, "comments_refreshed": 3, "comments_changed": ["1001"],
-  "duration_ms": … }`
+  "attachments_refreshed": 2, "attachments_changed": ["1002"], "duration_ms": … }`
 
 ```bash
 confed fetch
@@ -130,7 +131,9 @@ Fetch (skippable with `--no-fetch`) + materialize files/hierarchy/attachments/co
 - `--dry-run`: report planned writes/merges without touching disk.
 - JSON `result`: `{ "updated": [{"page_id","path","from_version","to_version"}…],
   "created": […], "deleted": […], "merged": […], "conflicted": [{"page_id","path"}…],
-  "skipped_dirty": […], "attachments_downloaded": 7 }`
+  "skipped_dirty": […], "attachments_downloaded": 7, "attachments_removed": 0 }`
+- A page of which only the attachments or comments changed is in `updated` with
+  `"ops": ["attachments"]`, `["comments"]` or both, and equal versions.
 
 ```bash
 confed pull                                   # whole space

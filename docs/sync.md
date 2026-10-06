@@ -74,9 +74,11 @@ that disappeared from the listing as deleted. Bodies are queued in `.state.db` b
 are downloaded, so an interrupted fetch resumes instead of restarting — the JSON result
 reports `"resumed": true` when it did. Nothing on disk changes.
 
-Comments are looked for separately, because a comment has a version of its own: adding or
-editing one in Confluence leaves the page's version where it was, so the listing cannot
-show it. See [Comments change without their page](#comments-change-without-their-page).
+Comments and attachments are looked for separately, because each has a version of its
+own: adding or editing a comment, or attaching a file, leaves the page's version where it
+was, so the listing cannot show it. See
+[Comments change without their page](#comments-change-without-their-page) and
+[Attachments change without their page](#attachments-change-without-their-page).
 
 **`pull`** fetches first (unless `--no-fetch`), then plans and writes. Planning happens in
 full before anything is written: if any page in scope would lose local work, nothing is
@@ -109,7 +111,10 @@ old file removed, and the move is reported in `result.moved`.
 
 A page whose comments changed on the server while the page did not is reported under
 `result.updated` with `"ops": ["comments"]` and equal `from_version` and `to_version`:
-its `comments.md` and the comment marks in its body were rewritten, nothing else.
+its `comments.md` and the comment marks in its body were rewritten, nothing else. One
+whose attachments changed has `"ops": ["attachments"]`: files in its sidecar were
+downloaded or removed and the `attachments` list in its frontmatter rewritten. A page can
+have both.
 
 **`push`** builds a plan, refuses anything unsafe, then applies it. Creates run
 parent-first so a child always has a parent to attach to; deletes run child-first so a
@@ -256,6 +261,62 @@ covers the gap, since the mark it searches from only moves when a check succeeds
 A workspace that has never checked — one last synced by confed 0.8.1 or older — reads
 every page's comments once on its next fetch, since nothing says how old they are.
 
+## Attachments change without their page
+
+An attachment has a version of its own as well. Attaching a file to a page, uploading a
+new version of one, or deleting one does not change the page's version — and neither does
+dropping a file into a comment, which Confluence stores as an attachment of the page the
+comment is on. So attachments are looked for the way comments are:
+
+- **Every fetch asks the server which pages had a file attached or replaced since the
+  last check** — a second CQL search (`space = … and type = attachment and lastmodified
+  >= now("-…m")`) — and lists the attachments of those pages again. The result reports
+  the pages listed as `attachments_refreshed` and the ones whose list had changed as
+  `attachments_changed`.
+- **A page you name has its attachments listed whatever the search says**: `confed pull
+  <page>`, `pull --page <id>`, `pull --label`, `pull --cql` and `fetch --page <id>`. So
+  does every page under `pull --force` and `pull --reset`.
+- **A push lists the attachments of every page it wrote to.** On Data Center a push gives
+  the page its new version itself, so nothing afterwards would prompt a look.
+
+Listing a page is what sees an attachment that was **deleted**: the search returns only
+what exists. A plain `confed pull` therefore brings in every file added or replaced
+anywhere in the space, and a deletion reaches the workspace when the page is named,
+pushed, or changes itself.
+
+`fetch` records what the server has; `pull` does the file work, for every page in scope
+whether or not the page itself changed:
+
+- A file that is new, or has a new version, is downloaded into the sidecar.
+- The copy of an attachment the server no longer has is removed.
+- The `attachments` list in the page's frontmatter is rewritten to match. Nothing else in
+  the file is touched, and the page does not become modified.
+
+**Local work is not overwritten.** confed remembers the hash of each copy it wrote. A
+file in the sidecar that is not that copy — one you edited, or one you put there under a
+name somebody else then attached a file by — is kept, and the pull warns that the server
+has a newer version or has deleted the attachment. `confed pull --force` on the page takes
+the server's side; `confed push` uploads yours as the newest version. A file you removed
+from the sidecar, which is how deleting an attachment starts, is likewise not downloaded
+again by a plain pull; `pull --reset` restores it.
+
+Between a fetch that saw an attachment deleted and the pull that removes its copy, `push`
+does not upload that copy back: it reports the file as skipped. And a push never plans
+the deletion of an attachment that was listed but not downloaded yet — a file missing
+from the sidecar because it never arrived is not one you removed.
+
+If the search fails, the fetch still succeeds and warns that attachments of unchanged
+pages may be out of date; the next check covers the gap. A file that cannot be
+downloaded is a warning, and the next pull asks for it again.
+
+A workspace that has never checked attachments — one last synced by confed 0.9.0 or older
+— lists every page's attachments once on its next fetch. That is also what brings in
+files attached before the upgrade, however long ago.
+
+When a comment shows or links a file that is not among its page's attachments — deleted
+since, usually — the pull that brings the comment in, or that names the page, says so:
+`comment 98211 references diagram.png, which is not among the page's attachments`.
+
 ## Optimistic version checking
 
 Confluence updates are optimistic: you send the version number you expect the page to
@@ -349,18 +410,20 @@ confed pull --reset              # throw it away
 ## What a fetch actually costs
 
 A page body at a given version never changes, so confed downloads it once and keeps it in
-`.pages.db`, keyed by page and version. `fetch` then asks the server two questions — which
-versions exist, and which pages were commented on since the last check — and takes
-everything else from the cache:
+`.pages.db`, keyed by page and version. `fetch` then asks the server three questions —
+which versions exist, which pages were commented on since the last check, and which had a
+file attached — and takes everything else from the cache:
 
-- **Nothing changed upstream.** The listing and one search, whatever the size of the space.
+- **Nothing changed upstream.** The listing and two searches, whatever the size of the
+  space.
 - **Some pages changed.** The same, plus a body, attachment list and comment list for
-  each page whose version moved, and a comment list for each unchanged page that was
-  commented on.
+  each page whose version moved, a comment list for each unchanged page that was
+  commented on, and an attachment list for each one that had a file attached.
 - **`.state.db` was rebuilt** — a fresh clone, or `confed init` over an existing tree.
-  Still the same two: every body is already cached, and the attachment and comment
+  Still the same three: every body is already cached, and the attachment and comment
   snapshots taken alongside each one are restored with it. The cache records when its
-  comments were last current, and the search picks up from there.
+  comments and its attachment lists were last current, and the searches pick up from
+  there.
 
 The cache keeps the last few versions of each page, so a page reverted on the server also
 costs nothing. Deleting `.pages.db` is always safe; the next fetch downloads what it needs
