@@ -138,10 +138,13 @@ confed init --space RUNBOOKS --force
 
 ## confed clone
 
-`init` plus a first `pull`, into a new directory.
+`init` plus a first `pull`, into a new directory — for one space, or with `--all` for every
+space you can see.
 
 ```
-confed clone <SOURCE> [DIRECTORY] [init flags]
+confed clone <SOURCE> [DIRECTORY] [--from <WORKSPACE>] [init flags]
+confed clone --all [ROOT] [--from <WORKSPACE>] [--pull] [--type global|personal]
+             [--include <KEY>]... [--exclude <KEY>]... [init flags]
 ```
 
 `SOURCE` is a space key or a space URL. A URL supplies both the base URL and the key, and
@@ -149,11 +152,70 @@ both Cloud (`/wiki/spaces/DOCS/...`) and Data Center (`/display/DOCS/...`, with 
 a context path) are understood. `DIRECTORY` defaults to the space key and must not already
 exist with content in it.
 
+| Flag | Meaning |
+|---|---|
+| `--from <WORKSPACE>` | Take the base URL, flavor, user and token from an existing workspace. |
+| `--all` | Clone every space, each into `ROOT/<KEY>`. `ROOT` defaults to the current folder. |
+| `--pull` | With `--all`: pull the spaces already cloned instead of skipping them. |
+| `--type <global\|personal>` | With `--all`: which spaces to take. Default `global`, which is every space that is not personal. |
+| `--include <KEY>` | With `--all`: take only the spaces named, of either type. Repeatable. |
+| `--exclude <KEY>` | With `--all`: leave this space out. Repeatable; wins over `--include`. |
+
+Plus `init`'s `--credential-store`, `--no-agent-docs` and `--force`.
+
 ```bash
 confed clone https://acme.atlassian.net/wiki/spaces/DOCS --user you@example.com
 confed clone DOCS ./docs --base-url https://wiki.corp.example.com/confluence
 confed clone DOCS --json | jq '.result.pull.created | length'
 ```
+
+### Reusing another workspace's credential
+
+`--from` reads the source workspace's `.state.db` and `.session.db`, and its keyring entry
+when the token is kept there, so a second space on the same instance needs nothing typed:
+
+```bash
+confed clone ENG --from ../DOCS
+```
+
+The borrowed values stand where a workspace's own stored settings would: `--token`,
+`--user` and `--base-url`, or their `CONFED_*` variables, still win. A `--base-url`, space
+URL or `--flavor` that does not match the source is refused with exit 2 rather than
+sending its token to another host. The credential is checked with `whoami` before anything
+is written (exit 3 if it has been revoked), and is stored the way the source stores it
+unless `--credential-store` says otherwise. [auth.md](auth.md#reusing-a-credential-across-workspaces)
+covers the keyring case.
+
+Without `--from`, at a terminal, when the folder the new workspace goes into holds exactly
+one workspace (for the same base URL, when one was given), `clone` offers to use its
+credential. It never takes it without asking.
+
+### Cloning every space
+
+`--all` verifies the credential once, lists spaces with the same call `confed spaces`
+uses — every page of them, with no 50-space cap — and clones them one after another, each
+with its own `--concurrency`.
+
+```bash
+confed clone --all ~/wiki --from ~/wiki/DOCS
+confed clone --all --from DOCS --exclude ARCHIVE --pull
+confed clone --all --from DOCS --json | jq -r '.result.spaces[] | "\(.status)\t\(.key)"'
+```
+
+For each space:
+
+- **cloned** — the folder did not exist, or was empty: `init` and a first `pull`.
+- **skipped** — the folder is already a workspace for that space, and is left as it is.
+- **pulled** — the same, with `--pull`: it is pulled instead.
+- **failed** — anything else, recorded with its reason, and the run moves on: a folder in
+  the way, a workspace for another space or instance, an `--include` key the server does
+  not list, a pull that left conflicts.
+
+It ends with a summary line per space. `--json` puts the same in `result.spaces[]`, with
+`key`, `dir`, `status`, `pages` and `error` ([schema](reference/json/clone.schema.json)).
+Any failed space makes the exit code 8. Interrupting the run leaves every space that
+finished untouched; run the same command with `--pull` to resume, which also completes a
+space whose first pull was cut short. `rules_page_id` is left unset in each new workspace.
 
 ## confed fetch
 
@@ -535,7 +597,8 @@ confed search "vpn" --json | jq -r '.result.results[] | "\(.title)\t\(.local_pat
 ## confed spaces
 
 List the spaces visible to your credentials. `--limit <N>` defaults to 50. Useful before
-`init` when you do not know the key.
+`init` when you do not know the key. To clone them all, use
+[`confed clone --all`](#cloning-every-space).
 
 ```bash
 confed spaces

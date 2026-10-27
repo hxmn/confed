@@ -92,9 +92,15 @@ CONFED_TOKEN=$TOKEN confed init --base-url https://wiki.corp --space DOCS --json
 infers base-url and space from the URL; creates `dir` (default: space key). Same flags as
 both; JSON result = init result + pull summary.
 
+`--from <workspace>` takes base URL, flavor, user and token from an existing workspace.
+`--all [root]` clones every visible space (paged, filtered by `--type global|personal`,
+`--include`, `--exclude`) into `root/<KEY>`, skipping folders already cloned (`--pull`
+pulls them), and reports `result.spaces[]`; exit 8 if any space failed.
+
 ```bash
 confed clone https://acme.atlassian.net/wiki/spaces/DOCS
 confed clone DOCS ./docs --base-url https://wiki.corp --json
+confed clone --all ~/wiki --from ~/wiki/DOCS
 ```
 
 ### `confed fetch`

@@ -120,6 +120,39 @@ Force either backend with `confed init --credential-store keyring|sqlite`. Reque
 `keyring` when none is available is an error rather than a silent downgrade, which is what
 you want in a hardened environment.
 
+## Reusing a credential across workspaces
+
+Each workspace keeps its own copy of the credential, so a second space on the same
+instance would ask for the token again. `confed clone --from` copies it from a workspace
+that already has it instead — the base URL, flavor, auth method and user from its
+`.state.db` and `.session.db`, and the secret from wherever that workspace keeps it:
+
+```bash
+confed clone ENG --from ../DOCS             # one more space
+confed clone --all ~/wiki --from ~/wiki/DOCS # every space you can see
+```
+
+- **Precedence is unchanged.** The source stands where stored configuration would, so
+  `--token`, `--user`, `--base-url` and their `CONFED_*` variables still win; with an
+  explicit token the source's secret is not read at all.
+- **The token stays on its instance.** A `--base-url`, space URL or `--flavor` that
+  disagrees with the source is exit 2, not a fallback.
+- **Verified before anything is written.** A source token that has been revoked or has
+  expired is exit 3, and no folder is created.
+- **Stored the same way.** The new workspace keeps the secret in the source's backend
+  unless `--credential-store` says otherwise. Keyring entries are per base URL and user,
+  so two keyring workspaces on one instance share one entry.
+- **The keyring may ask.** Reading a keyring entry can raise a password dialog. Without a
+  terminal — `--json`, `--non-interactive`, or no TTY — nobody can answer it, so confed
+  does not try: it exits 2 and suggests `--token`, or
+  `confed -C ../DOCS config --no-keychain` to move the source's credential where it can be
+  read without a prompt. At a terminal, a keyring that cannot be read falls back to asking
+  for the token.
+
+At a terminal, `clone` without `--from` also offers the credential of the one workspace
+already in the target's parent folder (for the same base URL, when one was given). It
+asks first, and with more than one candidate it offers none.
+
 ## CI and automation
 
 **Use `CONFED_TOKEN` and do not run `confed init` for the credential.** The environment
@@ -163,7 +196,8 @@ committing it.
 formatted accidentally, `--token`'s environment value is hidden from `--help`,
 `confed config --list` masks it as `***`, and no tracing level — including `-vvv` —
 emits the credential. The end-to-end tests assert that the token appears in neither
-stdout nor stderr of a successful `init`.
+stdout nor stderr of a successful `init`, nor of `clone --from` and `clone --all`,
+succeeding or failing.
 
 **`.state.db`, `.session.db` and `.confed.lock` are added to `.gitignore`** by `init`, and
 `confed doctor` warns if any of them is missing (`--fix` re-adds them). `.state.db` is

@@ -224,11 +224,40 @@ pub struct InitArgs {
 
 #[derive(Args, Debug)]
 pub struct CloneArgs {
-    /// Space key, or a Confluence space URL.
-    pub source: String,
+    /// Space key, or a Confluence space URL. With --all: the folder to clone
+    /// the spaces into (defaults to the current one).
+    #[arg(required_unless_present = "all")]
+    pub source: Option<String>,
 
     /// Directory to create (defaults to the space key).
+    // Its own id: `directory` is already -C's, and clap would let one
+    // overwrite the other.
+    #[arg(id = "target", value_name = "DIRECTORY", conflicts_with = "all")]
     pub directory: Option<PathBuf>,
+
+    /// Use the base URL, flavor and credential of this existing workspace.
+    #[arg(long, value_name = "WORKSPACE")]
+    pub from: Option<PathBuf>,
+
+    /// Clone every space you can see, each into ROOT/KEY.
+    #[arg(long)]
+    pub all: bool,
+
+    /// With --all: pull the spaces already cloned instead of skipping them.
+    #[arg(long, requires = "all")]
+    pub pull: bool,
+
+    /// With --all: which kind of space to clone [default: global].
+    #[arg(long = "type", value_name = "TYPE", value_parser = ["global", "personal"], requires = "all")]
+    pub space_type: Option<String>,
+
+    /// With --all: clone only this space, of either type. Repeatable.
+    #[arg(long = "include", value_name = "KEY", requires = "all")]
+    pub include: Vec<String>,
+
+    /// With --all: leave this space out. Repeatable.
+    #[arg(long = "exclude", value_name = "KEY", requires = "all")]
+    pub exclude: Vec<String>,
 
     #[command(flatten)]
     pub init: InitArgs,
@@ -609,6 +638,7 @@ pub enum UserCommand {
 
 #[derive(Args, Debug)]
 pub struct SpacesArgs {
+    /// How many spaces to list. `confed clone --all` takes every one.
     #[arg(long, default_value = "50")]
     pub limit: usize,
 }

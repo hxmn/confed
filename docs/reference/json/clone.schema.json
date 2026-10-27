@@ -2,11 +2,59 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/clone.schema.json",
   "title": "confed clone result",
-  "description": "The `result` of `confed clone --json`: the init result and the first pull's outcome, side by side.",
-  "type": "object",
-  "required": ["init", "pull"],
-  "properties": {
-    "init": { "description": "As described by init.schema.json.", "type": "object" },
-    "pull": { "description": "As described by pull.schema.json.", "type": "object" }
+  "description": "The `result` of `confed clone --json`. For one space: the init result and the first pull's outcome, side by side. With `--all`: one entry per space.",
+  "anyOf": [
+    { "$ref": "#/$defs/one" },
+    { "$ref": "#/$defs/all" }
+  ],
+  "$defs": {
+    "one": {
+      "type": "object",
+      "required": ["init", "pull"],
+      "properties": {
+        "init": { "description": "As described by init.schema.json.", "type": "object" },
+        "pull": { "description": "As described by pull.schema.json.", "type": "object" }
+      }
+    },
+    "all": {
+      "type": "object",
+      "description": "`confed clone --all`. The exit code is 8 when any space failed.",
+      "required": ["root", "base_url", "flavor", "user", "spaces"],
+      "properties": {
+        "root": { "type": "string", "description": "The folder each space was cloned into, as <root>/<KEY>." },
+        "base_url": { "type": "string" },
+        "flavor": { "type": "string", "enum": ["cloud", "datacenter"] },
+        "user": {
+          "type": "object",
+          "required": ["display_name"],
+          "properties": {
+            "account_id": { "type": ["string", "null"] },
+            "display_name": { "type": "string" },
+            "email": { "type": ["string", "null"] }
+          }
+        },
+        "spaces": {
+          "type": "array",
+          "description": "Every space taken, ordered by key, then any --include key the server did not list.",
+          "items": {
+            "type": "object",
+            "required": ["key", "dir", "status", "pages", "error"],
+            "properties": {
+              "key": { "type": "string" },
+              "name": { "type": "string" },
+              "dir": { "type": "string" },
+              "status": {
+                "type": "string",
+                "description": "`cloned`: new folder, pulled. `pulled`: already cloned, pulled because of --pull. `skipped`: already cloned, left as it was. `failed`: see `error`.",
+                "enum": ["cloned", "pulled", "skipped", "failed"]
+              },
+              "pages": { "type": ["integer", "null"], "minimum": 0, "description": "Pages in the workspace afterwards; null when the space failed." },
+              "error": { "type": ["string", "null"], "description": "Why the space failed, with what to do about it." },
+              "code": { "type": ["string", "null"], "description": "The failure's error code, as in the envelope's `errors`." }
+            }
+          }
+        }
+      }
+    }
   }
 }

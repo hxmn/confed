@@ -20,6 +20,39 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-27
+
+### Added
+
+- **`confed clone --from <workspace>` reuses a credential you already stored.** Each
+  workspace keeps its own copy, so a second space on the same instance asked for the
+  token again, and without a terminal exited 2. `--from` reads the base URL, flavor,
+  auth method, user and token from another workspace — from its `.session.db` or its
+  keyring entry — checks them with `whoami` before writing anything (exit 3 if the token
+  has been revoked), and stores the token the way that workspace does unless
+  `--credential-store` says otherwise. `--token`, `--user` and `--base-url` still win; a
+  base URL, space URL or flavor that disagrees with the source is exit 2, so the token is
+  never sent to another host. A token in the keyring is not read without a terminal,
+  where nobody could answer a keychain dialog: the error suggests `--token` or
+  `confed config --no-keychain` in the source. At a terminal, without `--from`, `clone`
+  offers the credential of the one workspace beside the new one, and asks first.
+- **`confed clone --all [root]` clones every space you can see**, each into
+  `root/<KEY>`, one after another. It pages through the whole space list, takes the global
+  spaces (`--type personal` for the others), and narrows with `--include` and `--exclude`.
+  A folder that is already the space's workspace is skipped, or pulled with `--pull`; a
+  space that fails is recorded and the rest still run. It ends with a line per space —
+  `result.spaces[]` under `--json`, with `key`, `dir`, `status`, `pages` and `error` —
+  and exits 8 if any space failed. Interrupted, it leaves finished spaces alone, and the
+  same command with `--pull` resumes.
+
+### Fixed
+
+- **`confed -C <dir> clone <space> <directory>` ignored `-C`.** The two shared a name
+  inside the argument parser, so the target directory replaced the working directory.
+  `-C` is now honoured, and `DIRECTORY` is relative to it.
+- **`confed clone <space URL>` asked for the base URL, or without a terminal failed for
+  the lack of one,** although the URL carries it. The URL is now read first.
+
 ## [0.9.2] - 2026-10-06
 
 ### Fixed
@@ -732,7 +765,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/hxmn/confed/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/hxmn/confed/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/hxmn/confed/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/hxmn/confed/compare/v0.8.2...v0.9.0

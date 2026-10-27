@@ -7,17 +7,19 @@ use crate::cli::InitArgs;
 use crate::context::Context;
 use crate::output::Output;
 use crate::prompt;
-use confed_api::{Auth, ConfluenceClient, Flavor, Secret};
-use confed_core::config;
+use confed_api::{Auth, ConfluenceClient, Flavor, Secret, User};
+use confed_core::config::{self, Source};
 use confed_core::error::{ConfedError, Result};
 use confed_core::session::{AuthMethod, SecretBackend, Session, SessionStore};
 use confed_core::state::now;
 use confed_core::workspace::{self, Workspace};
 use serde_json::json;
 use std::fmt::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Credentials gathered before the runtime starts.
+#[derive(Clone)]
 pub struct InitInput {
     pub base_url: String,
     pub username: Option<String>,
@@ -27,25 +29,156 @@ pub struct InitInput {
     pub credential_store: Option<SecretBackend>,
 }
 
-pub fn prepare(ctx: &mut Context, args: &InitArgs) -> Result<InitInput> {
-    let base_url = ctx.base_url()?.value.trim_end_matches('/').to_string();
+/// What `clone` knows before credentials are resolved.
+#[derive(Default)]
+pub struct Known {
+    /// The base URL out of a space URL given as the source.
+    pub base_url: Option<String>,
+    pub space: Option<String>,
+    /// The workspace `clone --from` borrows from.
+    pub from: Option<Borrowed>,
+}
 
-    let flavor_hint = match &ctx.global.flavor {
+/// An existing workspace whose instance and credential a new one reuses. Its
+/// settings stand where a workspace's own stored ones would: below flags and
+/// the environment, above prompting.
+pub struct Borrowed {
+    pub root: PathBuf,
+    pub base_url: String,
+    pub flavor: Flavor,
+    pub session: Session,
+}
+
+impl Borrowed {
+    /// Read `.state.db` and `.session.db` under `path`. The secret itself is
+    /// read later, and only if no flag or variable supplies one.
+    pub fn load(path: &Path) -> Result<Self> {
+        let ws = Workspace::discover(path).map_err(|_| {
+            ConfedError::usage_with_hint(
+                format!("{} is not a confed workspace", path.display()),
+                "point --from at a folder made by `confed init` or `confed clone`",
+            )
+        })?;
+        let root = ws.root().to_path_buf();
+        // Opening the store would create it, in somebody else's workspace.
+        let session = match SessionStore::exists(&root) {
+            true => ws.session()?,
+            false => None,
+        }
+        .ok_or_else(|| {
+            ConfedError::usage_with_hint(
+                format!("{} has no stored credential", root.display()),
+                "run `confed init` there first, or pass --token",
+            )
+        })?;
+        let base_url = ws.base_url()?.unwrap_or_else(|| session.base_url.clone());
+        let flavor = ws.flavor()?.unwrap_or(session.flavor);
+        Ok(Self { root, base_url, flavor, session })
+    }
+
+    /// The stored secret. `None` means it could not be read and the caller may
+    /// prompt instead; without a terminal that is an error with a way out.
+    fn secret(&self, interactive: bool) -> Result<Option<Secret>> {
+        let root = self.root.display();
+        // A keyring read can raise a password dialog nobody is there to answer.
+        if self.session.secret_backend == SecretBackend::Keyring && !interactive {
+            return Err(ConfedError::usage_with_hint(
+                format!("the credential of {root} is in the OS keyring, and reading it may prompt"),
+                format!(
+                    "pass --token or set CONFED_TOKEN, or run `confed -C {root} config --no-keychain` \
+                     so it can be read without a prompt"
+                ),
+            ));
+        }
+        let problem = match SessionStore::open(&self.root)?.load_secret(&self.session) {
+            Ok(Some(secret)) if !secret.is_empty() => return Ok(Some(secret)),
+            Ok(_) => "nothing is stored".to_string(),
+            Err(e) => e.to_string(),
+        };
+        if interactive {
+            eprintln!("warning: could not read the credential of {root} ({problem})");
+            return Ok(None);
+        }
+        Err(ConfedError::usage_with_hint(
+            format!("could not read the credential of {root}: {problem}"),
+            "pass --token or set CONFED_TOKEN",
+        ))
+    }
+}
+
+pub fn prepare(ctx: &mut Context, args: &InitArgs) -> Result<InitInput> {
+    prepare_with(ctx, args, Known::default())
+}
+
+pub fn prepare_with(ctx: &mut Context, args: &InitArgs, known: Known) -> Result<InitInput> {
+    let from = known.from.as_ref();
+
+    // A stored base URL is this directory's own setting, which --from overrides.
+    let explicit_base = ctx
+        .resolver
+        .lookup(&config::BASE_URL, ctx.global.base_url.as_deref())
+        .filter(|r| matches!(r.source, Source::Flag | Source::Env))
+        .map(|r| r.value);
+    if let Some(from) = from {
+        // The borrowed token must not be sent anywhere but where it came from.
+        for asked in known.base_url.iter().chain(explicit_base.iter()) {
+            if !same_instance(asked, &from.base_url) {
+                return Err(ConfedError::usage_with_hint(
+                    format!("{} belongs to {}, not {asked}", from.root.display(), from.base_url),
+                    "drop --base-url to clone from that instance, or leave out --from \
+                     and pass --token for this one",
+                ));
+            }
+        }
+    }
+    let base_url = match (from, known.base_url.or(explicit_base)) {
+        (Some(from), _) => from.base_url.clone(),
+        (None, Some(url)) => url,
+        (None, None) => ctx.base_url()?.value,
+    }
+    .trim_end_matches('/')
+    .to_string();
+
+    let flag_flavor: Option<Flavor> = match &ctx.global.flavor {
         Some(flag) => Some(flag.parse().map_err(ConfedError::usage)?),
-        None => confed_api::guess_flavor(&base_url),
+        None => None,
     };
+    if let (Some(flag), Some(from)) = (flag_flavor, from) {
+        if flag != from.flavor {
+            return Err(ConfedError::usage_with_hint(
+                format!(
+                    "{} is a Confluence {} workspace, not {flag}",
+                    from.root.display(),
+                    from.flavor
+                ),
+                "drop --flavor, or leave out --from",
+            ));
+        }
+    }
+    let flavor_hint =
+        flag_flavor.or(from.map(|f| f.flavor)).or_else(|| confed_api::guess_flavor(&base_url));
 
     // Cloud always needs an email alongside the API token; DC uses a bearer PAT.
     let username = match ctx.resolver.lookup(&config::USERNAME, ctx.global.username.as_deref()) {
         Some(resolved) => Some(resolved.value),
-        None if flavor_hint == Some(Flavor::Cloud) => {
-            Some(ctx.resolver.require(&config::USERNAME, None)?.value)
-        }
-        None => None,
+        None => match from.and_then(|f| f.session.username.clone()) {
+            Some(username) => Some(username),
+            None if flavor_hint == Some(Flavor::Cloud) => {
+                Some(ctx.resolver.require(&config::USERNAME, None)?.value)
+            }
+            None => None,
+        },
     };
 
     let secret = match ctx.resolver.lookup(&config::TOKEN, ctx.global.token.as_deref()) {
-        Some(resolved) => Secret::new(resolved.value),
+        Some(resolved) => Some(Secret::new(resolved.value)),
+        None => match from {
+            Some(from) => from.secret(ctx.is_interactive())?,
+            None => None,
+        },
+    };
+    let secret = match secret {
+        Some(secret) => secret,
         None if ctx.is_interactive() => Secret::new(prompt::read_secret(&format!(
             "{} token: ",
             flavor_hint.map(|f| f.to_string()).unwrap_or_else(|| "API".into())
@@ -58,19 +191,45 @@ pub fn prepare(ctx: &mut Context, args: &InitArgs) -> Result<InitInput> {
         return Err(ConfedError::Auth("no token was provided".into()));
     }
 
-    let credential_store = args.credential_store.as_deref().map(|s| match s {
-        "keyring" => SecretBackend::Keyring,
-        _ => SecretBackend::Sqlite,
-    });
+    // A borrowed credential is kept the way its workspace keeps it.
+    let credential_store = args
+        .credential_store
+        .as_deref()
+        .map(|s| match s {
+            "keyring" => SecretBackend::Keyring,
+            _ => SecretBackend::Sqlite,
+        })
+        .or(from.map(|f| f.session.secret_backend));
 
     Ok(InitInput {
         base_url,
         username,
         secret,
         flavor_hint,
-        space: ctx.resolver.lookup(&config::SPACE, ctx.global.space.as_deref()).map(|r| r.value),
+        space: known.space.or_else(|| {
+            ctx.resolver.lookup(&config::SPACE, ctx.global.space.as_deref()).map(|r| r.value)
+        }),
         credential_store,
     })
+}
+
+/// Whether two base URLs name the same Confluence: scheme, host, port and
+/// path, ignoring case in the host and a trailing slash.
+pub fn same_instance(a: &str, b: &str) -> bool {
+    fn normalize(raw: &str) -> String {
+        let raw = raw.trim().trim_end_matches('/');
+        match url::Url::parse(raw) {
+            Ok(url) => format!(
+                "{}://{}:{}{}",
+                url.scheme(),
+                url.host_str().unwrap_or_default(),
+                url.port_or_known_default().unwrap_or_default(),
+                url.path().trim_end_matches('/')
+            ),
+            Err(_) => raw.to_ascii_lowercase(),
+        }
+    }
+    normalize(a) == normalize(b)
 }
 
 pub async fn run(ctx: &mut Context, args: &InitArgs, input: InitInput) -> Result<Output> {
@@ -99,28 +258,8 @@ pub async fn initialize(
         }
     }
 
-    let flavor = match input.flavor_hint {
-        Some(flavor) => flavor,
-        None => {
-            let auth = build_auth(&input, AuthMethod::Pat);
-            confed_api::detect_flavor(&input.base_url, auth).await?
-        }
-    };
-
-    let auth_method = match (flavor, &input.username) {
-        (Flavor::Cloud, _) => AuthMethod::ApiToken,
-        (Flavor::DataCenter, None) => AuthMethod::Pat,
-        (Flavor::DataCenter, Some(_)) => AuthMethod::Basic,
-    };
-    let client = ctx.client_for(flavor, &input.base_url, build_auth(&input, auth_method))?;
-
     // Verify before storing anything: a bad token should not leave state behind.
-    let user = client.whoami().await.map_err(|e| match e {
-        confed_api::ApiError::Auth(msg) => {
-            ConfedError::Auth(format!("could not authenticate against {}: {msg}", input.base_url))
-        }
-        other => other.into(),
-    })?;
+    let Connected { flavor, auth_method, client, user } = connect(ctx, &input).await?;
 
     let space_key = resolve_space(ctx, &client, input.space.clone()).await?;
     let space = client.get_space(&space_key).await?;
@@ -220,6 +359,41 @@ pub async fn initialize(
     Ok(output)
 }
 
+/// A client the server has accepted.
+pub struct Connected {
+    pub flavor: Flavor,
+    pub auth_method: AuthMethod,
+    pub client: Arc<dyn ConfluenceClient>,
+    pub user: User,
+}
+
+/// Work out the flavor and the auth method, and check the credential with a
+/// `whoami`. A rejected one is exit 3, before anything is written.
+pub async fn connect(ctx: &Context, input: &InitInput) -> Result<Connected> {
+    let flavor = match input.flavor_hint {
+        Some(flavor) => flavor,
+        None => {
+            let auth = build_auth(input, AuthMethod::Pat);
+            confed_api::detect_flavor(&input.base_url, auth).await?
+        }
+    };
+
+    let auth_method = match (flavor, &input.username) {
+        (Flavor::Cloud, _) => AuthMethod::ApiToken,
+        (Flavor::DataCenter, None) => AuthMethod::Pat,
+        (Flavor::DataCenter, Some(_)) => AuthMethod::Basic,
+    };
+    let client = ctx.client_for(flavor, &input.base_url, build_auth(input, auth_method))?;
+
+    let user = client.whoami().await.map_err(|e| match e {
+        confed_api::ApiError::Auth(msg) => {
+            ConfedError::Auth(format!("could not authenticate against {}: {msg}", input.base_url))
+        }
+        other => other.into(),
+    })?;
+    Ok(Connected { flavor, auth_method, client, user })
+}
+
 fn build_auth(input: &InitInput, method: AuthMethod) -> Auth {
     match method {
         AuthMethod::Pat => Auth::Bearer(input.secret.clone()),
@@ -251,4 +425,67 @@ async fn resolve_space(
         spaces.iter().map(|s| format!("{:<12} {}", s.id.key, s.name)).collect();
     let choice = prompt::select("Which space should this directory track?", &labels)?;
     Ok(spaces[choice].id.key.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_same_instance_is_recognised_however_it_is_spelled() {
+        assert!(same_instance("https://wiki.example.test", "https://wiki.example.test/"));
+        assert!(same_instance(
+            "https://Wiki.Example.Test/confluence",
+            "https://wiki.example.test/confluence/"
+        ));
+        assert!(same_instance("https://wiki.example.test:443", "https://wiki.example.test"));
+
+        assert!(!same_instance("https://wiki.example.test", "http://wiki.example.test"));
+        assert!(!same_instance("https://wiki.example.test", "https://wiki.corp"));
+        assert!(!same_instance(
+            "https://wiki.example.test",
+            "https://wiki.example.test/confluence"
+        ));
+        assert!(!same_instance("http://127.0.0.1:8090", "http://127.0.0.1:8091"));
+    }
+
+    /// Without a terminal nobody can answer a keychain dialog, so a credential
+    /// in the keyring is not even read: the error says how to get past it.
+    #[test]
+    fn a_keyring_credential_is_not_read_without_a_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let borrowed = Borrowed {
+            root: dir.path().to_path_buf(),
+            base_url: "https://wiki.example.test".into(),
+            flavor: Flavor::DataCenter,
+            session: Session {
+                base_url: "https://wiki.example.test".into(),
+                flavor: Flavor::DataCenter,
+                auth_method: AuthMethod::Pat,
+                username: None,
+                secret_backend: SecretBackend::Keyring,
+                created_at: now(),
+                last_verified_at: None,
+            },
+        };
+        let err = borrowed.secret(false).unwrap_err();
+        assert_eq!(err.exit_code(), confed_core::ExitCode::Usage);
+        let hint = err.hint().unwrap();
+        assert!(hint.contains("--token"), "{hint}");
+        assert!(hint.contains("config --no-keychain"), "{hint}");
+        assert!(!dir.path().join(".session.db").exists(), "nothing was opened");
+    }
+
+    #[test]
+    fn a_source_that_is_not_a_workspace_is_a_usage_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = Borrowed::load(dir.path()).err().unwrap();
+        assert_eq!(err.exit_code(), confed_core::ExitCode::Usage);
+
+        // A workspace with no credential is refused without creating one.
+        Workspace::create(dir.path()).unwrap();
+        let err = Borrowed::load(dir.path()).err().unwrap();
+        assert!(err.to_string().contains("no stored credential"), "{err}");
+        assert!(!SessionStore::exists(dir.path()));
+    }
 }

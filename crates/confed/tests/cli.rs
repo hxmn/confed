@@ -2230,3 +2230,258 @@ async fn a_failed_attachment_search_is_a_warning_not_silence() {
     assert!(value["result"]["attachment_check_failed"].is_string(), "{value}");
     assert_eq!(value["warnings"].as_array().map(Vec::len), Some(1), "{value}");
 }
+
+// ------------------------------------------------------- cloning, borrowed ---
+
+/// One more space on the server: `get_space` answers for it, and it has no pages.
+async fn mount_space(server: &MockServer, key: &str, name: &str) {
+    Mock::given(method("GET"))
+        .and(path("/rest/api/space"))
+        .and(query_param("spaceKey", key))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{ "id": 600, "key": key, "name": name, "type": "global" }],
+            "size": 1, "start": 0, "limit": 1, "_links": {}
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/content"))
+        .and(query_param("spaceKey", key))
+        .and(query_param("type", "page"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [], "start": 0, "limit": 100, "size": 0, "_links": {}
+        })))
+        .mount(server)
+        .await;
+}
+
+/// The space list, in two pages: a full first page of a hundred personal
+/// spaces, then the three global ones. Only a client that keeps paging sees
+/// the global spaces at all.
+async fn mount_space_list(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/rest/api/space"))
+        .respond_with(|req: &Request| {
+            let start = req
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == "start")
+                .and_then(|(_, v)| v.parse::<usize>().ok())
+                .unwrap_or(0);
+            let results: Vec<Value> = if start == 0 {
+                (0..100)
+                    .map(|i| json!({ "id": 700 + i, "key": format!("~user{i}"), "name": format!("User {i}"), "type": "personal" }))
+                    .collect()
+            } else {
+                [("DOCS", "Documentation"), ("ENG", "Engineering"), ("OPS", "Operations")]
+                    .iter()
+                    .map(|(key, name)| json!({ "id": 500, "key": key, "name": name, "type": "global" }))
+                    .collect()
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "results": results, "start": start, "limit": 100, "size": 0, "_links": {}
+            }))
+        })
+        // Below the per-key mocks, which answer `get_space`.
+        .with_priority(10)
+        .mount(server)
+        .await;
+}
+
+/// Every space in `clone --all`'s result, by key.
+fn spaces_by_key(value: &Value) -> std::collections::BTreeMap<String, Value> {
+    value["result"]["spaces"]
+        .as_array()
+        .expect("result.spaces is an array")
+        .iter()
+        .map(|s| (s["key"].as_str().unwrap().to_string(), s.clone()))
+        .collect()
+}
+
+fn assert_no_token(outputs: &[&Output]) {
+    for output in outputs {
+        let text = format!("{}{}", stdout(output), stderr(output));
+        assert!(!text.contains("pat-token"), "the token leaked into output:\n{text}");
+    }
+}
+
+/// `clone --from` takes the instance, the flavor, the user and the token from a
+/// workspace that already has them, so nothing is typed twice and nothing
+/// prompts.
+#[tokio::test]
+async fn clone_from_reuses_the_credential_of_another_workspace() {
+    let server = dc_server().await;
+    let parent = tempfile::tempdir().unwrap();
+    let first = parent.path().join("first");
+    std::fs::create_dir(&first).unwrap();
+    assert_eq!(exit_code(&init(&first, &server)), 0);
+
+    // No token, no base URL, no terminal.
+    let output =
+        run(confed(parent.path(), &["clone", SPACE, "second", "--from", "first", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "clone");
+    let result = &value["result"]["init"];
+    assert_eq!(result["base_url"], json!(server.uri()));
+    assert_eq!(result["flavor"], json!("datacenter"));
+    assert_eq!(result["credential_store"], json!("sqlite"), "kept the way the source keeps it");
+    let second = parent.path().join("second");
+    assert!(read(&second, ROOT_FILE).contains("Team Handbook"));
+
+    // The new workspace holds its own copy: it authenticates by itself.
+    let pull = run(confed(&second, &["pull", "--json"]));
+    assert_eq!(exit_code(&pull), 0, "stderr: {}", stderr(&pull));
+
+    // Without --from nothing is borrowed silently: no terminal, no token, exit 2.
+    let third = run(confed(
+        parent.path(),
+        &["clone", SPACE, "third", "--base-url", &server.uri(), "--json"],
+    ));
+    assert_eq!(exit_code(&third), 2, "stderr: {}", stderr(&third));
+    assert!(!parent.path().join("third").exists());
+
+    assert_no_token(&[&output, &pull, &third]);
+}
+
+/// The borrowed token goes only to the instance it came from.
+#[tokio::test]
+async fn clone_from_refuses_another_instance_or_flavor() {
+    let server = dc_server().await;
+    let parent = tempfile::tempdir().unwrap();
+    let first = parent.path().join("first");
+    std::fs::create_dir(&first).unwrap();
+    assert_eq!(exit_code(&init(&first, &server)), 0);
+
+    for extra in [["--base-url", "https://wiki.example.test"], ["--flavor", "cloud"]] {
+        let mut args = vec!["clone", SPACE, "second", "--from", "first", "--json"];
+        args.extend(extra);
+        let output = run(confed(parent.path(), &args));
+        assert_eq!(exit_code(&output), 2, "{extra:?}: {}", stderr(&output));
+        let value = envelope(&output, "clone");
+        assert_eq!(value["errors"][0]["code"], json!("USAGE"));
+        assert!(!parent.path().join("second").exists(), "{extra:?} created a folder");
+        assert_no_token(&[&output]);
+    }
+
+    // A space URL on another host is the same mistake.
+    let output = run(confed(
+        parent.path(),
+        &["clone", "https://wiki.example.test/display/DOCS", "--from", "first", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 2, "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("belongs to"), "{}", stdout(&output));
+
+    // The same instance spelled with a trailing slash is not another one.
+    let output = run(confed(
+        parent.path(),
+        &["clone", SPACE, "second", "--from", "first", "--base-url", &format!("{}/", server.uri())],
+    ));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+}
+
+/// A source whose token has since been revoked fails like `init` does, before
+/// a folder is made — for one space or for all of them.
+#[tokio::test]
+async fn a_revoked_source_token_exits_3_before_any_folder_is_created() {
+    let server = dc_server().await;
+    let parent = tempfile::tempdir().unwrap();
+    let first = parent.path().join("first");
+    std::fs::create_dir(&first).unwrap();
+    assert_eq!(exit_code(&init(&first, &server)), 0);
+
+    server.reset().await;
+    mount_whoami(&server, 401, json!({ "message": "PAT rejected" })).await;
+
+    for args in [
+        vec!["clone", SPACE, "second", "--from", "first", "--json"],
+        vec!["clone", "--all", "spaces", "--from", "first", "--json"],
+    ] {
+        let output = run(confed(parent.path(), &args));
+        assert_eq!(exit_code(&output), 3, "{args:?}: {}", stderr(&output));
+        assert_eq!(envelope(&output, "clone")["errors"][0]["code"], json!("AUTH"));
+        assert_no_token(&[&output]);
+    }
+    assert!(!parent.path().join("second").exists());
+    assert!(!parent.path().join("spaces").exists());
+}
+
+/// `clone --all` pages through every space, takes the global ones, clones
+/// each into its own folder, leaves finished ones alone and records the one
+/// it could not clone without stopping.
+#[tokio::test]
+async fn clone_all_clones_every_space_and_reports_each() {
+    let server = dc_server().await;
+    mount_space(&server, "ENG", "Engineering").await;
+    mount_space(&server, "OPS", "Operations").await;
+    mount_space_list(&server).await;
+
+    let root = tempfile::tempdir().unwrap();
+    let docs = root.path().join(SPACE);
+    std::fs::create_dir(&docs).unwrap();
+    assert_eq!(exit_code(&init(&docs, &server)), 0);
+    assert_eq!(exit_code(&run(confed(&docs, &["pull"]))), 0);
+    // Something that is not a workspace is in OPS's way.
+    std::fs::create_dir(root.path().join("OPS")).unwrap();
+    std::fs::write(root.path().join("OPS/notes.txt"), "mine").unwrap();
+
+    let output = run(confed(root.path(), &["clone", "--all", "--from", SPACE, "--json"]));
+    assert_eq!(exit_code(&output), 8, "a failed space makes the run partial: {}", stderr(&output));
+    let value = envelope(&output, "clone");
+    let spaces = spaces_by_key(&value);
+    assert_eq!(spaces.keys().collect::<Vec<_>>(), ["DOCS", "ENG", "OPS"], "global spaces only");
+    assert_eq!(spaces["DOCS"]["status"], json!("skipped"));
+    assert_eq!(spaces["DOCS"]["pages"], json!(2));
+    assert_eq!(spaces["ENG"]["status"], json!("cloned"));
+    assert_eq!(spaces["ENG"]["pages"], json!(0));
+    assert_eq!(spaces["OPS"]["status"], json!("failed"));
+    assert!(spaces["OPS"]["error"].as_str().unwrap().contains("not empty"), "{}", spaces["OPS"]);
+    assert_eq!(read(root.path(), "OPS/notes.txt"), "mine", "the folder in the way is untouched");
+    for name in [".state.db", ".session.db", "AGENTS.md"] {
+        assert!(root.path().join("ENG").join(name).exists(), "ENG has no {name}");
+    }
+
+    // Run again with --pull: what is cloned is brought up to date.
+    let again = run(confed(
+        root.path(),
+        &["clone", "--all", "--from", SPACE, "--pull", "--exclude", "ops", "--json"],
+    ));
+    assert_eq!(exit_code(&again), 0, "stderr: {}", stderr(&again));
+    let spaces = spaces_by_key(&envelope(&again, "clone"));
+    assert_eq!(spaces.keys().collect::<Vec<_>>(), ["DOCS", "ENG"]);
+    assert!(spaces.values().all(|s| s["status"] == json!("pulled")), "{spaces:?}");
+
+    // --include names spaces of either type; one the server does not list fails.
+    let named = run(confed(
+        root.path(),
+        &["clone", "--all", "--from", SPACE, "--include", "ENG", "--include", "NOPE", "--json"],
+    ));
+    assert_eq!(exit_code(&named), 8, "stderr: {}", stderr(&named));
+    let spaces = spaces_by_key(&envelope(&named, "clone"));
+    assert_eq!(spaces["ENG"]["status"], json!("skipped"));
+    assert_eq!(spaces["NOPE"]["status"], json!("failed"));
+    assert_eq!(spaces["NOPE"]["code"], json!("NOT_FOUND"));
+
+    // The human summary says the same.
+    let human = run(confed(root.path(), &["clone", "--all", "--from", SPACE, "--exclude", "OPS"]));
+    assert_eq!(exit_code(&human), 0, "stderr: {}", stderr(&human));
+    let text = stdout(&human);
+    assert!(text.contains("2 spaces in"), "{text}");
+    assert!(text.contains("--pull updates it"), "{text}");
+
+    assert_no_token(&[&output, &again, &named, &human]);
+}
+
+/// A space URL carries the base URL: nothing asks for it again.
+#[tokio::test]
+async fn clone_takes_the_base_url_from_a_space_url() {
+    let server = dc_server().await;
+    let parent = tempfile::tempdir().unwrap();
+    let url = format!("{}/display/{SPACE}/Team+Handbook", server.uri());
+    let output = run(confed_authed(
+        parent.path(),
+        &["clone", &url, "--flavor", "dc", "--credential-store", "sqlite", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stdout(&output));
+    assert_eq!(envelope(&output, "clone")["result"]["init"]["base_url"], json!(server.uri()));
+    assert!(read(&parent.path().join(SPACE), ROOT_FILE).contains("Team Handbook"));
+}

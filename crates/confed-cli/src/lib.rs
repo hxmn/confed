@@ -121,7 +121,7 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
     // Credentials are read here, outside the runtime: the OS keyring blocks.
     let prepared_init = match &command {
         Command::Init(args) => Some(commands::init::prepare(&mut ctx, args)?),
-        Command::Clone(args) => Some(commands::init::prepare(&mut ctx, &args.init)?),
+        Command::Clone(args) => Some(commands::clone::prepare(&mut ctx, args)?),
         _ => {
             ctx.preload_credentials()?;
             None
