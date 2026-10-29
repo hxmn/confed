@@ -63,6 +63,14 @@ struct MockState {
     /// Whether a cross-space move fixes the page links that point at the
     /// moved pages, the way Confluence's link refactoring would.
     refactor_links_on_move: bool,
+    /// …only the links that name the old space explicitly, and in place,
+    /// without a new version: what a 9.5 Data Center was seen to do.
+    refactor_silently: bool,
+    /// Reads a move takes to show: Data Center's web move runs as a
+    /// background task and returns before the pages have moved.
+    move_lag: u32,
+    /// A move accepted but not yet visible, and the reads left until it is.
+    pending_move: Option<(PendingMove, u32)>,
     /// Restricted operations, by page.
     restrictions: HashMap<String, Vec<String>>,
     /// Operations the signed-in user may not perform, by page.
@@ -215,6 +223,19 @@ impl MockClient {
 
     /// Make a cross-space move fix the links to the pages it moves, as a
     /// new version of each page it changes.
+    /// Make a cross-space move fix only the links that name the old space,
+    /// in place, with no new version — as Data Center was seen to.
+    pub fn refactor_links_silently(&self, refactor: bool) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.refactor_links_on_move = refactor;
+        state.refactor_silently = refactor;
+    }
+
+    /// Make every move take effect only after this many page reads.
+    pub fn lag_moves(&self, reads: u32) {
+        self.state.lock().expect("mock poisoned").move_lag = reads;
+    }
+
     pub fn refactor_links_on_move(&self, refactor: bool) {
         self.state.lock().expect("mock poisoned").refactor_links_on_move = refactor;
     }
@@ -541,6 +562,7 @@ fn refactor_links(
     old_space: &str,
     new_space: &str,
 ) {
+    let silently = state.refactor_silently;
     for page in state.pages.values_mut().filter(|p| !p.deleted) {
         let own = page.summary.space_key.clone();
         let was_moved = moved.contains(&page.summary.id.0);
@@ -552,12 +574,12 @@ fn refactor_links(
             let in_new =
                 format!(r#"<ri:page ri:space-key="{new_space}" ri:content-title="{title}""#);
             // Links without a key from pages left behind meant the old space.
-            if !was_moved && own == old_space {
+            if !was_moved && own == old_space && !silently {
                 body = body.replace(&bare, &in_new);
             }
             body = body.replace(&in_old, &in_new);
         }
-        if was_moved {
+        if was_moved && !silently {
             // Links without a key from a moved page to a page left behind.
             let others: Vec<String> = titles.to_vec();
             let mut rebuilt = String::new();
@@ -578,7 +600,10 @@ fn refactor_links(
             rebuilt.push_str(rest);
             body = rebuilt;
         }
-        if body != page.body {
+        if body != page.body && silently {
+            page.body = body.clone();
+            page.bodies.insert(page.summary.version, body);
+        } else if body != page.body {
             page.summary.version += 1;
             page.body = body.clone();
             page.bodies.insert(page.summary.version, body);
@@ -588,6 +613,40 @@ fn refactor_links(
                 when: Some("2026-08-16T00:00:00Z".into()),
                 message: Some("links updated after a move".into()),
             });
+        }
+    }
+}
+
+/// A move between spaces, as the server makes it.
+struct PendingMove {
+    root: String,
+    moved: Vec<String>,
+    new_parent: Option<String>,
+    old_space: String,
+    new_space: String,
+}
+
+fn apply_move(state: &mut MockState, pending: PendingMove) {
+    let titles: Vec<String> =
+        pending.moved.iter().map(|m| state.pages[m.as_str()].summary.title.clone()).collect();
+    for page_id in &pending.moved {
+        let page = state.pages.get_mut(page_id.as_str()).expect("listed above");
+        page.summary.space_key = pending.new_space.clone();
+    }
+    state.pages.get_mut(pending.root.as_str()).expect("checked").summary.parent_id =
+        pending.new_parent.map(PageId::new);
+    if state.refactor_links_on_move && pending.old_space != pending.new_space {
+        refactor_links(state, &pending.moved, &titles, &pending.old_space, &pending.new_space);
+    }
+}
+
+/// One read more: a move still in the background may have finished.
+fn tick(state: &mut MockState) {
+    if let Some((_, reads)) = state.pending_move.as_mut() {
+        *reads = reads.saturating_sub(1);
+        if *reads == 0 {
+            let (pending, _) = state.pending_move.take().expect("checked");
+            apply_move(state, pending);
         }
     }
 }
@@ -681,7 +740,8 @@ impl ConfluenceClient for MockClient {
     }
 
     async fn get_page(&self, id: &PageId, _body: BodyFormat) -> ApiResult<Page> {
-        let state = self.state.lock().expect("mock poisoned");
+        let mut state = self.state.lock().expect("mock poisoned");
+        tick(&mut state);
         if state.pages_down.contains(&id.0) {
             return Err(ApiError::Server { status: 503, body: format!("page {id}") });
         }
@@ -844,27 +904,31 @@ impl ConfluenceClient for MockClient {
             moved.extend(children);
             index += 1;
         }
-        let titles: Vec<String> =
-            moved.iter().map(|m| state.pages[m.as_str()].summary.title.clone()).collect();
-        for page_id in &moved {
-            let page = state.pages.get_mut(page_id.as_str()).expect("listed above");
-            page.summary.space_key = new_space.clone();
-        }
-        state.pages.get_mut(id.as_str()).expect("checked").summary.parent_id =
-            new_parent.map(PageId::new);
         state.calls.push(format!("move_page_to:{id}:{}:{target}", position.as_str()));
-
-        if state.refactor_links_on_move && old_space != new_space {
-            refactor_links(&mut state, &moved, &titles, &old_space, &new_space);
+        let pending = PendingMove { root: id.0.clone(), moved, new_parent, old_space, new_space };
+        match state.move_lag {
+            0 => apply_move(&mut state, pending),
+            lag => state.pending_move = Some((pending, lag)),
         }
         Ok(())
     }
 
-    async fn probe_move(&self, page: &PageId) -> ApiResult<Probe> {
+    async fn find_page_by_title(
+        &self,
+        space_key: &str,
+        title: &str,
+    ) -> ApiResult<Option<PageSummary>> {
+        let mut state = self.state.lock().expect("mock poisoned");
+        tick(&mut state);
+        Ok(state
+            .pages
+            .values()
+            .find(|p| !p.deleted && p.summary.space_key == space_key && p.summary.title == title)
+            .map(|p| p.summary.clone()))
+    }
+
+    async fn probe_move(&self, _page: &PageId) -> ApiResult<Probe> {
         let state = self.state.lock().expect("mock poisoned");
-        if !state.pages.contains_key(page.as_str()) {
-            return Err(ApiError::NotFound(format!("page {page}")));
-        }
         Ok(if state.move_unsupported { Probe::Unavailable } else { Probe::Available })
     }
 

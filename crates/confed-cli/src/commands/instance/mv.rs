@@ -307,6 +307,7 @@ pub async fn run(
         rewrite_links: !args.no_rewrite_links,
         relativize: args.relativize,
         message: args.message.clone().or_else(|| Some("Moved by confed instance mv".into())),
+        wait_secs: args.wait,
     };
     let mut plan = crossmove::plan(&client, &spaces, &request).await?;
 
@@ -386,7 +387,16 @@ fn with_resume_hint(e: ConfedError, id: &str) -> ConfedError {
          `confed instance abort {id}` undoes it if the server has not moved anything yet"
     );
     match e {
-        ConfedError::State { message, .. } => ConfedError::State { message, hint: Some(next) },
+        // A hint of its own says what this situation needs; only name the move.
+        ConfedError::State { message, hint: Some(hint) } => ConfedError::State {
+            message,
+            hint: Some(
+                hint.replace("`confed instance resume`", &format!("`confed instance resume {id}`")),
+            ),
+        },
+        ConfedError::State { message, hint: None } => {
+            ConfedError::State { message, hint: Some(next) }
+        }
         ConfedError::Usage { message, .. } => ConfedError::Usage { message, hint: Some(next) },
         other => {
             let code = other.exit_code();
@@ -646,6 +656,16 @@ fn describe(ctx: &Context, plan: &MovePlan, journal_id: Option<&str>, dry_run: b
             let _ = writeln!(human, "  {}:{}  {}", link.space, link.path, style.dim(&note));
         }
     }
+    if !plan.links_broken.is_empty() {
+        let _ = writeln!(human, "\nLinks that reach no page (left as they were):");
+        for broken in &plan.links_broken {
+            let _ = writeln!(
+                human,
+                "  {}: page {} → \"{}\" in {}",
+                broken.space, broken.page_id, broken.title, broken.reaches
+            );
+        }
+    }
     if let Some(id) = journal_id {
         let _ = writeln!(human, "\n{}", style.dim(&format!("journal: {id}")));
     }
@@ -685,6 +705,7 @@ fn describe(ctx: &Context, plan: &MovePlan, journal_id: Option<&str>, dry_run: b
             "moved": moved,
             "links_rewritten": rewritten,
             "links_by_server": plan.links_by_server,
+            "links_broken": plan.links_broken,
             "warnings": plan.warnings,
         }),
         human,

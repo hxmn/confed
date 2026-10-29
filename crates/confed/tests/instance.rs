@@ -54,6 +54,8 @@ struct World {
     requests: usize,
     /// Requests to a move route, probes included.
     move_requests: usize,
+    /// Background move tasks: page, target, position, polls until done.
+    tasks: BTreeMap<String, (String, String, String, u32)>,
 }
 
 /// Confluence's check against forged form submissions.
@@ -313,21 +315,47 @@ impl Respond for Confluence {
                 if form["pageId"] == "0" {
                     return ResponseTemplate::new(200).set_body_string("<html>Page not found</html>");
                 }
-                let id = &form["pageId"];
-                let target = &form["targetId"];
-                if !world.pages.contains_key(id) || !world.pages.contains_key(target) {
+                // As a 9.5 server does: the new parent by title, the move
+                // started in the background, answered before it is done.
+                let id = form["pageId"].clone();
+                let (space, title) = (&form["spaceKey"], &form["targetTitle"]);
+                let Some(target) = world
+                    .pages
+                    .iter()
+                    .find(|(_, p)| &p.space == space && &p.title == title)
+                    .map(|(id, _)| id.clone())
+                else {
                     return ResponseTemplate::new(200).set_body_string("<html>No such page</html>");
-                }
-                let space = world.pages[target].space.clone();
-                let parent = match form["position"].as_str() {
-                    "append" => Some(target.clone()),
-                    _ => world.pages[target].parent.clone(),
                 };
-                for moved in world.subtree(id) {
-                    world.pages.get_mut(&moved).unwrap().space = space.clone();
+                let task = format!("9000000t{}", world.tasks.len() + 1);
+                world.tasks.insert(task.clone(), (id.clone(), target, form["position"].clone(), 2));
+                ok(json!({
+                    "complete": false, "status": "Starting", "longTaskId": task,
+                    "page": { "id": id, "space": { "key": world.pages[&id].space } },
+                }))
+            }
+            ("GET", ["rest", "api", "longtask", task]) => {
+                let Some((id, target, position, left)) = world.tasks.get(*task).cloned() else {
+                    return error(404, "No long task found");
+                };
+                if left > 0 {
+                    world.tasks.get_mut(*task).unwrap().3 = left - 1;
+                    return ok(json!({ "percentageComplete": 50, "successful": true }));
                 }
-                world.pages.get_mut(id).unwrap().parent = parent;
-                ResponseTemplate::new(200).set_body_string("<html>Moved</html>")
+                if world.pages[&id].space != world.pages[&target].space
+                    || world.pages[&id].parent.as_deref() != Some(target.as_str())
+                {
+                    let space = world.pages[&target].space.clone();
+                    let parent = match position.as_str() {
+                        "append" => Some(target.clone()),
+                        _ => world.pages[&target].parent.clone(),
+                    };
+                    for moved in world.subtree(&id) {
+                        world.pages.get_mut(&moved).unwrap().space = space.clone();
+                    }
+                    world.pages.get_mut(&id).unwrap().parent = parent;
+                }
+                ok(json!({ "percentageComplete": 100, "successful": true }))
             }
             ("PUT", ["rest", "api", "content", id, "move", position, target]) => {
                 if let Some(status) = world.refuse_moves {
@@ -1161,4 +1189,19 @@ async fn a_space_cloned_into_a_root_without_a_shared_credential_gets_its_own() {
     assert!(root.path().join("OPS/.session.db").exists());
     let out = run(&root.path().join("OPS"), &["fetch", "--json"]);
     assert_eq!(code(&out), 0, "the new space works on its own: {}", stderr(&out));
+}
+
+#[tokio::test]
+async fn doctor_says_unreachable_the_way_other_commands_do() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+    // Nothing listens on the discard port.
+    let out =
+        run(&root.path().join("DOCS"), &["doctor", "--base-url", "http://127.0.0.1:9", "--json"]);
+    assert_eq!(code(&out), 5, "{}", stderr(&out));
+    let out = run(
+        &root.path().join("DOCS"),
+        &["status", "--fetch", "--base-url", "http://127.0.0.1:9", "--json"],
+    );
+    assert_eq!(code(&out), 5, "{}", stderr(&out));
 }

@@ -1079,6 +1079,11 @@ pub struct InstanceMvArgs {
     /// space, so the next pull writes it as a file link.
     #[arg(long)]
     pub relativize: bool,
+
+    /// How long to wait for the server to finish a move it has accepted.
+    /// Data Center moves pages in the background, after it has answered.
+    #[arg(long, value_name = "SECONDS", default_value_t = confed_core::crossmove::DEFAULT_WAIT_SECS)]
+    pub wait: u64,
 }
 
 #[derive(Args, Debug)]

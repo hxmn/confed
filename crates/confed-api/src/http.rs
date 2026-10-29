@@ -430,9 +430,11 @@ impl Http {
     ) -> ApiResult<WebAnswer> {
         let url = self.url(path)?;
         self.send_web(|| {
+            // As the browser sends it: an XHR, which the action answers in JSON.
             let rb = self
                 .request(reqwest::Method::POST, url.clone())
                 .header("X-Atlassian-Token", "no-check")
+                .header("X-Requested-With", "XMLHttpRequest")
                 .form(form);
             match cookie {
                 Some(cookie) => rb.header(reqwest::header::COOKIE, cookie),

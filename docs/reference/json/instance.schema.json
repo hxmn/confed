@@ -52,6 +52,20 @@
         }
       }
     },
+    "links_broken": {
+      "type": "array",
+      "description": "`mv`, `resume`: links the move concerns that reach no page, left as they were.",
+      "items": {
+        "type": "object",
+        "required": ["page_id", "space", "title", "reaches"],
+        "properties": {
+          "page_id": { "type": "string" },
+          "space": { "type": "string", "description": "The space of the page the link is in." },
+          "title": { "type": "string" },
+          "reaches": { "type": "string", "description": "The space it looks for the title in." }
+        }
+      }
+    },
     "links_by_server": {
       "type": "array",
       "description": "`mv`, `resume`: pages whose links the server had already fixed itself.",

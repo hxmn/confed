@@ -244,8 +244,12 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
     if args.offline {
         return Ok(report(ctx, checks));
     }
+    let mut server_failure: Option<ExitCode> = None;
     match ctx.build_client() {
-        Err(e) => checks.push(Check::fail("server", e.to_string())),
+        Err(e) => {
+            server_failure = Some(e.exit_code());
+            checks.push(Check::fail("server", e.to_string()));
+        }
         Ok(client) => match client.whoami().await {
             Ok(user) => {
                 checks.push(Check::pass(
@@ -266,11 +270,24 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
                     checks.push(move_check(client.as_ref(), probe_page(ctx).as_ref()).await);
                 }
             }
-            Err(e) => checks.push(Check::fail("server", e.to_string())),
+            Err(e) => {
+                let e = confed_core::ConfedError::from(e);
+                server_failure = Some(e.exit_code());
+                checks.push(Check::fail("server", e.to_string()));
+            }
         },
     }
 
-    Ok(report(ctx, checks))
+    let mut output = report(ctx, checks);
+    // When the server is all that failed, say why the way every other command
+    // does: 5 when it cannot be reached, 3 when it refuses the credential.
+    let only_the_server = output.result["checks"]
+        .as_array()
+        .is_some_and(|c| c.iter().filter(|c| c["status"] == "fail").all(|c| c["name"] == "server"));
+    if let (Some(code), true) = (server_failure, only_the_server) {
+        output.exit = code;
+    }
+    Ok(output)
 }
 
 /// A page of this workspace the move probe can ask about: it must exist,

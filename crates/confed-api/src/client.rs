@@ -75,12 +75,23 @@ pub trait ConfluenceClient: Send + Sync {
         Err(crate::error::ApiError::unsupported(self.flavor(), "move a page to another space"))
     }
 
-    /// Whether the server can do [`Self::move_page_to`], asked about the real
-    /// page `page` without moving it: the target named is one that cannot
-    /// exist.
+    /// Whether the server can do [`Self::move_page_to`], asked without moving
+    /// anything and without naming a real page in a write request. `page` is
+    /// a real page that may be *viewed*, which is how a Data Center web
+    /// session is opened.
     async fn probe_move(&self, page: &PageId) -> ApiResult<Probe> {
         let _ = page;
         Ok(Probe::Unknown)
+    }
+
+    /// The page titled exactly `title` in `space_key`, if there is one.
+    async fn find_page_by_title(
+        &self,
+        space_key: &str,
+        title: &str,
+    ) -> ApiResult<Option<PageSummary>> {
+        let _ = (space_key, title);
+        Err(crate::error::ApiError::unsupported(self.flavor(), "look a page up by title"))
     }
 
     /// The operations (`read`, `update`) a page restricts to named people or

@@ -382,8 +382,16 @@ impl ConfluenceClient for CloudClient {
         v1::move_page_to(&self.http, self.flavor(), id, position, target).await
     }
 
-    async fn probe_move(&self, page: &PageId) -> ApiResult<Probe> {
-        v1::probe_move(&self.http, page).await
+    async fn probe_move(&self, _page: &PageId) -> ApiResult<Probe> {
+        v1::probe_move(&self.http).await
+    }
+
+    async fn find_page_by_title(
+        &self,
+        space_key: &str,
+        title: &str,
+    ) -> ApiResult<Option<PageSummary>> {
+        v1::find_page_by_title(&self.http, space_key, title).await
     }
 
     async fn page_restrictions(&self, id: &PageId) -> ApiResult<Vec<String>> {

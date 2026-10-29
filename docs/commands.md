@@ -1010,6 +1010,11 @@ every problem is listed together (exit 7, or 2 for bad arguments):
 and the pages whose links will change. A real run asks first, or takes `--yes`. Without
 a terminal it is exit 2.
 
+Links are judged by what exists. A link whose page does not exist is left alone and
+listed in `links_broken`, and a link that already reaches its page is not touched.
+Pages the server changed itself, which Data Center does without saving a new version,
+are listed in `links_by_server`, and their files are updated to the server's text.
+
 Links: a link by title names a space only when it is another one. So confed rewrites,
 on the server, the links that change meaning: links to the moved pages from the space
 they left, links from the moved pages to pages left behind, and any link naming the
@@ -1021,6 +1026,11 @@ to it and listed in `links_by_server`. `--no-rewrite-links` changes none.
 `--json` result: `moved[]` (`page_id`, `title`, `from`/`to` `{space, path}`, `version`),
 `links_rewritten[]` (`page_id`, `space`, `count`), `links_by_server[]`, `warnings[]`,
 `journal_id`.
+
+`--wait SECONDS` (default 120) is how long confed waits for the server to finish a
+move it has accepted. Data Center moves the pages in a background task after it has
+answered. A move still unfinished by then is exit 7, and `confed instance resume`
+waits again without asking the server to move anything twice.
 
 How the pages move: through the REST move endpoint where the server has it (Cloud).
 Data Center has no such REST route, so there confed uses the web UI's "Move page"

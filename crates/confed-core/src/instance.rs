@@ -365,6 +365,20 @@ impl Instance {
         Ok(())
     }
 
+    /// [`Self::journal_fail`], also saving the plan as it now stands.
+    pub fn journal_fail_with_plan(
+        &self,
+        id: &str,
+        error: &str,
+        plan: &serde_json::Value,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE journal SET error = ?2, plan = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, error, plan.to_string(), crate::state::now()],
+        )?;
+        Ok(())
+    }
+
     pub fn journal_entry(&self, id: &str) -> Result<Option<JournalEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, op, state, plan, created_at, updated_at, error FROM journal WHERE id = ?1",

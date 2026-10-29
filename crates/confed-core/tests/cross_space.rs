@@ -120,6 +120,7 @@ impl Harness {
             rewrite_links: true,
             relativize: false,
             message: Some("move onboarding to engineering".into()),
+            wait_secs: 5,
         }
     }
 
@@ -244,7 +245,7 @@ async fn links_the_server_fixed_itself_are_left_to_it() {
     let (_, plan) = h.run(&h.request("1002", "2002")).await;
     assert!(plan.links_rewritten.is_empty(), "{:?}", plan.links_rewritten);
     assert_eq!(plan.links_by_server.len(), 3);
-    assert!(plan.warnings.iter().any(|w| w.contains("already updated the links")));
+    assert!(plan.warnings.iter().any(|w| w.contains("already changed the links")));
     assert!(h.clean("DOCS") && h.clean("ENG"));
     assert!(h.read("DOCS", "Team Handbook/Policies.md").contains("/display/ENG/Onboarding"));
 }
@@ -485,4 +486,152 @@ async fn abort_asks_the_server_and_refuses_a_move_the_journal_missed() {
         crossmove::abort(&h.instance, &id, &client, &mut plan, Step::Planned).await.unwrap_err();
     assert!(err.hint().unwrap().contains("confed instance resume"), "{err:?}");
     assert_eq!(h.instance.journal_entry(&id).unwrap().unwrap().state, Step::Planned);
+}
+
+/// Where every page link in a page's server copy leads: `(space, title,
+/// found)`.
+async fn links_of(mock: &MockClient, page_id: &str) -> Vec<(String, String, bool)> {
+    let space = mock.page_space(page_id).unwrap();
+    let body = mock.page_body(page_id).unwrap();
+    let moves = std::collections::HashMap::new();
+    let ctx = crossmove::LinkContext {
+        space_before: &space,
+        space_after: &space,
+        moves: &moves,
+        relativize: false,
+        exists: None,
+    };
+    let mut out = Vec::new();
+    for link in crossmove::link_targets(&body, &ctx) {
+        let (space, title) = link.reaches;
+        let found = mock.find_page_by_title(&space, &title).await.unwrap().is_some();
+        out.push((space, title, found));
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_move_the_server_finishes_later_is_waited_for_not_called_a_failure() {
+    let mut h = Harness::new().await;
+    h.mock.lag_moves(6);
+    let (_, plan) = h.run(&h.request("1002", "2002")).await;
+    assert_eq!(plan.moved.len(), 2);
+    let moves = h.mock.calls().iter().filter(|c| c.starts_with("move_page_to")).count();
+    assert_eq!(moves, 1);
+    assert!(h.clean("DOCS") && h.clean("ENG"));
+}
+
+#[tokio::test]
+async fn a_fetch_of_the_source_between_the_move_and_the_resume_strands_nothing() {
+    let mut h = Harness::new().await;
+    let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();
+    let id =
+        h.instance.journal_begin(crossmove::OP, &serde_json::to_value(&plan).unwrap()).unwrap();
+    let client = h.client();
+    // Stops after the server moved, before the destination is written.
+    let eng = h.spaces.remove("ENG").unwrap();
+    let _ =
+        crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, Step::Planned, 2)
+            .await
+            .unwrap_err();
+    h.spaces.insert("ENG".into(), eng);
+    // Anything that fetches the source now sees the pages gone from it.
+    let engine = h.engine("DOCS");
+    engine
+        .fetch(h.spaces.get_mut("DOCS").unwrap(), &confed_core::sync::FetchOptions::default())
+        .await
+        .unwrap();
+    assert!(h.ws("DOCS").state().get_remote("1002").unwrap().unwrap().deleted);
+
+    // One resume finishes it: no fetch of the destination first.
+    let entry = h.instance.journal_entry(&id).unwrap().unwrap();
+    let mut plan: MovePlan = serde_json::from_value(entry.plan).unwrap();
+    crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, entry.state, 2)
+        .await
+        .unwrap();
+    assert!(h.ws("DOCS").state().get_page("1002").unwrap().is_none());
+    assert!(h.ws("ENG").absolute("Engineering Home/Runbooks/Onboarding.md").exists());
+    assert!(h.clean("DOCS") && h.clean("ENG"));
+}
+
+#[tokio::test]
+async fn there_and_back_every_link_still_reaches_its_page() {
+    let mut h = Harness::new().await;
+    // As a 9.5 Data Center was seen to: only links naming the old space are
+    // fixed, in place, with no new version — and the move finishes late.
+    h.mock.refactor_links_silently(true);
+    h.mock.lag_moves(3);
+    // The moved page links to a page left behind both ways: plainly, by an
+    // explicit key, and from inside a macro.
+    h.mock.remote_edit(
+        "1002",
+        concat!(
+            r#"<p><ac:link><ri:page ri:content-title="Team Handbook" /></ac:link></p>"#,
+            r#"<p><ac:link><ri:page ri:space-key="DOCS" ri:content-title="Team Handbook" /></ac:link></p>"#,
+            r#"<ac:structured-macro ac:name="info" ac:macro-id="9000000a-1"><ac:rich-text-body>"#,
+            r#"<p><ac:link><ri:page ri:content-title="Team Handbook" /></ac:link></p>"#,
+            r#"</ac:rich-text-body></ac:structured-macro>"#,
+            r#"<p><ac:link><ri:page ri:content-title="Week One" /></ac:link></p>"#,
+        ),
+    );
+    h.pull("DOCS").await;
+
+    let there = h.request("1002", "2002");
+    h.run(&there).await;
+    for page in ["1002", "1004", "2002"] {
+        for (space, title, found) in links_of(&h.mock, page).await {
+            assert!(
+                found,
+                "after the move, page {page} links to {space}:{title}, which is not there"
+            );
+        }
+    }
+    assert!(h.mock.page_body("1002").unwrap().contains(r#"ac:macro-id="9000000a-1""#));
+    // The server's silent fix is in the file, not only on the server.
+    let runbooks = h.read("ENG", "Engineering Home/Runbooks.md");
+    assert!(runbooks.contains("Runbooks/Onboarding/Week"), "{runbooks}");
+
+    // Back again: home under Team Handbook.
+    let mut back = h.request("1002", "1001");
+    back.source = SpaceRef { key: "ENG".into(), dir: "ENG".into(), numeric: Some("2001".into()) };
+    back.dest = SpaceRef { key: "DOCS".into(), dir: "DOCS".into(), numeric: Some("1001".into()) };
+    h.run(&back).await;
+    for page in ["1002", "1004", "2002"] {
+        for (space, title, found) in links_of(&h.mock, page).await {
+            assert!(
+                found,
+                "after moving back, page {page} links to {space}:{title}, which is not there"
+            );
+        }
+    }
+    assert!(h.clean("DOCS") && h.clean("ENG"));
+}
+
+#[tokio::test]
+async fn a_link_broken_before_the_move_is_left_alone_and_reported() {
+    let mut h = Harness::new().await;
+    // A page in ENG whose plain link to a DOCS page was never fixed: in ENG it
+    // reaches nothing.
+    h.mock.seed_page_in(
+        "ENG",
+        "2005",
+        "Stray",
+        Some("2001"),
+        r#"<p><ac:link><ri:page ri:content-title="Team Handbook" /></ac:link></p>"#,
+    );
+    h.pull("ENG").await;
+    let mut request = h.request("2005", "1001");
+    request.source =
+        SpaceRef { key: "ENG".into(), dir: "ENG".into(), numeric: Some("2001".into()) };
+    request.dest =
+        SpaceRef { key: "DOCS".into(), dir: "DOCS".into(), numeric: Some("1001".into()) };
+    let plan = h.plan(&request).await.unwrap();
+    assert!(plan.links.is_empty(), "nothing to rewrite: {:?}", plan.links);
+    h.run(&request).await;
+    // Untouched — and in DOCS it now reaches its page.
+    assert_eq!(
+        h.mock.page_body("2005").unwrap(),
+        r#"<p><ac:link><ri:page ri:content-title="Team Handbook" /></ac:link></p>"#
+    );
+    assert!(links_of(&h.mock, "2005").await.iter().all(|(_, _, found)| *found));
 }

@@ -14,7 +14,7 @@
 /// converted Markdown out of date. It feeds the render fingerprint confed keeps
 /// per page, so an improvement reaches a workspace on the next pull without
 /// waiting for each page to change on the server.
-pub const CONVERTER_VERSION: u32 = 6;
+pub const CONVERTER_VERSION: u32 = 7;
 
 pub mod blockmap;
 pub mod dom;

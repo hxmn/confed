@@ -673,7 +673,13 @@ impl Renderer<'_> {
     /// page lives locally, and an absolute site URL when it does not.
     fn page_href(&self, id: &str, title: &str, space: &str) -> String {
         let qualified = format!("{space}:{title}");
-        for key in [id, title, qualified.as_str()] {
+        // A title alone means this space's page. A link that names another
+        // space is that space's page, even when this one has a page of that
+        // title: the file link would hide a link that leads elsewhere — or
+        // nowhere.
+        let own = space.is_empty() || space == self.opts.space_key;
+        let by_title = if own { title } else { "" };
+        for key in [id, by_title, qualified.as_str()] {
             if key.is_empty() {
                 continue;
             }
@@ -1120,6 +1126,26 @@ mod tests {
         let src = r#"<p><ac:link><ri:page ri:content-title="Runbook"/><ac:plain-text-link-body><![CDATA[the runbook]]></ac:plain-text-link-body></ac:link></p>"#;
         let out = crate::storage_to_markdown(src, &opts).unwrap().markdown;
         assert_eq!(out, "[the runbook](runbook.md)\n");
+    }
+
+    #[test]
+    fn a_link_to_another_spaces_page_is_never_taken_for_a_local_one_of_that_title() {
+        let mut opts = ConvertOptions {
+            base_url: "https://wiki.example.com".into(),
+            space_key: "DOCS".into(),
+            ..Default::default()
+        };
+        opts.page_links.insert("Runbook".into(), "runbook.md".into());
+        opts.page_links.insert("DOCS:Runbook".into(), "runbook.md".into());
+        let other =
+            r#"<p><ac:link><ri:page ri:space-key="ENG" ri:content-title="Runbook"/></ac:link></p>"#;
+        let out = crate::storage_to_markdown(other, &opts).unwrap().markdown;
+        assert_eq!(out, "[Runbook](https://wiki.example.com/display/ENG/Runbook)\n");
+        let own = r#"<p><ac:link><ri:page ri:space-key="DOCS" ri:content-title="Runbook"/></ac:link></p>"#;
+        assert_eq!(
+            crate::storage_to_markdown(own, &opts).unwrap().markdown,
+            "[Runbook](runbook.md)\n"
+        );
     }
 
     #[test]

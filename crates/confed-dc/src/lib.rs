@@ -79,16 +79,20 @@ impl DcClient {
     /// `pages/movepage.action`: Data Center's REST API has no move between
     /// spaces. The action keeps the page's id and history like the REST move.
     ///
-    /// It is not a documented API. Its parameters are the dialog's — the
-    /// destination space, the target page by title and id, and where to put
-    /// the page relative to it — and its answer is a web page whatever
-    /// happened, so success is not judged here: the caller reads the page
-    /// back.
+    /// It is not a documented API. The form is the one a 9.5 browser was seen
+    /// to send: the page, the destination space, the new parent *by title*,
+    /// the position, `mode=ASYNC`, and the session's `atl_token`. The session
+    /// is opened as a browser's is, by viewing the page;
+    /// `X-Atlassian-Token: no-check` goes too, which is what lets a script
+    /// through where no session can be had. A refusal by the XSRF check
+    /// ("Session Expired", 403) is exit 9.
     ///
-    /// Confluence's XSRF check guards the form. It is tried first with
-    /// `X-Atlassian-Token: no-check`, the documented way for scripts; a server
-    /// that refuses that ("Session Expired", 403) gets the form a browser
-    /// sends: the `atl_token` of a session, with that session's cookie.
+    /// The server answers before it has moved anything — `complete: false`,
+    /// and a `longTaskId` — and moves the pages in a background task. That
+    /// task is followed through `rest/api/longtask/{id}` until it finishes;
+    /// one that finishes unsuccessfully is an error with its messages. Even
+    /// then the caller reads the pages back: this answers for the task, not
+    /// for where the pages are.
     async fn move_by_web_action(
         &self,
         id: &PageId,
@@ -101,33 +105,69 @@ impl DcClient {
             ("pageId", id.0.clone()),
             ("spaceKey", target_page.space_key().unwrap_or_default()),
             ("targetTitle", target_page.title.clone().unwrap_or_default()),
-            ("targetId", target.0.clone()),
             (
                 "position",
                 match position {
                     MovePosition::Append => "append",
+                    // Not yet seen in a browser's request; a wrong guess is
+                    // caught when the page is read back.
                     MovePosition::Before => "above",
                     MovePosition::After => "below",
                 }
                 .to_string(),
             ),
+            ("mode", "ASYNC".to_string()),
         ];
-        let answer = self.http.post_form(MOVE_ACTION, &form, None).await?;
-        if !answer.is_xsrf_refusal() {
-            return judge_web_move(&answer, self.flavor());
+        let session = self.web_session(id).await?;
+        if let Some(session) = &session {
+            form.push(("atl_token", session.token.clone()));
         }
-        let Some(session) = self.web_session(id).await? else {
+        let cookie = session.as_ref().map(|s| s.cookie.as_str());
+        let answer = self.http.post_form(MOVE_ACTION, &form, cookie).await?;
+        if answer.is_xsrf_refusal() {
             return Err(xsrf_refused(
                 self.flavor(),
-                "no session token could be had from a page view",
+                match session {
+                    Some(_) => "with the session's atl_token",
+                    None => "no session token could be had from a page view",
+                },
             ));
-        };
-        form.push(("atl_token", session.token.clone()));
-        let answer = self.http.post_form(MOVE_ACTION, &form, Some(&session.cookie)).await?;
-        if answer.is_xsrf_refusal() {
-            return Err(xsrf_refused(self.flavor(), "a session token was refused too"));
         }
-        judge_web_move(&answer, self.flavor())
+        judge_web_move(&answer, self.flavor())?;
+        match long_task_id(&answer.body) {
+            Some(task) => self.follow_long_task(&task).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Follow a background task until it finishes: `rest/api/longtask/{id}`.
+    /// Gives up waiting — not failing — after [`LONG_TASK_WAIT`]: the caller
+    /// keeps checking where the pages are for as long as it was told to.
+    async fn follow_long_task(&self, task: &str) -> ApiResult<()> {
+        let started = std::time::Instant::now();
+        let mut interval = std::time::Duration::from_millis(250);
+        loop {
+            let status: serde_json::Value =
+                self.http.get_json(&format!("rest/api/longtask/{task}"), &[]).await?;
+            match long_task_state(&status) {
+                LongTask::Running => {}
+                LongTask::Succeeded => return Ok(()),
+                LongTask::Failed(messages) => {
+                    return Err(ApiError::Server {
+                        status: 500,
+                        body: format!(
+                            "the move task {task} finished unsuccessfully: {}",
+                            if messages.is_empty() { "no reason given".into() } else { messages }
+                        ),
+                    })
+                }
+            }
+            if started.elapsed() >= LONG_TASK_WAIT {
+                return Ok(());
+            }
+            tokio::time::sleep(interval).await;
+            interval = (interval * 2).min(std::time::Duration::from_secs(5));
+        }
     }
 
     /// The web UI's session, as a browser holds it after viewing `page`: its
@@ -369,6 +409,53 @@ fn ancestors(parent: Option<&PageId>) -> serde_json::Value {
 
 /// The web UI's move action, the one the "Move page" dialog submits.
 const MOVE_ACTION: &str = "pages/movepage.action";
+
+/// How long to follow a background move task before leaving the waiting to
+/// the caller.
+const LONG_TASK_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The background task a web action answered with, from its JSON answer.
+fn long_task_id(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    ["longTaskId", "taskId", "longtaskId"].iter().find_map(|key| match &value[*key] {
+        serde_json::Value::String(id) if !id.is_empty() => Some(id.clone()),
+        serde_json::Value::Number(id) => Some(id.to_string()),
+        _ => None,
+    })
+}
+
+/// Where a background task stands.
+#[derive(Debug, PartialEq, Eq)]
+enum LongTask {
+    Running,
+    Succeeded,
+    /// With what its messages say.
+    Failed(String),
+}
+
+/// Read `rest/api/longtask/{id}`: finished when it says so, or at 100%;
+/// failed when it finished and says it was not successful.
+fn long_task_state(status: &serde_json::Value) -> LongTask {
+    let finished = status["finished"].as_bool() == Some(true)
+        || status["complete"].as_bool() == Some(true)
+        || status["percentageComplete"].as_u64().is_some_and(|p| p >= 100);
+    if !finished {
+        return LongTask::Running;
+    }
+    if status["successful"].as_bool() == Some(false) {
+        let messages = status["messages"]
+            .as_array()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|m| m["translation"].as_str().or(m.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default();
+        return LongTask::Failed(messages);
+    }
+    LongTask::Succeeded
+}
 
 /// A web UI session: its cookie, and the token its forms carry.
 struct WebSession {
@@ -648,10 +735,18 @@ impl ConfluenceClient for DcClient {
     }
 
     async fn probe_move(&self, page: &PageId) -> ApiResult<Probe> {
-        match v1::probe_move(&self.http, page).await? {
+        match v1::probe_move(&self.http).await? {
             Probe::Unavailable => self.probe_web_action(page).await,
             other => Ok(other),
         }
+    }
+
+    async fn find_page_by_title(
+        &self,
+        space_key: &str,
+        title: &str,
+    ) -> ApiResult<Option<PageSummary>> {
+        v1::find_page_by_title(&self.http, space_key, title).await
     }
 
     async fn page_restrictions(&self, id: &PageId) -> ApiResult<Vec<String>> {
@@ -1051,6 +1146,27 @@ impl ConfluenceClient for DcClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_background_task_is_read_however_it_reports_itself() {
+        assert_eq!(
+            long_task_id(r#"{"complete":false,"longTaskId":"9000000t1"}"#).as_deref(),
+            Some("9000000t1")
+        );
+        assert_eq!(long_task_id("<html>Moved</html>"), None);
+        let state = |v: serde_json::Value| long_task_state(&v);
+        assert_eq!(state(serde_json::json!({ "percentageComplete": 40 })), LongTask::Running);
+        assert_eq!(
+            state(serde_json::json!({ "percentageComplete": 100, "successful": true })),
+            LongTask::Succeeded
+        );
+        assert_eq!(state(serde_json::json!({ "finished": true })), LongTask::Succeeded);
+        assert_eq!(
+            state(serde_json::json!({ "finished": true, "successful": false,
+                "messages": [{ "translation": "A page with this title already exists" }] })),
+            LongTask::Failed("A page with this title already exists".into())
+        );
+    }
 
     fn client() -> DcClient {
         DcClient::new("https://wiki.corp/confluence", Auth::None, 2).unwrap()

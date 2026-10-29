@@ -117,6 +117,17 @@ pub struct MovedPage {
     pub version: u32,
 }
 
+/// A link by title that reaches no page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrokenLink {
+    /// The page the link is in, and its space.
+    pub page_id: String,
+    pub space: String,
+    /// The title it names, and the space it looks for it in.
+    pub title: String,
+    pub reaches: String,
+}
+
 /// A page whose links confed rewrote, as a new version.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkRewrite {
@@ -151,6 +162,9 @@ pub struct MovePlan {
     /// checked out, and the plan is there to read, but it will not run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<String>,
+    /// How long to wait for the server to finish a move it has accepted.
+    #[serde(default = "default_wait")]
+    pub wait_secs: u64,
     #[serde(default)]
     pub warnings: Vec<String>,
 
@@ -158,6 +172,9 @@ pub struct MovePlan {
     /// Pages whose title change has been made on the server.
     #[serde(default)]
     pub renamed: Vec<String>,
+    /// The move has been asked of the server; it is never asked twice.
+    #[serde(default)]
+    pub move_requested: bool,
     #[serde(default)]
     pub moved: Vec<MovedPage>,
     #[serde(default)]
@@ -165,6 +182,9 @@ pub struct MovePlan {
     /// Pages the plan expected to fix that the server had already fixed.
     #[serde(default)]
     pub links_by_server: Vec<String>,
+    /// Links the move concerns that reach no page, which confed left alone.
+    #[serde(default)]
+    pub links_broken: Vec<BrokenLink>,
 }
 
 impl MovePlan {
@@ -197,6 +217,14 @@ impl MovePlan {
     }
 }
 
+/// Seconds to wait for a move the server accepted to show: Data Center's web
+/// move runs as a background task.
+pub const DEFAULT_WAIT_SECS: u64 = 120;
+
+fn default_wait() -> u64 {
+    DEFAULT_WAIT_SECS
+}
+
 /// What to do about a title that is taken in the destination.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum OnConflict {
@@ -225,6 +253,8 @@ pub struct MoveRequest {
     pub rewrite_links: bool,
     pub relativize: bool,
     pub message: Option<String>,
+    /// How long to wait for the server to finish a move it has accepted.
+    pub wait_secs: u64,
 }
 
 /// Everything wrong with a move, found before anything is written.
@@ -522,13 +552,18 @@ pub async fn plan(
         message: req.message.clone(),
         rules_page,
         blocked: None,
+        wait_secs: req.wait_secs,
         warnings,
         renamed: Vec::new(),
+        move_requested: false,
         moved: Vec::new(),
         links_rewritten: Vec::new(),
         links_by_server: Vec::new(),
+        links_broken: Vec::new(),
     };
     let moves = plan.moves();
+    let index = PageIndex::of(spaces, &plan)?;
+    let exists = |space: &str, title: &str| index.exists(space, title);
     for (key, ws) in spaces {
         // Read the working tree only for a space that has a page to check.
         let mut scan: Option<worktree::Scan> = None;
@@ -539,6 +574,7 @@ pub async fn plan(
                 space_after: if moved { &req.dest.key } else { key },
                 moves: &moves,
                 relativize: req.relativize,
+                exists: Some(&exists),
             };
             let (_, count) = rewrite_links(&page.storage_body, &ctx);
             if count == 0 {
@@ -718,12 +754,15 @@ pub async fn execute(
             Step::ServerMoved => server_move(client, plan).await,
             Step::LocalDstWritten => write_destination(client, spaces, plan).await,
             Step::LocalSrcRemoved => remove_from_source(spaces, plan),
-            Step::LinksRewritten => fix_links(client, plan).await,
+            Step::LinksRewritten => fix_links(client, spaces, plan).await,
             Step::Done => settle(client, spaces, plan, concurrency).await,
             _ => Ok(()),
         };
         if let Err(e) = result {
-            let _ = instance.journal_fail(journal_id, &e.to_string());
+            // The plan as it stands — a move already asked for, say — so a
+            // resume knows what was done.
+            let plan_now = serde_json::to_value(&*plan).unwrap_or_default();
+            let _ = instance.journal_fail_with_plan(journal_id, &e.to_string(), &plan_now);
             return Err(e);
         }
         instance.journal_advance(journal_id, step, &serde_json::to_value(&*plan)?)?;
@@ -824,22 +863,31 @@ async fn server_move(client: &Arc<dyn ConfluenceClient>, plan: &mut MovePlan) ->
         }
     }
 
-    if !already {
+    // Asked once. A resume of a move the server is still working on waits for
+    // it rather than asking again.
+    if !already && !plan.move_requested {
         let target = PageId::new(&plan.target_id);
         if let Err(e) = client.move_page_to(&root, plan.position, &target).await {
             return Err(move_error(client, plan, e).await);
         }
+        plan.move_requested = true;
     }
 
-    // Trust nothing but the page itself: the web action Data Center falls
-    // back to answers with a web page whatever it did.
-    let after = client.get_page(&root, BodyFormat::Storage).await?;
+    // Trust nothing but the pages themselves: the web action Data Center falls
+    // back to answers with a web page whatever it did, and finishes the move
+    // in the background, after it has answered.
+    let after = wait_for_move(client, plan).await?;
     if after.summary.space_key != plan.dest.key {
-        return Err(ConfedError::Unsupported(format!(
-            "the server answered the move, but page {} is still in space {}: it did not move \
-             it, and confed will not copy and delete instead (that would lose ids and history)",
-            plan.root_id, after.summary.space_key
-        )));
+        return Err(ConfedError::state_with_hint(
+            format!(
+                "the server accepted the move, but after {}s page {} is still in space {}: it \
+                 may still be moving the pages, or it did not move them",
+                plan.wait_secs, plan.root_id, after.summary.space_key
+            ),
+            "check the page in the browser: once it is in the new space, \
+             `confed instance resume` finishes the move; confed will not ask the server to \
+             move it again, nor copy and delete",
+        ));
     }
     let parent = after.summary.parent_id.as_ref().map(|p| p.0.clone());
     if parent != plan.new_parent_id {
@@ -884,6 +932,40 @@ async fn server_move(client: &Arc<dyn ConfluenceClient>, plan: &mut MovePlan) ->
         }
     }
     Ok(())
+}
+
+/// Wait until the server shows the move done: the root and every page under
+/// it in the destination space. Polls with a growing interval, up to
+/// `plan.wait_secs`, and returns the root as last read.
+async fn wait_for_move(
+    client: &Arc<dyn ConfluenceClient>,
+    plan: &MovePlan,
+) -> Result<confed_api::Page> {
+    let started = std::time::Instant::now();
+    let limit = std::time::Duration::from_secs(plan.wait_secs);
+    let mut interval = std::time::Duration::from_millis(250);
+    let mut waiting_on: Vec<String> = plan.page_ids();
+    loop {
+        let root = client.get_page(&PageId::new(&plan.root_id), BodyFormat::Storage).await?;
+        if root.summary.space_key == plan.dest.key {
+            let mut still = Vec::new();
+            for id in &waiting_on {
+                let page = client.get_page(&PageId::new(id), BodyFormat::Storage).await?;
+                if page.summary.space_key != plan.dest.key {
+                    still.push(id.clone());
+                }
+            }
+            waiting_on = still;
+            if waiting_on.is_empty() {
+                return Ok(root);
+            }
+        }
+        if started.elapsed() >= limit {
+            return Ok(root);
+        }
+        tokio::time::sleep(interval.min(limit.saturating_sub(started.elapsed()))).await;
+        interval = (interval * 2).min(std::time::Duration::from_secs(10));
+    }
 }
 
 /// A failed move call, said plainly.
@@ -959,38 +1041,56 @@ pub async fn transfer(
         .map(|p| (p.id.0.clone(), p))
         .collect();
 
-    // The cache first: it is never wrong to have more of it.
-    if let (Ok(from), Ok(to)) = (src.page_store(), dst.page_store()) {
-        from.copy_pages_to(&to, &ids)?;
+    // The destination must list every moved page: a server still moving them
+    // in the background, or not yet showing them, is waited out by a resume,
+    // not guessed at.
+    let unlisted: Vec<&str> =
+        ids.iter().filter(|id| !listed.contains_key(*id)).map(String::as_str).collect();
+    if !unlisted.is_empty() {
+        return Err(ConfedError::state_with_hint(
+            format!(
+                "space {} does not list page(s) {} yet, though the server moved them",
+                plan.dest.key,
+                unlisted.join(", ")
+            ),
+            "the server may still be finishing the move: `confed instance resume` in a moment",
+        ));
     }
 
-    // Rows, in one transaction.
-    let dst_state = dst.state();
-    dst_state.conn().execute_batch("BEGIN IMMEDIATE")?;
-    let copied: Result<()> = (|| {
-        for user in src.state().all_users()? {
-            if dst_state.get_user(&user.id)?.is_none() {
-                dst_state.upsert_user(&user)?;
-            }
+    // Every row first, in memory, and where each page's file will go — so
+    // that nothing is written unless all of it can be.
+    let mut base_rows: Vec<(PageRecord, bool)> = Vec::new();
+    let mut remote_rows: Vec<RemotePage> = Vec::new();
+    for page in &plan.pages {
+        // A row an interrupted run already copied stands; one from the
+        // source is carried over.
+        let (mut record, from_source) = match dst.state().get_page(&page.page_id)? {
+            Some(record) => (record, false),
+            None => match src.state().get_page(&page.page_id)? {
+                Some(record) => (record, true),
+                None => {
+                    return Err(ConfedError::state(format!(
+                        "page {} is in neither workspace; run `confed instance doctor`",
+                        page.page_id
+                    )))
+                }
+            },
+        };
+        if page.depth == 0 {
+            record.parent_id = plan.new_parent_id.clone();
         }
-        for page in &plan.pages {
-            if dst_state.get_page(&page.page_id)?.is_some() {
-                continue;
-            }
-            let Some(mut record) = src.state().get_page(&page.page_id)? else {
-                return Err(ConfedError::state(format!(
-                    "page {} is in neither workspace; run `confed instance doctor`",
-                    page.page_id
-                )));
-            };
-            if page.depth == 0 {
-                record.parent_id = plan.new_parent_id.clone();
-            }
+        if from_source {
             // Rendered again by the closing pull, in the destination's context.
             record.render_key = String::new();
-            dst_state.upsert_page(&record)?;
-
-            let mut remote = src.state().get_remote(&page.page_id)?.unwrap_or(RemotePage {
+        }
+        let summary = &listed[&page.page_id];
+        // The source's copy may say the page was deleted: a fetch there after
+        // the server moved it sees it gone. The server says where it is.
+        let mut remote = src
+            .state()
+            .get_remote(&page.page_id)?
+            .or(dst.state().get_remote(&page.page_id)?)
+            .unwrap_or(RemotePage {
                 page_id: record.page_id.clone(),
                 title: record.title.clone(),
                 parent_id: record.parent_id.clone(),
@@ -1006,30 +1106,68 @@ pub async fn transfer(
                 fetched_at: now(),
                 deleted: false,
             });
-            if let Some(summary) = listed.get(&page.page_id) {
-                remote.title = summary.title.clone();
-                remote.parent_id = summary.parent_id.as_ref().map(|p| p.0.clone());
-                remote.position = summary.position;
-                remote.labels = summary.labels.clone();
-                if summary.version != remote.version {
-                    // Changed beyond the move: the closing pull fetches it.
-                    remote.storage_body = None;
-                    remote.storage_hash = None;
-                }
-                remote.version = summary.version;
+        remote.deleted = false;
+        remote.status = "current".to_string();
+        remote.title = summary.title.clone();
+        remote.parent_id = summary.parent_id.as_ref().map(|p| p.0.clone());
+        remote.position = summary.position;
+        remote.labels = summary.labels.clone();
+        if summary.version != remote.version {
+            // Changed beyond the move: the closing pull fetches it.
+            remote.storage_body = None;
+            remote.storage_hash = None;
+        }
+        remote.version = summary.version;
+        if remote.storage_body.is_none() && remote.version == record.version {
+            remote.storage_body = Some(record.storage_body.clone());
+            remote.storage_hash = Some(record.storage_hash.clone());
+        }
+        remote_rows.push(remote);
+        base_rows.push((record, from_source));
+    }
+    let placements = {
+        let mut remote: Vec<RemotePage> =
+            dst.state().all_remote()?.into_iter().filter(|r| !ids.contains(&r.page_id)).collect();
+        remote.extend(remote_rows.iter().cloned());
+        let mut base: Vec<PageRecord> =
+            dst.state().all_pages()?.into_iter().filter(|b| !ids.contains(&b.page_id)).collect();
+        base.extend(base_rows.iter().map(|(b, _)| b.clone()));
+        paths::plan_from_records(&remote, &base)
+    };
+    if let Some(page) = plan.pages.iter().find(|p| !placements.contains_key(&p.page_id)) {
+        return Err(ConfedError::state(format!(
+            "no place for page {} in {}; nothing was written",
+            page.page_id, plan.dest.dir
+        )));
+    }
+
+    // The cache: it is never wrong to have more of it.
+    if let (Ok(from), Ok(to)) = (src.page_store(), dst.page_store()) {
+        from.copy_pages_to(&to, &ids)?;
+    }
+
+    // Rows, in one transaction.
+    let dst_state = dst.state();
+    dst_state.conn().execute_batch("BEGIN IMMEDIATE")?;
+    let copied: Result<()> = (|| {
+        for user in src.state().all_users()? {
+            if dst_state.get_user(&user.id)?.is_none() {
+                dst_state.upsert_user(&user)?;
             }
-            if remote.storage_body.is_none() && remote.version == record.version {
-                remote.storage_body = Some(record.storage_body.clone());
-                remote.storage_hash = Some(record.storage_hash.clone());
+        }
+        for ((record, from_source), remote) in base_rows.iter().zip(&remote_rows) {
+            dst_state.upsert_page(record)?;
+            dst_state.upsert_remote(remote)?;
+            if !from_source {
+                continue;
             }
-            dst_state.upsert_remote(&remote)?;
-            for attachment in src.state().page_attachments(&page.page_id)? {
+            for attachment in src.state().page_attachments(&record.page_id)? {
                 dst_state.upsert_attachment(&attachment)?;
             }
-            for comment in src.state().page_comments(&page.page_id)? {
+            for comment in src.state().page_comments(&record.page_id)? {
                 dst_state.upsert_comment(&comment)?;
             }
-            for removed in src.state().removed_attachments(&page.page_id)? {
+            for removed in src.state().removed_attachments(&record.page_id)? {
                 dst_state.note_removed_attachment(
                     &removed.page_id,
                     &removed.filename,
@@ -1048,16 +1186,9 @@ pub async fn transfer(
     }
 
     // Files, where the destination's rules put them.
-    let placements =
-        paths::plan_from_records(&dst.state().all_remote()?, &dst.state().all_pages()?);
     let mut moved = Vec::new();
     for page in &mut plan.pages {
-        let Some(placement) = placements.get(&page.page_id) else {
-            return Err(ConfedError::state(format!(
-                "no place for page {} in {}",
-                page.page_id, plan.dest.dir
-            )));
-        };
+        let placement = &placements[&page.page_id];
         move_page_files(src, dst, &page.from_path, &placement.path)?;
         page.to_path = placement.path.clone();
 
@@ -1218,15 +1349,21 @@ fn parent_dir(path: &str) -> Option<String> {
 }
 
 /// Fix, on the server, the links the move broke that Confluence left broken.
-async fn fix_links(client: &Arc<dyn ConfluenceClient>, plan: &mut MovePlan) -> Result<()> {
+async fn fix_links(
+    client: &Arc<dyn ConfluenceClient>,
+    spaces: &BTreeMap<String, Workspace>,
+    plan: &mut MovePlan,
+) -> Result<()> {
     if !plan.rewrite_links {
         return Ok(());
     }
     let moves = plan.moves();
+    let mut known = PageIndex::of(spaces, plan)?;
     let fixes = plan.links.clone();
     for fix in fixes {
         if plan.links_rewritten.iter().any(|r| r.page_id == fix.page_id)
             || plan.links_by_server.contains(&fix.page_id)
+            || plan.links_broken.iter().any(|b| b.page_id == fix.page_id)
         {
             continue;
         }
@@ -1234,15 +1371,50 @@ async fn fix_links(client: &Arc<dyn ConfluenceClient>, plan: &mut MovePlan) -> R
         let page = client.get_page(&id, BodyFormat::Storage).await?;
         let own = page.summary.space_key.clone();
         let before = if fix.moved { plan.source.key.clone() } else { own.clone() };
-        let ctx = LinkContext {
+        let unjudged = LinkContext {
             space_before: &before,
             space_after: &own,
             moves: &moves,
             relativize: plan.relativize,
+            exists: None,
         };
+        let links = link_targets(&page.body_storage, &unjudged);
+        // What the server can say about spaces this instance does not hold.
+        for link in &links {
+            known.look_up(client, &link.meant).await;
+            known.look_up(client, &link.reaches).await;
+        }
+        let exists = |space: &str, title: &str| known.exists(space, title);
+        let ctx = LinkContext { exists: Some(&exists), ..unjudged };
         let (rewritten, count) = rewrite_links(&page.body_storage, &ctx);
+
+        // Links the move concerns that reach nothing, before or after.
+        for link in &links {
+            // Every link of a moved page; another page's links to moved pages.
+            let concerns_the_move = fix.moved
+                || link.named != link.meant
+                || moves.values().any(|to| to == &link.reaches);
+            let ends_at =
+                if exists(&link.meant.0, &link.meant.1) { &link.meant } else { &link.reaches };
+            if concerns_the_move && !exists(&ends_at.0, &ends_at.1) {
+                plan.links_broken.push(BrokenLink {
+                    page_id: fix.page_id.clone(),
+                    space: own.clone(),
+                    title: link.reaches.1.clone(),
+                    reaches: link.reaches.0.clone(),
+                });
+            }
+        }
+
         if count == 0 {
-            plan.links_by_server.push(fix.page_id.clone());
+            // Fixed by the server only if the server's copy is not ours.
+            let ours = spaces
+                .get(if fix.moved { &plan.dest.key } else { &fix.space })
+                .and_then(|ws| ws.state().get_page(&fix.page_id).ok().flatten())
+                .map(|record| record.storage_body);
+            if ours.as_deref().is_some_and(|ours| ours != page.body_storage) {
+                plan.links_by_server.push(fix.page_id.clone());
+            }
             continue;
         }
         let updated = client
@@ -1267,11 +1439,65 @@ async fn fix_links(client: &Arc<dyn ConfluenceClient>, plan: &mut MovePlan) -> R
     }
     if !plan.links_by_server.is_empty() {
         plan.warnings.push(format!(
-            "the server had already updated the links in {} page(s) itself",
+            "the server had already changed the links in {} page(s) itself",
             plan.links_by_server.len()
         ));
     }
+    plan.links_broken.dedup();
+    for broken in &plan.links_broken {
+        plan.warnings.push(format!(
+            "page {} in {} links to \"{}\" in space {}, which does not exist; confed left it \
+             as it was",
+            broken.page_id, broken.space, broken.title, broken.reaches
+        ));
+    }
     Ok(())
+}
+
+/// Which pages exist, by `(space, title)`: what the registered workspaces
+/// know — with the move's own pages where the move put them — and, for
+/// other spaces, what the server answers, asked once per page.
+struct PageIndex {
+    registered: HashSet<String>,
+    titles: HashSet<(String, String)>,
+    asked: HashMap<(String, String), bool>,
+}
+
+impl PageIndex {
+    fn of(spaces: &BTreeMap<String, Workspace>, plan: &MovePlan) -> Result<Self> {
+        let mut titles = HashSet::new();
+        for (key, ws) in spaces {
+            for remote in ws.state().all_remote()?.into_iter().filter(|r| !r.deleted) {
+                titles.insert((key.clone(), remote.title));
+            }
+            for base in ws.state().all_pages()? {
+                titles.insert((key.clone(), base.title));
+            }
+        }
+        for page in &plan.pages {
+            titles.remove(&(plan.source.key.clone(), page.title.clone()));
+            titles.insert((plan.dest.key.clone(), page.final_title().to_string()));
+        }
+        Ok(Self { registered: spaces.keys().cloned().collect(), titles, asked: HashMap::new() })
+    }
+
+    async fn look_up(&mut self, client: &Arc<dyn ConfluenceClient>, page: &(String, String)) {
+        if self.registered.contains(&page.0) || self.asked.contains_key(page) {
+            return;
+        }
+        // An answer that is not "no" is taken for "yes": a link is not
+        // called broken on a guess.
+        let found = !matches!(client.find_page_by_title(&page.0, &page.1).await, Ok(None));
+        self.asked.insert(page.clone(), found);
+    }
+
+    fn exists(&self, space: &str, title: &str) -> bool {
+        let key = (space.to_string(), title.to_string());
+        if self.registered.contains(space) {
+            return self.titles.contains(&key);
+        }
+        self.asked.get(&key).copied().unwrap_or(true)
+    }
 }
 
 /// Pull what the move touched in every workspace it wrote to, so each file
@@ -1291,6 +1517,15 @@ async fn settle(
     }
     for (key, scope) in scopes {
         let Some(ws) = spaces.get_mut(&key) else { continue };
+        let changed = take_in_silent_changes(client, ws, &scope).await?;
+        if !changed.is_empty() {
+            plan.warnings.push(format!(
+                "{key}: the server changed {} page(s) without a new version ({}); their files \
+                 now show the server's text",
+                changed.len(),
+                changed.join(", ")
+            ));
+        }
         let space = SpaceId { key: key.clone(), numeric: ws.space_numeric_id()? };
         let engine = SyncEngine::new(client.clone(), space, concurrency);
         let outcome = engine
@@ -1348,6 +1583,51 @@ async fn settle(
     Ok(())
 }
 
+/// Pages whose storage the server changed without saving a new version —
+/// what Confluence's link refactoring does after a move — taken in, so the
+/// next pull renders the server's text. A version check cannot see such a
+/// change: confed compares the bodies. Only clean pages are touched; the
+/// rest are left for an ordinary pull to merge when the page next changes.
+pub async fn take_in_silent_changes(
+    client: &Arc<dyn ConfluenceClient>,
+    ws: &mut Workspace,
+    page_ids: &[String],
+) -> Result<Vec<String>> {
+    let scan = worktree::scan(ws)?;
+    let mut changed = Vec::new();
+    for id in page_ids {
+        let Some(mut base) = ws.state().get_page(id)? else { continue };
+        let clean = scan
+            .pages
+            .iter()
+            .find(|s| s.page_id.as_deref() == Some(id.as_str()))
+            .is_some_and(|s| s.is_clean());
+        if !clean {
+            continue;
+        }
+        let Ok(server) = client.get_page(&PageId::new(id), BodyFormat::Storage).await else {
+            continue;
+        };
+        if server.summary.version != base.version || server.body_storage == base.storage_body {
+            continue;
+        }
+        if let Some(mut remote) = ws.state().get_remote(id)? {
+            remote.storage_hash = Some(crate::state::hash_str(&server.body_storage));
+            remote.storage_body = Some(server.body_storage.clone());
+            ws.state().upsert_remote(&remote)?;
+        }
+        // The cache keys bodies by version: same version, so it must be told.
+        if let Ok(store) = ws.page_store() {
+            store.put_body(id, server.summary.version, &server.body_storage)?;
+        }
+        // Rendered again from the server's body by the pull that follows.
+        base.render_key = String::new();
+        ws.state().upsert_page(&base)?;
+        changed.push(id.clone());
+    }
+    Ok(changed)
+}
+
 // ---------------------------------------------------------------- links ---
 
 /// How the links in one page are read and what they should become.
@@ -1362,6 +1642,56 @@ pub struct LinkContext<'a> {
     /// Drop `ri:space-key` from a link that ends up naming the page's own
     /// space, rather than writing that space's key.
     pub relativize: bool,
+    /// Whether a page `(space, title)` exists. With it, a link is changed
+    /// only when the page it meant exists and the link does not reach it
+    /// already; a link that meant nothing is left as it is. Without it, links
+    /// are judged by how they are written alone.
+    pub exists: Option<&'a PageExists<'a>>,
+}
+
+/// Whether a page `(space, title)` exists.
+pub type PageExists<'a> = dyn Fn(&str, &str) -> bool + 'a;
+
+/// One link by title: what it reaches as written, and what it should.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkTarget {
+    /// `(space, title)` the link resolves to, written as it is, from the
+    /// page's space after the move.
+    pub reaches: (String, String),
+    /// `(space, title)` of the page it meant: what it named before the move,
+    /// where that page is now.
+    pub meant: (String, String),
+    /// `(space, title)` it named before the move.
+    pub named: (String, String),
+}
+
+/// Every link by title in `storage`, resolved as [`rewrite_links`] sees it.
+pub fn link_targets(storage: &str, ctx: &LinkContext<'_>) -> Vec<LinkTarget> {
+    let mut out = Vec::new();
+    let mut rest = storage;
+    while let Some(start) = find_page_tag(rest) {
+        let tail = &rest[start..];
+        let Some(end) = tag_end(tail) else { break };
+        if let Some((target, _)) = resolve_tag(&tail[..end], ctx) {
+            out.push(target);
+        }
+        rest = &tail[end..];
+    }
+    out
+}
+
+/// The parts of a link tag a rewrite needs: where it points and where it
+/// should.
+fn resolve_tag(tag: &str, ctx: &LinkContext<'_>) -> Option<(LinkTarget, Option<String>)> {
+    let attrs = attributes(tag);
+    let title_attr = attrs.iter().find(|a| a.name == "ri:content-title")?;
+    let named_space = attrs.iter().find(|a| a.name == "ri:space-key").map(|a| unescape(&a.value));
+    let title = unescape(&title_attr.value);
+    let before = named_space.clone().unwrap_or_else(|| ctx.space_before.to_string());
+    let named = (before, title.clone());
+    let meant = ctx.moves.get(&named).cloned().unwrap_or_else(|| named.clone());
+    let reaches = (named_space.clone().unwrap_or_else(|| ctx.space_after.to_string()), title);
+    Some((LinkTarget { reaches, meant, named }, named_space))
 }
 
 /// Rewrite the `ri:page` links in `storage` so each one still names the page
@@ -1496,11 +1826,17 @@ fn rewrite_tag(tag: &str, ctx: &LinkContext<'_>) -> Option<String> {
     let title_attr = attrs.iter().find(|a| a.name == "ri:content-title")?;
     let space_attr = attrs.iter().find(|a| a.name == "ri:space-key");
     let title = unescape(&title_attr.value);
-    let named_space = space_attr.map(|a| unescape(&a.value));
-    let meant = named_space.clone().unwrap_or_else(|| ctx.space_before.to_string());
+    let (link, named_space) = resolve_tag(tag, ctx)?;
+    let (target_space, target_title) = link.meant.clone();
 
-    let (target_space, target_title) =
-        ctx.moves.get(&(meant.clone(), title.clone())).cloned().unwrap_or((meant, title.clone()));
+    // Judged by what exists, when that is known: a link to nothing is left
+    // as it is — rewriting it would only move where it fails — and one that
+    // reaches its page already needs nothing.
+    if let Some(exists) = ctx.exists {
+        if !exists(&target_space, &target_title) || link.reaches == link.meant {
+            return None;
+        }
+    }
 
     // What the tag must say for the link to resolve to the target from here.
     let wanted_space: Option<String> = if target_space == ctx.space_after {
@@ -1643,6 +1979,7 @@ mod tests {
                 space_after: after,
                 moves: &map,
                 relativize: false,
+                exists: None,
             },
         )
     }
@@ -1686,12 +2023,19 @@ mod tests {
                 space_after: "ENG",
                 moves: &map,
                 relativize: false,
+                exists: None,
             },
         );
         assert_eq!(kept, r#"<ri:page ri:space-key="ENG" ri:content-title="Onboarding"/>"#);
         let (dropped, n) = rewrite_links(
             src,
-            &LinkContext { space_before: "ENG", space_after: "ENG", moves: &map, relativize: true },
+            &LinkContext {
+                space_before: "ENG",
+                space_after: "ENG",
+                moves: &map,
+                relativize: true,
+                exists: None,
+            },
         );
         assert_eq!(n, 1);
         assert_eq!(dropped, r#"<ri:page ri:content-title="Onboarding"/>"#);
@@ -1759,6 +2103,7 @@ mod tests {
             space_after: "DOCS",
             moves: &map,
             relativize: false,
+            exists: None,
         };
         let (once, n) = rewrite_links(src, &ctx);
         assert_eq!(n, 2);

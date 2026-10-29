@@ -20,6 +20,52 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-29
+
+### Fixed
+
+- **A move that worked was reported as failed (exit 9).** Data Center's web move answers
+  before it has moved anything, with `complete: false` and a `longTaskId`, and moves
+  the pages in a background task. confed read the page back at once and saw it in its
+  old space. It now follows the task through `rest/api/longtask/{id}`, then waits, up to
+  `--wait` seconds (120 by default), until every moved page is in the destination. A
+  task that fails is an error with its messages. A move still unfinished is exit 7, and
+  `instance resume` waits again; it never asks the server to move the pages twice.
+- **A resume after the source had been fetched failed with "no place for page"**, and
+  left the pages tracked in both workspaces. A fetch of the source after the server has
+  moved the pages records them as deleted, and that record was copied across. The
+  server's listing of the destination now decides. Every row and path is worked out
+  before anything is written, so a failure writes nothing.
+- **Links were rewritten to pages that do not exist.** Moving pages back made confed
+  point a moved page's links at a space the linked page was never in, including a link
+  that was correct. Links are now judged by what exists (registered workspaces, then an
+  exact title lookup on the server):
+  - a link whose page does not exist is left alone, and listed in `links_broken`
+  - a link that already reaches its page is not touched
+
+  "Fixed by the server" (`links_by_server`) is claimed only when the server's copy
+  really differs from confed's.
+- **Pages the server changed without a new version kept their old text locally.** Data
+  Center's link refactoring edits storage in place. After a move, confed now compares
+  every page it touched with the server, and takes in what changed.
+- **A link naming another space showed as a link to a local page of the same title.**
+  It is written as that space's link now. The converter version changes, so the next
+  `pull` re-renders pages whose rendering is affected; no download is needed.
+- **The REST move probe named a real page in a write request.** It now asks about page 0
+  on both sides; the server's error body says whether the route exists.
+- **`doctor` exited 1 when it could not reach the server.** When the server is all that
+  failed, it exits 5 (unreachable) or 3 (credentials), as other commands do.
+
+### Changed
+
+- **The Data Center web move sends the form a 9.5 browser sends:**
+  - the new parent by title
+  - `mode=ASYNC`
+  - the session's `atl_token`, opened by viewing the page, from the start
+  - `X-Requested-With`
+
+  `targetId` is no longer sent. `X-Atlassian-Token: no-check` still goes too.
+
 ## [0.13.0] - 2026-10-29
 
 ### Changed
@@ -943,7 +989,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/hxmn/confed/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/hxmn/confed/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/hxmn/confed/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/hxmn/confed/compare/v0.10.0...v0.11.0

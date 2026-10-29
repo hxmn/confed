@@ -668,18 +668,41 @@ pub async fn move_page_to(
 /// A target id no content has.
 pub const PROBE_TARGET: &str = "0";
 
-/// Ask the move endpoint to move the real page `page` under a target that
-/// cannot exist, so nothing can move.
+/// Ask the move endpoint to move page 0 under page 0. Nothing has id 0, so
+/// nothing can move, and no real page is named in a write request.
 ///
-/// The question is whether the request gets past routing. A server with the
-/// endpoint looks the page up and then fails on the target, in its JSON error
-/// format; one without it never reaches a resource: Jersey's `null for uri`
-/// 404, or a 405. A missing page id would not tell the two apart — both are a
-/// 404 — which is why the page must be one that exists.
-pub async fn probe_move(http: &crate::http::Http, page: &PageId) -> ApiResult<Probe> {
-    let path = format!("rest/api/content/{page}/move/append/{PROBE_TARGET}");
+/// "No such page" and "no such route" are both a 404, so the status alone
+/// says nothing; the body does. A server with the endpoint routes the request
+/// to its resource, which answers in its JSON error format that it found no
+/// content; one without it never gets that far, and Jersey answers `null for
+/// uri` (or the request is a 405). An answer that is neither is `unknown`.
+pub async fn probe_move(http: &crate::http::Http) -> ApiResult<Probe> {
+    let path = format!("rest/api/content/{PROBE_TARGET}/move/append/{PROBE_TARGET}");
     let answer = http.put_json::<_, serde_json::Value>(&path, &serde_json::json!({})).await;
     Ok(classify_move_probe(answer))
+}
+
+/// `GET rest/api/content?spaceKey=…&title=…`: the page with exactly this
+/// title in this space, from the database rather than the search index — a
+/// page moved a moment ago is found where it is now.
+pub async fn find_page_by_title(
+    http: &crate::http::Http,
+    space_key: &str,
+    title: &str,
+) -> ApiResult<Option<PageSummary>> {
+    let page: crate::paginate::OffsetPage<Content> = http
+        .get_json(
+            "rest/api/content",
+            &[
+                ("spaceKey", space_key.to_string()),
+                ("title", title.to_string()),
+                ("type", "page".to_string()),
+                ("expand", "version,ancestors,space".to_string()),
+                ("limit", "1".to_string()),
+            ],
+        )
+        .await?;
+    Ok(page.results.first().map(|c| c.summary(space_key)))
 }
 
 pub fn classify_move_probe(answer: ApiResult<serde_json::Value>) -> Probe {

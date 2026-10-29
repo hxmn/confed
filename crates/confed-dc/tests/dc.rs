@@ -1416,13 +1416,13 @@ async fn a_refused_move_keeps_its_meaning() {
 }
 
 #[tokio::test]
-async fn the_move_probe_asks_about_a_real_page_and_a_target_that_cannot_exist() {
+async fn the_move_probe_names_no_real_page_in_a_write() {
     use confed_api::Probe;
     use wiremock::matchers::body_string_contains;
-    // The endpoint is there: it found page 1001 and failed on target 0.
+    // The endpoint is there: its resource looked for content 0, and said so.
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
-        .and(path("/confluence/rest/api/content/1001/move/append/0"))
+        .and(path("/confluence/rest/api/content/0/move/append/0"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({
             "statusCode": 404, "message": "No content found with id: ContentId{id=0}"
         })))
@@ -1489,21 +1489,10 @@ async fn the_move_probe_asks_about_a_real_page_and_a_target_that_cannot_exist() 
 }
 
 #[tokio::test]
-async fn a_web_action_that_refuses_no_check_is_sent_the_sessions_token() {
-    use confed_api::MovePosition;
-    use wiremock::matchers::body_string_contains;
+async fn a_web_action_that_refuses_even_the_sessions_token_is_exit_9() {
+    use confed_api::{ApiError, MovePosition};
     let server = server_without_the_move_endpoint().await;
-    // With the session's token and cookie: accepted.
-    Mock::given(method("POST"))
-        .and(path("/confluence/pages/movepage.action"))
-        .and(body_string_contains("atl_token=9000000def"))
-        .and(header("cookie", "JSESSIONID=9000000abc"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("<html>Moved</html>"))
-        .expect(1)
-        .with_priority(1)
-        .mount(&server)
-        .await;
-    // Without: "Session Expired".
+    mount_page_view(&server).await;
     Mock::given(method("POST"))
         .and(path("/confluence/pages/movepage.action"))
         .respond_with(ResponseTemplate::new(403).set_body_string(
@@ -1512,22 +1501,14 @@ async fn a_web_action_that_refuses_no_check_is_sent_the_sessions_token() {
         .expect(1)
         .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/confluence/pages/viewpage.action"))
-        .and(query_param("pageId", "1002"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("Set-Cookie", "JSESSIONID=9000000abc; Path=/; HttpOnly")
-                .set_body_string(
-                    r#"<html><head><meta name="ajs-atl-token" content="9000000def"></head></html>"#,
-                ),
-        )
-        .mount(&server)
-        .await;
-    client(&server)
+    let err = client(&server)
         .move_page_to(&PageId::new("1002"), MovePosition::Append, &PageId::new("2002"))
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        matches!(&err, ApiError::Unsupported { operation, .. } if operation.contains("XSRF")),
+        "{err:?}"
+    );
 }
 
 /// The REST move endpoint is missing, as on Data Center: the target is read
@@ -1553,27 +1534,100 @@ async fn server_without_the_move_endpoint() -> MockServer {
     server
 }
 
+/// The page view a browser session starts from: a session cookie, and the
+/// token the page's forms carry.
+async fn mount_page_view(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/confluence/pages/viewpage.action"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Set-Cookie", "JSESSIONID=9000000abc; Path=/; HttpOnly")
+                .set_body_string(
+                    r#"<html><head><meta name="ajs-atl-token" content="9000000def"></head></html>"#,
+                ),
+        )
+        .mount(server)
+        .await;
+}
+
 #[tokio::test]
 async fn without_the_rest_endpoint_data_center_moves_through_the_web_action() {
     use confed_api::MovePosition;
     use wiremock::matchers::body_string_contains;
     let server = server_without_the_move_endpoint().await;
+    mount_page_view(&server).await;
+    // The form a 9.5 browser sends: the new parent by title, ASYNC, the
+    // session's token with the session's cookie.
     Mock::given(method("POST"))
         .and(path("/confluence/pages/movepage.action"))
-        .and(header("X-Atlassian-Token", "no-check"))
+        .and(header("X-Requested-With", "XMLHttpRequest"))
+        .and(header("cookie", "JSESSIONID=9000000abc"))
         .and(body_string_contains("pageId=1002"))
         .and(body_string_contains("spaceKey=ENG"))
         .and(body_string_contains("targetTitle=Runbooks+%26+Checklists"))
-        .and(body_string_contains("targetId=2002"))
         .and(body_string_contains("position=append"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("<html>Runbooks</html>"))
+        .and(body_string_contains("mode=ASYNC"))
+        .and(body_string_contains("atl_token=9000000def"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "complete": false, "status": "Starting", "longTaskId": "9000000t1"
+        })))
         .expect(1)
+        .mount(&server)
+        .await;
+    // The task runs a while before it is done.
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter = polls.clone();
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/longtask/9000000t1"))
+        .respond_with(move |_: &Request| {
+            let n = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let body = if n < 2 {
+                json!({ "percentageComplete": 30, "successful": true })
+            } else {
+                json!({ "percentageComplete": 100, "successful": true })
+            };
+            ResponseTemplate::new(200).set_body_json(body)
+        })
         .mount(&server)
         .await;
     client(&server)
         .move_page_to(&PageId::new("1002"), MovePosition::Append, &PageId::new("2002"))
         .await
         .unwrap();
+    assert_eq!(polls.load(std::sync::atomic::Ordering::SeqCst), 3, "followed to the end");
+    let sent = server.received_requests().await.unwrap();
+    let form = sent.iter().find(|r| r.method.as_str() == "POST").unwrap();
+    assert!(!String::from_utf8_lossy(&form.body).contains("targetId"), "as the browser: by title");
+}
+
+#[tokio::test]
+async fn a_move_task_that_fails_is_an_error_with_its_reason() {
+    use confed_api::{ApiError, MovePosition};
+    let server = server_without_the_move_endpoint().await;
+    mount_page_view(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/pages/movepage.action"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "complete": false, "longTaskId": "9000000t2"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/longtask/9000000t2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "percentageComplete": 100, "successful": false,
+            "messages": [{ "translation": "A page with this title already exists" }]
+        })))
+        .mount(&server)
+        .await;
+    let err = client(&server)
+        .move_page_to(&PageId::new("1002"), MovePosition::Append, &PageId::new("2002"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, ApiError::Server { body, .. } if body.contains("already exists")),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

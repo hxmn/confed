@@ -129,25 +129,34 @@ Center found no such route.
 makes it the target's sibling: `KEY: --root` is `after` the home page, and `--position N`
 is `before` the Nth sibling.
 
-**The Data Center fallback.** When the REST route answers 405, or a 404 that is
-Jersey's `null for uri` rather than "no such content", confed posts the dialog's form to
-`pages/movepage.action`. The form carries `pageId`, `spaceKey` and `targetTitle` (the
-target's space and title), `targetId`, and `position`: `append`, or `above`/`below` for
-before/after. The form must pass Confluence's XSRF check, in two attempts:
+**The Data Center fallback**, as a 9.5.4 browser was seen to do it. When the REST route
+answers 405, or a 404 that is Jersey's `null for uri` rather than "no such content",
+confed sends the browser's form:
 
-1. `X-Atlassian-Token: no-check`, the documented way for a script.
-2. If the server answers that with its 403 "Session Expired" page (missing security
-   token), the form a browser sends: confed views the page
-   (`pages/viewpage.action`), takes the session cookie it sets and the `atl_token` the
-   page embeds, and posts once more with both.
+- `POST pages/movepage.action`, with `X-Requested-With: XMLHttpRequest`
+- fields: `pageId`, `spaceKey` (the destination), `targetTitle` (the new parent **by
+  title**, not by id), `position` (`append`; `above`/`below` for before/after, not yet
+  seen in a browser and checked by the read-back), `mode=ASYNC`, and `atl_token`
+- the session behind the token is opened as a browser's is, by viewing the page
+  (`pages/viewpage.action`): its cookie goes with the form
+- `X-Atlassian-Token: no-check` goes too. The browser does not send it, but it lets a
+  script through where no session can be had.
 
-A second refusal means scripts cannot use the action on this server: exit 9. The action
-answers with a web page whatever it did, so its answer is not trusted. A redirect to
-`login.action` is reported as the server not accepting this credential for web
-actions, and anything else is checked by reading the page back.
+A 403 "Session Expired" page from the XSRF check is exit 9.
 
-**Read-back, on every move.** If the root page is not in the destination space, the move
-is **exit 9**, and nothing else happens. If it is in the right space under the wrong
+The server answers **before it has moved anything**: `200` with
+`{"complete": false, "status": "Starting…", "longTaskId": …}`, the page still in its
+old space. It moves the pages in a background task. confed follows that task through
+`GET rest/api/longtask/{id}` until it reports finished (or 100%). A task that finishes
+unsuccessfully is an error carrying its messages. 0.13.0 read the page back at once,
+saw it still in the old space, and wrongly reported exit 9 for a move that was
+happening.
+
+**Read-back, on every move.** confed then waits, polling with a growing interval for up
+to `--wait` seconds (120 by default), until the root and every page under it are in the
+destination space. If they are not by then, the result is exit 7: the server may still
+be moving them. A later `confed instance resume` waits again and **never asks the
+server to move them a second time**, since the plan records that it already asked. If it is in the right space under the wrong
 parent, confed moves it under the right one with the in-space update Data Center does
 support (`PUT content/{id}` with new `ancestors`). If that does not take either, the
 journal stops at `planned` with exit 7 and a hint. `abort` asks the server where the
@@ -159,11 +168,10 @@ runs on request in `confed whoami --probe-move`, `confed doctor --probe-move` an
 `confed instance doctor --probe-move`, and never unasked: it is a write request against
 a real page, even though nothing moves.
 
-- **REST route:** the probe moves a real page (the subtree's root, or one of the
-  workspace's) under a target that cannot exist (`move/append/0`). A missing page id
-  could not tell anything apart, because "no such page" and "no such route" are both 404.
-  With a real page, a server with the route answers in its JSON about the target, and
-  one without answers Jersey's `null for uri` or 405.
+- **REST route:** `PUT rest/api/content/0/move/append/0`. Nothing has id 0, and no real
+  page is named in the write. "No such page" and "no such route" are both a 404; the body
+  tells them apart. A server with the route reaches its resource, which answers in its
+  JSON that it found no content. One without it answers Jersey's `null for uri`, or 405.
 - **Web action (Data Center):** a POST of the move form for page **0**, with
   `X-Atlassian-Token: no-check`, then if refused with a session token. The XSRF check
   runs before the action looks for the page, and nothing has id 0, so nothing can move.
@@ -298,6 +306,37 @@ In the Markdown, a link to a page in another space is written
 in the destination that names a moved page by its new space renders as a relative file
 link on the next pull. With the explicit key it still resolves; `--relativize` drops the
 key.
+
+### 6.1 Judged by what exists (0.14.0)
+
+Reading links by how they are written alone went wrong on a real server:
+
+- **Partial, silent refactoring.** Data Center 9.5.4's own link refactoring fixed only
+  links that named the old space explicitly. It did not fix plain links to or from the
+  moved pages, and it changed the storage it did fix in place, without a new version.
+- **A plain link that was already broken.** On the way back, such a link was read as
+  meaning "this space", and rewritten to point there, where the page was not.
+
+So every link the move concerns is now judged by what exists. Existence comes from the
+registered workspaces' records, with the moved pages where the move put them. For
+other spaces, confed asks the server with an exact title lookup
+(`GET rest/api/content?spaceKey=&title=`, from the database, not the search index).
+
+- If the page a link meant does not exist, the link is left as it is, and reported in
+  `links_broken`. If the move happens to make it resolve, as a plain link carried back
+  to its page's space does, it is not reported.
+- A link that already reaches the page it meant is left as it is.
+- Otherwise, `ri:space-key` and `ri:content-title` are set so that it does.
+
+A page counts as fixed by the server (`links_by_server`) only when the server's storage
+really differs from confed's. Such silent changes, with no new version, are invisible
+to `fetch`, which goes by versions. So the closing step compares the server's storage
+of every page the move touched with confed's, and takes in what differs (clean pages
+only), so the files show the server's text.
+
+In the Markdown, a link that names another space is never written as a link to a local
+file of the same title. Before 0.14.0 it could be, which made a link into the wrong
+space look correct.
 
 ## 7. Single-space guardrails
 
