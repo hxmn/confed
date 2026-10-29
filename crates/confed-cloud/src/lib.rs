@@ -382,8 +382,8 @@ impl ConfluenceClient for CloudClient {
         v1::move_page_to(&self.http, self.flavor(), id, position, target).await
     }
 
-    async fn probe_move(&self) -> ApiResult<Probe> {
-        v1::probe_move(&self.http).await
+    async fn probe_move(&self, page: &PageId) -> ApiResult<Probe> {
+        v1::probe_move(&self.http, page).await
     }
 
     async fn page_restrictions(&self, id: &PageId) -> ApiResult<Vec<String>> {

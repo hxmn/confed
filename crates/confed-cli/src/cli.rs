@@ -871,8 +871,8 @@ pub struct InstanceCloneArgs {
     #[arg(long, value_name = "KEY")]
     pub exclude: Vec<String>,
 
-    /// With --all: which kind of space [default: global]. Personal spaces
-    /// (`~user`) are cloned into `@user`.
+    /// With --all: which kind of space [default: global]. A personal space
+    /// is cloned into `@` and its owner's username.
     #[arg(long = "type", value_name = "TYPE", value_parser = ["global", "personal"])]
     pub space_type: Option<String>,
 
@@ -906,8 +906,8 @@ pub struct InstanceAddArgs {
     /// The space key.
     pub key: String,
 
-    /// Its workspace, relative to the root [default: the key, or @user for
-    /// a personal space].
+    /// Its workspace, relative to the root. Defaults to the key (`@` and the
+    /// id for a personal space).
     #[arg(value_name = "DIR")]
     pub dir: Option<PathBuf>,
 }

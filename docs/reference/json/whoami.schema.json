@@ -35,8 +35,8 @@
         "max_request_concurrency": { "type": "integer", "minimum": 1 },
         "move_between_spaces": {
           "type": "string",
-          "enum": ["available", "unavailable", "unknown"],
-          "description": "Whether the page move endpoint `confed instance mv` uses answers, asked by moving page 0, which cannot exist. `unavailable` means `confed instance mv` exits 9 on this server."
+          "enum": ["available", "web_action", "unavailable", "unknown"],
+          "description": "Whether `confed instance mv` can move pages here, asked about a page of this workspace with a target that cannot exist, so nothing moves. `available`: the REST move endpoint answers. `web_action`: Data Center without it; confed moves through the web UI's move action (not a documented API) and reads each move back. `unavailable`: neither, or the web action does not accept this credential; `confed instance mv` exits 9. `unknown`: no pulled page to ask about, or an unclear answer."
         }
       }
     }

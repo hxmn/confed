@@ -338,15 +338,15 @@ pub async fn adopt(
 
     let style = &ctx.style;
     let mut human = String::new();
+    let width = column(found.iter().map(|f| f.key.clone()), "");
     if args.dry_run {
         let _ = writeln!(human, "{}", style.dim("Dry run — nothing was written."));
         for f in &found {
-            let _ = writeln!(human, "  would register  {:<10} {}", f.key, f.rel);
+            let _ = writeln!(human, "  would register  {:<width$}  {}", f.key, f.rel);
         }
-        let sessions = found.iter().filter(|f| f.has_session).count();
-        if args.move_credentials {
-            let _ =
-                writeln!(human, "  would share one credential, replacing {sessions} of their own");
+        let credentials = credential_plan(ctx, args, &found)?;
+        if let Some(text) = credentials.get("summary").and_then(Value::as_str) {
+            let _ = writeln!(human, "\n{text}");
         }
         return Ok(Output::new(
             json!({
@@ -355,6 +355,7 @@ pub async fn adopt(
                 "flavor": first.flavor.as_str(),
                 "dry_run": true,
                 "registered": registered,
+                "credentials": credentials,
             }),
             human,
         ));
@@ -363,7 +364,7 @@ pub async fn adopt(
     let instance = Instance::create(&root, &first.base_url, first.flavor)?;
     for f in &found {
         instance.add_member(&f.key, f.numeric.as_deref(), &f.rel)?;
-        let _ = writeln!(human, "  registered  {:<10} {}", style.bold(&f.key), f.rel);
+        let _ = writeln!(human, "  registered  {} {}", style.bold(&pad(&f.key, width)), f.rel);
     }
     let gitignore = instance::ensure_gitignore(&root)?;
 
@@ -456,6 +457,95 @@ pub async fn adopt(
     ))
 }
 
+/// What `--move-credentials` would do, read without touching any secret: where
+/// the credential comes from, where it would go, and what would be removed.
+fn credential_plan(ctx: &Context, args: &InstanceAdoptArgs, found: &[Found]) -> Result<Value> {
+    let mut sessions: Vec<(&Found, Session)> = Vec::new();
+    for f in found.iter().filter(|f| f.has_session) {
+        if let Some(session) = Workspace::open(&f.dir)?.session()? {
+            sessions.push((f, session));
+        }
+    }
+    if !args.move_credentials {
+        let summary = match sessions.len() {
+            0 => "No workspace stores a credential of its own.".to_string(),
+            n => format!(
+                "{} {} a credential of its own; --move-credentials would share one instead.",
+                plural(n, "workspace", "workspaces"),
+                if n == 1 { "keeps" } else { "each keep" }
+            ),
+        };
+        return Ok(json!({ "would_share": false, "summary": summary }));
+    }
+
+    let flagged = ctx.resolver.lookup(&confed_core::config::TOKEN, ctx.global.token.as_deref());
+    let source_session = sessions.first().map(|(_, s)| s.clone());
+    let source = match (&flagged, sessions.first()) {
+        (Some(r), _) => r.source.as_str().to_string(),
+        (None, Some((f, s))) => format!(
+            "{}/.session.db ({})",
+            f.rel,
+            if s.secret_backend == SecretBackend::Keyring {
+                "the OS keyring"
+            } else {
+                "in the file"
+            }
+        ),
+        (None, None) => {
+            return Err(ConfedError::missing_value(
+                "API token to share (no workspace stores one)",
+                "--token",
+                "CONFED_TOKEN",
+            ))
+        }
+    };
+    let store = match args.credential_store.as_deref() {
+        Some("keyring") => SecretBackend::Keyring,
+        Some(_) => SecretBackend::Sqlite,
+        None => source_session.as_ref().map(|s| s.secret_backend).unwrap_or(SecretBackend::Keyring),
+    };
+    // The shared session as it would be saved: its keyring entry is per base
+    // URL and user, so a workspace using that same entry keeps it.
+    let shared = source_session.map(|s| Session { secret_backend: store, ..s });
+    let removed: Vec<String> =
+        sessions.iter().map(|(f, _)| format!("{}/.session.db", f.rel)).collect();
+    let mut keyring_deleted: Vec<String> = sessions
+        .iter()
+        .filter(|(_, own)| own.secret_backend == SecretBackend::Keyring)
+        .filter(|(_, own)| shared.as_ref().is_none_or(|sh| !session::same_keyring_entry(own, sh)))
+        .map(|(_, own)| {
+            format!("confed: {}|{}", own.base_url, own.username.clone().unwrap_or_default())
+        })
+        .collect();
+    keyring_deleted.sort();
+    keyring_deleted.dedup();
+
+    let mut summary = format!(
+        "With --move-credentials it would:\n  \
+         - check the credential from {source} with `whoami` first, and stop if it fails\n  \
+         - store it in {}\n",
+        describe_backend(store)
+    );
+    if !removed.is_empty() {
+        summary.push_str(&format!("  - remove {}\n", removed.join(", ")));
+    }
+    for entry in &keyring_deleted {
+        summary.push_str(&format!(
+            "  - delete the keyring entry \"{entry}\" (other copies of these workspaces that \
+             use it would lose their credential)\n"
+        ));
+    }
+    Ok(json!({
+        "would_share": true,
+        "source": source,
+        "store": store.as_str(),
+        "remove": removed,
+        "keyring_entries_deleted": keyring_deleted,
+        "verified_first": true,
+        "summary": summary.trim_end(),
+    }))
+}
+
 // -------------------------------------------------------------- spaces ---
 
 pub async fn spaces(
@@ -482,6 +572,21 @@ pub async fn spaces(
             None => true,
         });
         listed.sort_by(|a, b| a.id.key.cmp(&b.id.key));
+        // Where each space not cloned yet would go: a personal one's owner is
+        // looked up, all of them at once under the client's request ceiling.
+        let registered: Vec<String> =
+            instance.members()?.into_iter().map(|m| m.space_key).collect();
+        let folders: std::collections::HashMap<String, String> =
+            futures::stream::iter(listed.iter().filter(|s| !registered.contains(&s.id.key)))
+                .map(|space| {
+                    let (client, instance) = (client.clone(), &instance);
+                    async move {
+                        (space.id.key.clone(), folder_for(client.as_ref(), instance, space).await)
+                    }
+                })
+                .buffer_unordered(client.capabilities().max_request_concurrency.max(1))
+                .collect()
+                .await;
         for space in &listed {
             match rows.iter_mut().find(|r| r["space_key"] == json!(space.id.key)) {
                 Some(row) => {
@@ -495,7 +600,7 @@ pub async fn spaces(
                     "name": space.name,
                     "type": space.kind,
                     "status": space.status,
-                    "dir": instance::default_dir(&space.id.key),
+                    "dir": folders.get(&space.id.key).cloned().unwrap_or_default(),
                     "cloned": false,
                     "on_server": true,
                 })),
@@ -516,27 +621,39 @@ pub async fn spaces(
     }
 
     let style = &ctx.style;
-    let mut human = String::new();
-    let _ = writeln!(
-        human,
-        "{:<10} {:<24} {:<14} {:>6} {:>6} {:>6}  LAST FETCH",
-        "KEY", "NAME", "DIR", "PAGES", "DIRTY", "CONFL"
+    let text = |row: &Value, k: &str| row[k].as_str().unwrap_or("").to_string();
+    let num =
+        |row: &Value, k: &str| row[k].as_u64().map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+    let dir_of = |row: &Value| match row["cloned"].as_bool().unwrap_or(false) {
+        true => text(row, "dir"),
+        false => format!("not cloned ({})", text(row, "dir")),
+    };
+    // Columns as wide as what is in them: keys of personal spaces are long ids.
+    let key_w = column(rows.iter().map(|r| text(r, "space_key")), "KEY");
+    let name_w = column(rows.iter().map(|r| truncate(&text(r, "name"), 32)), "NAME");
+    let dir_w = column(rows.iter().map(dir_of), "DIR");
+    let mut human = format!(
+        "{} {} {} {:>6} {:>6} {:>6}  LAST FETCH\n",
+        pad("KEY", key_w),
+        pad("NAME", name_w),
+        pad("DIR", dir_w),
+        "PAGES",
+        "DIRTY",
+        "CONFL"
     );
     for row in &rows {
-        let text = |k: &str| row[k].as_str().unwrap_or("").to_string();
-        let num = |k: &str| row[k].as_u64().map(|n| n.to_string()).unwrap_or_else(|| "-".into());
         let cloned = row["cloned"].as_bool().unwrap_or(false);
-        let dir = if cloned { text("dir") } else { style.dim("not cloned") };
-        let fetched = text("last_fetch");
+        let dir = pad(&dir_of(row), dir_w);
+        let fetched = text(row, "last_fetch");
         let _ = writeln!(
             human,
-            "{:<10} {:<24} {:<14} {:>6} {:>6} {:>6}  {}",
-            text("space_key"),
-            truncate(&text("name"), 24),
-            dir,
-            num("pages"),
-            num("dirty"),
-            num("conflicts"),
+            "{} {} {} {:>6} {:>6} {:>6}  {}",
+            pad(&text(row, "space_key"), key_w),
+            pad(&truncate(&text(row, "name"), 32), name_w),
+            if cloned { dir } else { style.dim(&dir) },
+            num(row, "pages"),
+            num(row, "dirty"),
+            num(row, "conflicts"),
             if fetched.is_empty() { "-".to_string() } else { fetched }
         );
     }
@@ -569,12 +686,77 @@ fn local_row(instance: &Instance, member: &Member) -> Value {
     row
 }
 
+/// The width a column needs for its heading and every cell.
+fn column(cells: impl Iterator<Item = String>, heading: &str) -> usize {
+    cells.map(|c| display_width(&c)).chain([display_width(heading)]).max().unwrap_or(0)
+}
+
+/// Columns on a terminal: wide characters take two cells.
+fn display_width(text: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(text)
+}
+
+/// `text`, padded with spaces to `width` terminal cells. Pad before styling:
+/// colour codes take no cells but count as characters.
+pub(crate) fn pad(text: &str, width: usize) -> String {
+    let mut out = text.to_string();
+    out.push_str(&" ".repeat(width.saturating_sub(display_width(text))));
+    out
+}
+
 fn truncate(text: &str, width: usize) -> String {
     if text.chars().count() <= width {
         text.to_string()
     } else {
         format!("{}…", text.chars().take(width - 1).collect::<String>())
     }
+}
+
+/// The directory a space is cloned into: its key, or for a personal space
+/// `@` and its owner's username.
+///
+/// A personal space's key is `~` and an id of its owner — the username on
+/// older Data Center spaces, the user key on newer ones (a long hex string),
+/// the account id on Cloud — so the owner is looked up, and the folder is
+/// named for who it is. When the owner cannot be found, or their username
+/// would not make a safe directory name, or another space already has that
+/// directory, it is `@` and the id.
+async fn folder_for(
+    client: &dyn confed_api::ConfluenceClient,
+    instance: &Instance,
+    space: &Space,
+) -> String {
+    let fallback = instance::default_dir(&space.id.key);
+    let Some(id) = space.id.key.strip_prefix('~').filter(|id| !id.is_empty()) else {
+        return fallback;
+    };
+    let reference = match client.flavor() {
+        Flavor::DataCenter => confed_api::UserReference::UserKey(id.to_string()),
+        Flavor::Cloud => confed_api::UserReference::AccountId(id.to_string()),
+    };
+    let Ok(user) = client.lookup_user(&reference).await else { return fallback };
+    let Some(name) = user.username.filter(|n| safe_dir_name(n)) else { return fallback };
+    let dir = format!("@{name}");
+    let taken = instance
+        .members()
+        .unwrap_or_default()
+        .iter()
+        .any(|m| m.dir.eq_ignore_ascii_case(&dir) && m.space_key != space.id.key);
+    if taken {
+        fallback
+    } else {
+        dir
+    }
+}
+
+/// A username that can be a directory name as it is, on every platform.
+fn safe_dir_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name != "."
+        && name != ".."
+        && !name.starts_with('.')
+        && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '@' | '+'))
 }
 
 fn is_personal(space: &Space) -> bool {
@@ -635,8 +817,10 @@ pub async fn clone(
     let mut decided: Vec<(Space, String, Plan)> = Vec::new();
     for space in chosen {
         let key = space.id.key.clone();
-        let rel =
-            instance.member(&key)?.map(|m| m.dir).unwrap_or_else(|| instance::default_dir(&key));
+        let rel = match instance.member(&key)? {
+            Some(member) => member.dir,
+            None => folder_for(client.as_ref(), &instance, &space).await,
+        };
         let dir = root.join(&rel);
         let plan = if dir.join(STATE_DB_FILENAME).exists() {
             match Workspace::open(&dir).and_then(|ws| Ok((ws.space_key()?, ws.base_url()?))) {
@@ -669,6 +853,10 @@ pub async fn clone(
     if args.dry_run {
         let _ = writeln!(human, "{}", style.dim("Dry run — nothing was written."));
     }
+    let kw =
+        column(decided.iter().map(|(s, _, _)| s.id.key.clone()).chain(unknown.iter().cloned()), "");
+    let kcol = |k: &str| pad(k, kw);
+    let label = |l: &str| pad(l, 8);
 
     // Bind the new workspaces and register them, one after another: quick,
     // and the register is one database.
@@ -684,7 +872,7 @@ pub async fn clone(
                     instance.add_member(&key, space.id.numeric.as_deref(), &rel)?;
                 }
                 codes.push(ExitCode::Ok);
-                let _ = writeln!(human, "  {:<8} {key:<10} {rel} ({why})", "skipped");
+                let _ = writeln!(human, "  {} {} {rel} ({why})", label("skipped"), kcol(&key));
                 entries.push(json!({
                     "space_key": key, "dir": rel, "ok": true, "exit_code": 0,
                     "status": "skipped",
@@ -692,14 +880,14 @@ pub async fn clone(
             }
             Plan::Fail(e) => {
                 codes.push(e.exit_code());
-                let _ = writeln!(human, "  {:<8} {key:<10} {e}", style.red("failed"));
+                let _ = writeln!(human, "  {} {} {e}", style.red(&label("failed")), kcol(&key));
                 entries.push(failed_entry(&key, &rel, &e));
                 errors.push(ErrorEntry::from_error(&e).in_space(&key));
             }
             Plan::Clone { reinit } if args.dry_run => {
                 codes.push(ExitCode::Ok);
                 let what = if reinit { "re-init" } else { "clone" };
-                let _ = writeln!(human, "  {what:<8} {key:<10} {rel}");
+                let _ = writeln!(human, "  {} {} {rel}", label(what), kcol(&key));
                 entries.push(json!({
                     "space_key": key, "dir": rel, "ok": true, "exit_code": 0,
                     "status": format!("would_{}", if reinit { "reinit" } else { "clone" }),
@@ -721,7 +909,7 @@ pub async fn clone(
                 }
                 Err(e) => {
                     codes.push(e.exit_code());
-                    let _ = writeln!(human, "  {:<8} {key:<10} {e}", style.red("failed"));
+                    let _ = writeln!(human, "  {} {} {e}", style.red(&label("failed")), kcol(&key));
                     entries.push(failed_entry(&key, &rel, &e));
                     errors.push(ErrorEntry::from_error(&e).in_space(&key));
                 }
@@ -769,8 +957,9 @@ pub async fn clone(
                 let pages = ws.state().all_pages().map(|p| p.len()).unwrap_or(0);
                 let _ = writeln!(
                     human,
-                    "  {:<8} {key:<10} {rel} ({})",
-                    style.green("cloned"),
+                    "  {} {} {rel} ({})",
+                    style.green(&label("cloned")),
+                    kcol(&key),
                     plural(pages, "page", "pages")
                 );
                 entries.push(json!({
@@ -781,7 +970,7 @@ pub async fn clone(
             }
             Err(e) => {
                 codes.push(e.exit_code());
-                let _ = writeln!(human, "  {:<8} {key:<10} {e}", style.red("failed"));
+                let _ = writeln!(human, "  {} {} {e}", style.red(&label("failed")), kcol(&key));
                 entries.push(failed_entry(&key, &rel, &e));
                 errors.push(ErrorEntry::from_error(&e).in_space(&key));
             }
@@ -790,7 +979,7 @@ pub async fn clone(
     for key in unknown {
         let e = ConfedError::NotFound(format!("space {key} is not visible to this account"));
         codes.push(e.exit_code());
-        let _ = writeln!(human, "  {:<8} {key:<10} {e}", style.red("failed"));
+        let _ = writeln!(human, "  {} {} {e}", style.red(&label("failed")), kcol(&key));
         entries.push(failed_entry(&key, &instance::default_dir(&key), &e));
         errors.push(ErrorEntry::from_error(&e).in_space(&key));
     }
@@ -973,4 +1162,27 @@ pub fn refresh_root_docs(instance: &Instance) -> Result<()> {
     let flavor = instance.flavor()?.unwrap_or(Flavor::DataCenter);
     agent_docs::write_instance(root, &base_url, flavor, &instance.members()?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_plain_usernames_become_directory_names() {
+        for good in ["alice", "alice.ng", "a_lee-2", "ana+docs"] {
+            assert!(safe_dir_name(good), "{good}");
+        }
+        for bad in ["", ".", "..", ".hidden", "a/b", "a\\b", "ali ce", "a:b"] {
+            assert!(!safe_dir_name(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn padding_counts_terminal_cells_not_bytes() {
+        assert_eq!(pad("DOCS", 6), "DOCS  ");
+        assert_eq!(pad("Фраза", 7), "Фраза  ");
+        assert_eq!(pad("文档", 6), "文档  ", "wide characters take two cells");
+        assert_eq!(pad("~9000000a1b2c3d", 4), "~9000000a1b2c3d", "never cut");
+    }
 }

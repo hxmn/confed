@@ -1397,7 +1397,6 @@ async fn a_refused_move_keeps_its_meaning() {
                 as fn(&ApiError) -> bool,
         ),
         (404, |e: &ApiError| matches!(e, ApiError::NotFound(_))),
-        (405, |e: &ApiError| matches!(e, ApiError::Unsupported { .. })),
         (409, |e: &ApiError| matches!(e, ApiError::Conflict(_))),
     ] {
         let server = MockServer::start().await;
@@ -1417,28 +1416,151 @@ async fn a_refused_move_keeps_its_meaning() {
 }
 
 #[tokio::test]
-async fn the_move_probe_tells_a_server_with_the_endpoint_from_one_without() {
+async fn the_move_probe_asks_about_a_real_page_and_a_target_that_cannot_exist() {
     use confed_api::Probe;
+    // The endpoint is there: it found page 1001 and failed on target 0.
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
-        .and(path("/confluence/rest/api/content/0/move/append/0"))
+        .and(path("/confluence/rest/api/content/1001/move/append/0"))
         .respond_with(ResponseTemplate::new(404).set_body_json(json!({
             "statusCode": 404, "message": "No content found with id: ContentId{id=0}"
         })))
+        .expect(1)
         .mount(&server)
         .await;
-    assert_eq!(client(&server).probe_move().await.unwrap(), Probe::Available);
+    assert_eq!(client(&server).probe_move(&PageId::new("1001")).await.unwrap(), Probe::Available);
 
-    let without = MockServer::start().await;
-    Mock::given(method("PUT"))
-        .respond_with(ResponseTemplate::new(404).set_body_string("<html>Not Found</html>"))
-        .mount(&without)
+    // No such route: Data Center then moves through the web action, if the
+    // move dialog is there and takes this credential.
+    for response in [
+        ResponseTemplate::new(404).set_body_json(json!({
+            "statusCode": 404,
+            "message": "null for uri: https://wiki.example.test/rest/api/content/1001/move/append/0"
+        })),
+        ResponseTemplate::new(404).set_body_string("<html>Not Found</html>"),
+        ResponseTemplate::new(405),
+    ] {
+        let without = MockServer::start().await;
+        Mock::given(method("PUT")).respond_with(response).mount(&without).await;
+        Mock::given(method("GET"))
+            .and(path("/confluence/pages/movepage.action"))
+            .and(query_param("pageId", "1001"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<html>Move page</html>"))
+            .mount(&without)
+            .await;
+        assert_eq!(
+            client(&without).probe_move(&PageId::new("1001")).await.unwrap(),
+            Probe::WebAction
+        );
+    }
+
+    // Neither: nothing can move it.
+    let neither = MockServer::start().await;
+    Mock::given(method("PUT")).respond_with(ResponseTemplate::new(405)).mount(&neither).await;
+    Mock::given(method("GET")).respond_with(ResponseTemplate::new(404)).mount(&neither).await;
+    assert_eq!(
+        client(&neither).probe_move(&PageId::new("1001")).await.unwrap(),
+        Probe::Unavailable
+    );
+
+    // A dialog that sends this credential to the login page does not count.
+    let login = MockServer::start().await;
+    Mock::given(method("PUT")).respond_with(ResponseTemplate::new(405)).mount(&login).await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/pages/movepage.action"))
+        .respond_with(
+            ResponseTemplate::new(302).insert_header("Location", "/confluence/login.action"),
+        )
+        .mount(&login)
         .await;
-    assert_eq!(client(&without).probe_move().await.unwrap(), Probe::Unavailable);
+    Mock::given(method("GET"))
+        .and(path("/confluence/login.action"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>Log in</html>"))
+        .mount(&login)
+        .await;
+    assert_eq!(client(&login).probe_move(&PageId::new("1001")).await.unwrap(), Probe::Unavailable);
+}
 
-    let refusing = MockServer::start().await;
-    Mock::given(method("PUT")).respond_with(ResponseTemplate::new(405)).mount(&refusing).await;
-    assert_eq!(client(&refusing).probe_move().await.unwrap(), Probe::Unavailable);
+/// The REST move endpoint is missing, as on Data Center: the target is read
+/// for its space and title, and the move goes to the web UI's action.
+async fn server_without_the_move_endpoint() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/confluence/rest/api/content/1002/move/append/2002"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "statusCode": 404,
+            "message": "null for uri: https://wiki.example.test/rest/api/content/1002/move/append/2002"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/2002"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "2002", "type": "page", "title": "Runbooks & Checklists",
+            "space": { "key": "ENG", "name": "Engineering" }
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn without_the_rest_endpoint_data_center_moves_through_the_web_action() {
+    use confed_api::MovePosition;
+    use wiremock::matchers::body_string_contains;
+    let server = server_without_the_move_endpoint().await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/pages/movepage.action"))
+        .and(header("X-Atlassian-Token", "no-check"))
+        .and(body_string_contains("pageId=1002"))
+        .and(body_string_contains("spaceKey=ENG"))
+        .and(body_string_contains("targetTitle=Runbooks+%26+Checklists"))
+        .and(body_string_contains("targetId=2002"))
+        .and(body_string_contains("position=append"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>Runbooks</html>"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    client(&server)
+        .move_page_to(&PageId::new("1002"), MovePosition::Append, &PageId::new("2002"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_web_action_that_lands_on_the_login_page_or_is_missing_is_said_plainly() {
+    use confed_api::{ApiError, MovePosition};
+    let server = server_without_the_move_endpoint().await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/pages/movepage.action"))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", "/confluence/login.action?os_destination=x"),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/login.action"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>Log in</html>"))
+        .mount(&server)
+        .await;
+    let err = client(&server)
+        .move_page_to(&PageId::new("1002"), MovePosition::Append, &PageId::new("2002"))
+        .await
+        .unwrap_err();
+    assert!(matches!(&err, ApiError::Auth(m) if m.contains("login page")), "{err:?}");
+
+    let missing = server_without_the_move_endpoint().await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/pages/movepage.action"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&missing)
+        .await;
+    let err = client(&missing)
+        .move_page_to(&PageId::new("1002"), MovePosition::Append, &PageId::new("2002"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ApiError::Unsupported { .. }), "{err:?}");
 }
 
 #[tokio::test]

@@ -259,7 +259,7 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
                         yes_no(caps.comment_resolve)
                     ),
                 ));
-                checks.push(move_check(client.as_ref()).await);
+                checks.push(move_check(client.as_ref(), probe_page(ctx).as_ref()).await);
             }
             Err(e) => checks.push(Check::fail("server", e.to_string())),
         },
@@ -268,22 +268,42 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
     Ok(report(ctx, checks))
 }
 
+/// A page of this workspace the move probe can ask about: it must exist,
+/// or the server's answer would not tell anything apart.
+pub(crate) fn probe_page(ctx: &Context) -> Option<confed_api::PageId> {
+    let ws = ctx.workspace().ok()?;
+    ws.state().all_pages().ok()?.into_iter().next().map(|p| confed_api::PageId::new(p.page_id))
+}
+
 /// Whether the server can move pages between spaces, which
-/// `confed instance mv` needs.
-pub(crate) async fn move_check(client: &dyn confed_api::ConfluenceClient) -> Check {
+/// `confed instance mv` needs, asked about `page` without moving it.
+pub(crate) async fn move_check(
+    client: &dyn confed_api::ConfluenceClient,
+    page: Option<&confed_api::PageId>,
+) -> Check {
     const NAME: &str = "move between spaces";
-    match client.probe_move().await {
-        Ok(confed_api::Probe::Available) => {
-            Check::pass(NAME, "the page move endpoint answers (`confed instance mv`)")
-        }
+    let Some(page) = page else {
+        return Check::warn(NAME, "not checked: it needs a pulled page to ask about");
+    };
+    match client.probe_move(page).await {
+        Ok(confed_api::Probe::Available) => Check::pass(
+            NAME,
+            format!("the page move endpoint answers for page {page} (`confed instance mv`)"),
+        ),
+        Ok(confed_api::Probe::WebAction) => Check::warn(
+            NAME,
+            "no REST move endpoint; `confed instance mv` uses the web UI's move action \
+             (pages/movepage.action), which is not a documented API, and checks every move \
+             by reading the page back",
+        ),
         Ok(confed_api::Probe::Unavailable) => Check::warn(
             NAME,
             "this server has no page move endpoint; `confed instance mv` exits 9 here",
         ),
         Ok(confed_api::Probe::Unknown) | Err(_) => Check::warn(
             NAME,
-            "could not tell whether the page move endpoint is there; `confed instance mv` \
-             reports it if not",
+            "could not tell whether this server can move pages between spaces; \
+             `confed instance mv` reports it if not",
         ),
     }
 }

@@ -19,6 +19,7 @@ use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const TOKEN: &str = "pat-token";
+const PERSONAL: &str = "~ff8081817a1b2c3d4e5f6071";
 
 // ------------------------------------------------------------ the fixture ---
 
@@ -43,6 +44,10 @@ struct World {
     broken_updates: Vec<String>,
     /// The status every move answers with instead of moving.
     refuse_moves: Option<u16>,
+    /// A Data Center without the REST move endpoint, as Atlassian documents it.
+    no_rest_move: bool,
+    /// …and without the web UI's move action either.
+    no_web_move: bool,
 }
 
 #[derive(Clone)]
@@ -63,6 +68,8 @@ impl Confluence {
         world.spaces.insert("DOCS".into(), (500, "Documentation".into(), Some("1001".into())));
         world.spaces.insert("ENG".into(), (501, "Engineering".into(), Some("2001".into())));
         world.spaces.insert("OPS".into(), (502, "Operations".into(), Some("3001".into())));
+        // A personal space on a newer Data Center: keyed by its owner's user key.
+        world.spaces.insert(PERSONAL.into(), (503, "Alice Ng".into(), Some("4001".into())));
         let mut page = |id: &str, title: &str, space: &str, parent: Option<&str>, body: &str| {
             world.pages.insert(
                 id.into(),
@@ -100,6 +107,7 @@ impl Confluence {
             r#"<p>Start: <ac:link><ri:page ri:space-key="DOCS" ri:content-title="Week One" /></ac:link>.</p>"#,
         );
         page("3001", "Operations", "OPS", None, "<p>Ops.</p>");
+        page("4001", "Alice Ng", PERSONAL, None, "<p>Notes.</p>");
         Self(Arc::new(Mutex::new(world)))
     }
 
@@ -155,8 +163,9 @@ impl World {
 
     fn space(&self, key: &str) -> Value {
         let (numeric, name, home) = &self.spaces[key];
+        let kind = if key.starts_with('~') { "personal" } else { "global" };
         json!({
-            "id": numeric, "key": key, "name": name, "type": "global", "status": "current",
+            "id": numeric, "key": key, "name": name, "type": kind, "status": "current",
             "homepage": home.as_ref().map(|h| json!({ "id": h, "type": "page", "title": self.pages[h].title })),
         })
     }
@@ -192,7 +201,8 @@ impl Respond for Confluence {
         let query: BTreeMap<String, String> = req.url.query_pairs().into_owned().collect();
         let method = req.method.as_str().to_string();
         let mut world = self.world();
-        if method != "GET" {
+        // The move probe names a target that cannot exist: it cannot write.
+        if method != "GET" && !path.ends_with("/move/append/0") {
             world.writes.push(format!("{method} {path}"));
         }
         let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
@@ -202,6 +212,12 @@ impl Respond for Confluence {
                 "type": "known", "username": "tester", "userKey": "ff8081",
                 "displayName": "Test User", "email": "tester@example.com",
             })),
+            ("GET", ["rest", "api", "user"]) => match query.get("key").map(String::as_str) {
+                Some(key) if PERSONAL.ends_with(key) => ok(json!({
+                    "type": "known", "username": "alice", "userKey": key, "displayName": "Alice Ng",
+                })),
+                _ => error(404, "No user found"),
+            },
             ("GET", ["rest", "api", "space"]) => {
                 if query.get("status").map(String::as_str) == Some("archived") {
                     return ok(listing(vec![]));
@@ -233,6 +249,33 @@ impl Respond for Confluence {
             ("GET", ["rest", "api", "content", _, "child", _]) => ok(listing(vec![])),
             ("GET", ["rest", "api", "content", _, "restriction", "byOperation"]) => ok(json!({})),
             ("GET", ["rest", "api", "search"]) => ok(listing(vec![])),
+            ("PUT", ["rest", "api", "content", _, "move", _, _]) if world.no_rest_move => {
+                error(404, &format!("null for uri: {path}"))
+            }
+            ("GET", ["pages", "movepage.action"]) if !world.no_web_move => {
+                ResponseTemplate::new(200).set_body_string("<html>Move page</html>")
+            }
+            ("POST", ["pages", "movepage.action"]) if !world.no_web_move => {
+                let form = parse_form(&req.body);
+                let (id, space, title) = (&form["pageId"], &form["spaceKey"], &form["targetTitle"]);
+                let Some(target) = world
+                    .pages
+                    .iter()
+                    .find(|(_, p)| &p.space == space && &p.title == title)
+                    .map(|(id, _)| id.clone())
+                else {
+                    return ResponseTemplate::new(200).set_body_string("<html>No such page</html>");
+                };
+                let parent = match form["position"].as_str() {
+                    "append" => Some(target.clone()),
+                    _ => world.pages[&target].parent.clone(),
+                };
+                for moved in world.subtree(id) {
+                    world.pages.get_mut(&moved).unwrap().space = space.clone();
+                }
+                world.pages.get_mut(id).unwrap().parent = parent;
+                ResponseTemplate::new(200).set_body_string("<html>Moved</html>")
+            }
             ("PUT", ["rest", "api", "content", id, "move", position, target]) => {
                 if let Some(status) = world.refuse_moves {
                     return error(status, "you may not move this page");
@@ -282,6 +325,31 @@ impl Respond for Confluence {
             _ => error(404, &format!("null for uri: {path}")),
         }
     }
+}
+
+/// `a=1&b=x+y%26z` → {a: 1, b: "x y&z"}.
+fn parse_form(body: &[u8]) -> BTreeMap<String, String> {
+    let decode = |s: &str| {
+        let bytes = s.replace('+', " ").into_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+                out.push(u8::from_str_radix(hex, 16).unwrap());
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(out).unwrap()
+    };
+    String::from_utf8_lossy(body)
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(k, v)| (decode(k), decode(v)))
+        .collect()
 }
 
 async fn server() -> (MockServer, Confluence) {
@@ -409,6 +477,32 @@ async fn adopt_registers_existing_workspaces_and_shares_their_credential() {
     let out = run(root.path(), &["instance", "adopt", "--dry-run", "--json"]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     assert!(!root.path().join(".confed-instance.db").exists());
+
+    // …and with --move-credentials, exactly what would happen to them.
+    let out = run(
+        root.path(),
+        &[
+            "instance",
+            "adopt",
+            "--dry-run",
+            "--move-credentials",
+            "--credential-store",
+            "sqlite",
+            "--json",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let credentials = envelope(&out, "instance")["result"]["credentials"].clone();
+    assert_eq!(credentials["would_share"], true);
+    assert_eq!(credentials["source"], "DOCS/.session.db (in the file)");
+    assert_eq!(credentials["store"], "sqlite");
+    assert_eq!(credentials["remove"], json!(["DOCS/.session.db", "ENG/.session.db"]));
+    assert_eq!(credentials["keyring_entries_deleted"], json!([]));
+    let out = run(root.path(), &["instance", "adopt", "--dry-run", "--move-credentials"]);
+    let human = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(human.contains("check the credential from DOCS/.session.db"), "{human}");
+    assert!(human.contains("remove DOCS/.session.db, ENG/.session.db"), "{human}");
+    assert!(root.path().join("DOCS/.session.db").exists(), "a dry run removes nothing");
 
     let out = run(
         root.path(),
@@ -789,4 +883,88 @@ async fn a_refused_move_changes_nothing_and_can_be_aborted() {
         .unwrap()
         .clone();
     assert_eq!(journal["status"], "pass");
+}
+
+#[tokio::test]
+async fn on_data_center_without_the_rest_move_the_web_action_moves_the_tree() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    confluence.world().no_rest_move = true;
+
+    let src = "DOCS:Team Handbook/Onboarding.md";
+    let dst = "ENG:Engineering Home/Runbooks.md";
+    let out = run(root.path(), &["instance", "mv", src, dst, "--dry-run", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let warned = env["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("pages/movepage.action"));
+    assert!(warned, "the dry run says which way it will move: {env}");
+    assert!(confluence.world().writes.is_empty(), "{:?}", confluence.world().writes);
+
+    let out = run(root.path(), &["instance", "mv", src, dst, "-y", "-m", "move", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    {
+        let world = confluence.world();
+        assert_eq!(world.pages["1002"].space, "ENG");
+        assert_eq!(world.pages["1003"].space, "ENG");
+        assert_eq!(world.pages["1002"].parent.as_deref(), Some("2002"));
+        assert!(world.writes.iter().any(|w| w == "POST /pages/movepage.action"));
+    }
+    for key in ["DOCS", "ENG"] {
+        let out = run(&root.path().join(key), &["status", "--json"]);
+        let pages = envelope(&out, "status")["result"]["pages"].as_array().unwrap().clone();
+        assert!(pages.iter().all(|p| p["state"] == "unchanged"), "{key}: {pages:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_dry_run_on_a_server_that_cannot_move_is_exit_9() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    {
+        let mut world = confluence.world();
+        world.no_rest_move = true;
+        world.no_web_move = true;
+    }
+    let src = "DOCS:Team Handbook/Onboarding.md";
+    let out = run(root.path(), &["instance", "mv", src, "ENG:", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 9, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let message = env["errors"][0]["message"].as_str().unwrap();
+    assert!(message.contains("cannot move pages between spaces"), "{message}");
+    assert!(confluence.world().writes.is_empty(), "{:?}", confluence.world().writes);
+
+    // whoami says the same, without moving anything.
+    let out = run(&root.path().join("DOCS"), &["whoami", "--json"]);
+    let env = envelope(&out, "whoami");
+    assert_eq!(env["result"]["capabilities"]["move_between_spaces"], "unavailable");
+}
+
+#[tokio::test]
+async fn a_personal_space_is_cloned_under_its_owners_name_and_tables_line_up() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+
+    let out = run(root.path(), &["instance", "clone", PERSONAL, "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(env["result"]["spaces"][0]["dir"], "@alice");
+    assert!(root.path().join("@alice/Alice Ng.md").exists());
+
+    let out = run(root.path(), &["instance", "spaces", "--remote"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let table = String::from_utf8_lossy(&out.stdout).into_owned();
+    let lines: Vec<&str> = table.lines().filter(|l| !l.trim().is_empty()).collect();
+    // Every row's second column starts where the heading's does.
+    let name_at = lines[0].find("NAME").unwrap();
+    for line in &lines[1..] {
+        let key_end = line.find(' ').unwrap();
+        assert!(key_end <= name_at, "{table}");
+        assert_ne!(&line[name_at..name_at + 1], " ", "misaligned row:\n{table}");
+        assert_eq!(&line[name_at - 1..name_at], " ", "misaligned row:\n{table}");
+    }
+    assert!(table.contains("@alice"), "{table}");
 }

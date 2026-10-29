@@ -320,6 +320,25 @@ impl Http {
         Ok(resp.text().await?)
     }
 
+    /// [`Self::get_text`], also giving the URL the answer came from after
+    /// redirects — how a web page that sent us to the login page is told
+    /// from one that answered.
+    pub async fn get_text_at(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> ApiResult<(String, String)> {
+        let url = self.url(path)?;
+        let ctx = format!("GET {path}");
+        let resp = self
+            .send_with_retry(&ctx, true, || {
+                self.request(reqwest::Method::GET, url.clone()).query(query)
+            })
+            .await?;
+        let final_url = resp.url().to_string();
+        Ok((final_url, resp.text().await?))
+    }
+
     pub async fn post_json<B: Serialize, T: DeserializeOwned>(
         &self,
         path: &str,
@@ -365,6 +384,28 @@ impl Http {
             })
             .await?;
         decode(resp, &ctx).await
+    }
+
+    /// POST a form the way a browser submits one, for the few things Data
+    /// Center only does through its web UI. `X-Atlassian-Token: no-check` is
+    /// the documented way for a script to pass its XSRF check. Redirects are
+    /// followed; the answer is the final URL and the body.
+    pub async fn post_form(
+        &self,
+        path: &str,
+        form: &[(&str, String)],
+    ) -> ApiResult<(String, String)> {
+        let url = self.url(path)?;
+        let ctx = format!("POST {path}");
+        let resp = self
+            .send_with_retry(&ctx, false, || {
+                self.request(reqwest::Method::POST, url.clone())
+                    .header("X-Atlassian-Token", "no-check")
+                    .form(form)
+            })
+            .await?;
+        let final_url = resp.url().to_string();
+        Ok((final_url, resp.text().await?))
     }
 
     pub async fn delete(&self, path: &str) -> ApiResult<()> {

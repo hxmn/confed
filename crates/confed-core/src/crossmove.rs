@@ -268,6 +268,33 @@ pub async fn plan(
         ))
     })?;
 
+    // Before anything else: can this server move a page between spaces at
+    // all? A plan for a move that cannot happen is no plan.
+    match client.probe_move(&PageId::new(&req.root_id)).await {
+        Ok(confed_api::Probe::Available) => {}
+        Ok(confed_api::Probe::WebAction) => warnings.push(
+            "this Data Center has no REST move endpoint, so confed will move the pages through \
+             the web UI's move action (pages/movepage.action), which is not a documented API; \
+             it reads the pages back afterwards and stops (exit 9) if they are not where they \
+             should be"
+                .to_string(),
+        ),
+        Ok(confed_api::Probe::Unavailable) => {
+            return Err(ConfedError::Unsupported(format!(
+                "this server cannot move pages between spaces for you: rest/api/content/{}/move \
+                 does not answer, and on Data Center the web UI's move action is missing or \
+                 does not accept this credential; confed will not copy and delete instead, \
+                 which would lose ids and history",
+                req.root_id
+            )))
+        }
+        Ok(confed_api::Probe::Unknown) | Err(_) => warnings.push(
+            "could not tell whether this server can move pages between spaces; if it cannot, \
+             the move stops with exit 9 before anything else changes"
+                .to_string(),
+        ),
+    }
+
     // Home pages stay where they are: a space without one is broken.
     let source_space = client.get_space(&req.source.key).await?;
     if source_space.homepage_id.as_ref().is_some_and(|h| h.0 == req.root_id) {
@@ -700,6 +727,19 @@ pub async fn abort(
              `confed instance mv`",
         ));
     }
+    // The journal can lag the server: a process killed between the move and
+    // recording it. Ask where the page is before undoing anything.
+    let root = client.get_page(&PageId::new(&plan.root_id), BodyFormat::Storage).await?;
+    if root.summary.space_key == plan.dest.key {
+        return Err(ConfedError::state_with_hint(
+            format!(
+                "page {} is already in space {} on the server, though the journal had not \
+                 recorded it",
+                plan.root_id, plan.dest.key
+            ),
+            format!("finish the move with `confed instance resume {journal_id}`"),
+        ));
+    }
     let renamed = std::mem::take(&mut plan.renamed);
     for id in &renamed {
         let Some(page) = plan.pages.iter().find(|p| &p.page_id == id) else { continue };
@@ -768,14 +808,57 @@ async fn server_move(client: &Arc<dyn ConfluenceClient>, plan: &mut MovePlan) ->
         }
     }
 
+    // Trust nothing but the page itself: the web action Data Center falls
+    // back to answers with a web page whatever it did.
     let after = client.get_page(&root, BodyFormat::Storage).await?;
     if after.summary.space_key != plan.dest.key {
         return Err(ConfedError::Unsupported(format!(
-            "the server accepted the move but page {} is still in space {}; this server \
-             does not move pages between spaces through its API, and confed will not copy \
-             and delete instead (that would lose ids and history)",
+            "the server answered the move, but page {} is still in space {}: it did not move \
+             it, and confed will not copy and delete instead (that would lose ids and history)",
             plan.root_id, after.summary.space_key
         )));
+    }
+    let parent = after.summary.parent_id.as_ref().map(|p| p.0.clone());
+    if parent != plan.new_parent_id {
+        match &plan.new_parent_id {
+            // In the right space under the wrong parent: an ordinary move
+            // within the space puts it right.
+            Some(wanted) => {
+                client.move_page(&root, &PageId::new(wanted), confed_api::Position::Append).await?;
+                let again = client.get_page(&root, BodyFormat::Storage).await?;
+                if again.summary.parent_id.as_ref().map(|p| p.0.as_str()) != Some(wanted.as_str()) {
+                    return Err(ConfedError::State {
+                        message: format!(
+                            "page {} moved to space {} but not under page {wanted}",
+                            plan.root_id, plan.dest.key
+                        ),
+                        hint: Some(
+                            "move it under the right parent in the browser, then resume".into(),
+                        ),
+                    });
+                }
+                if plan.position != MovePosition::Append {
+                    plan.warnings.push(format!(
+                        "page {} is under the right parent, but not before or after the page asked for",
+                        plan.root_id
+                    ));
+                }
+            }
+            None => {
+                return Err(ConfedError::State {
+                    message: format!(
+                        "page {} moved to space {} but under page {}, not to the top level",
+                        plan.root_id,
+                        plan.dest.key,
+                        parent.unwrap_or_default()
+                    ),
+                    hint: Some(
+                        "make it a top-level page in the browser, then `confed instance resume`"
+                            .into(),
+                    ),
+                })
+            }
+        }
     }
     Ok(())
 }

@@ -860,8 +860,11 @@ impl ConfluenceClient for MockClient {
         Ok(())
     }
 
-    async fn probe_move(&self) -> ApiResult<Probe> {
+    async fn probe_move(&self, page: &PageId) -> ApiResult<Probe> {
         let state = self.state.lock().expect("mock poisoned");
+        if !state.pages.contains_key(page.as_str()) {
+            return Err(ApiError::NotFound(format!("page {page}")));
+        }
         Ok(if state.move_unsupported { Probe::Unavailable } else { Probe::Available })
     }
 

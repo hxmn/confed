@@ -317,7 +317,11 @@ pub async fn doctor(
     // --- the server: where each tracked page really is ------------------
     let clients = connection.map(|c| c.clients(ctx)).transpose()?;
     if let Some(client) = clients.as_ref().map(|c| &c.shared) {
-        checks.push(doctor::move_check(client.as_ref()).await);
+        let page = spaces
+            .values()
+            .find_map(|ws| ws.state().all_pages().ok()?.into_iter().next())
+            .map(|p| PageId::new(p.page_id));
+        checks.push(doctor::move_check(client.as_ref(), page.as_ref()).await);
         let mut astray = Vec::new();
         for (key, ws) in &spaces {
             let numeric = ws.space_numeric_id()?;

@@ -75,9 +75,11 @@ pub trait ConfluenceClient: Send + Sync {
         Err(crate::error::ApiError::unsupported(self.flavor(), "move a page to another space"))
     }
 
-    /// Whether the server has the move endpoint [`Self::move_page_to`] uses,
-    /// asked without moving anything.
-    async fn probe_move(&self) -> ApiResult<Probe> {
+    /// Whether the server can do [`Self::move_page_to`], asked about the real
+    /// page `page` without moving it: the target named is one that cannot
+    /// exist.
+    async fn probe_move(&self, page: &PageId) -> ApiResult<Probe> {
+        let _ = page;
         Ok(Probe::Unknown)
     }
 

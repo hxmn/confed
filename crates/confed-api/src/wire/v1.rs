@@ -658,34 +658,53 @@ pub async fn move_page_to(
         Err(ApiError::Server { status: 405, .. }) => {
             Err(ApiError::unsupported(flavor, "move a page through rest/api/content/{id}/move"))
         }
+        Err(ApiError::NotFound(body)) if is_route_miss(&body) => {
+            Err(ApiError::unsupported(flavor, "move a page through rest/api/content/{id}/move"))
+        }
         Err(e) => Err(e),
     }
 }
 
-/// Ask the move endpoint to move page 0, which never exists. A server with
-/// the endpoint answers in its own JSON error format, naming the content it
-/// could not find (or refusing the request); one without it answers 405, or
-/// a 404 that is not its JSON. Nothing can move: there is no page 0.
-pub async fn probe_move(http: &crate::http::Http) -> ApiResult<Probe> {
-    let answer = http
-        .put_json::<_, serde_json::Value>(
-            "rest/api/content/0/move/append/0",
-            &serde_json::json!({}),
-        )
-        .await;
-    Ok(match answer {
+/// A target id no content has.
+pub const PROBE_TARGET: &str = "0";
+
+/// Ask the move endpoint to move the real page `page` under a target that
+/// cannot exist, so nothing can move.
+///
+/// The question is whether the request gets past routing. A server with the
+/// endpoint looks the page up and then fails on the target, in its JSON error
+/// format; one without it never reaches a resource: Jersey's `null for uri`
+/// 404, or a 405. A missing page id would not tell the two apart — both are a
+/// 404 — which is why the page must be one that exists.
+pub async fn probe_move(http: &crate::http::Http, page: &PageId) -> ApiResult<Probe> {
+    let path = format!("rest/api/content/{page}/move/append/{PROBE_TARGET}");
+    let answer = http.put_json::<_, serde_json::Value>(&path, &serde_json::json!({})).await;
+    Ok(classify_move_probe(answer))
+}
+
+pub fn classify_move_probe(answer: ApiResult<serde_json::Value>) -> Probe {
+    match answer {
+        // Nothing could have moved, but the route answered.
         Ok(_) => Probe::Available,
         Err(ApiError::Server { status: 405, .. }) => Probe::Unavailable,
         Err(ApiError::NotFound(body)) | Err(ApiError::Server { status: 400, body }) => {
-            if body.contains("statusCode") && !body.contains("null for uri") {
+            if is_route_miss(&body) {
+                Probe::Unavailable
+            } else if body.contains("statusCode") {
                 Probe::Available
             } else {
-                Probe::Unavailable
+                Probe::Unknown
             }
         }
-        Err(ApiError::Network(_)) | Err(ApiError::RateLimited(_)) => Probe::Unknown,
+        // Refused by the resource itself: the route exists.
+        Err(ApiError::Conflict(_)) => Probe::Available,
         Err(_) => Probe::Unknown,
-    })
+    }
+}
+
+/// Whether a 404 is "no such route" rather than "no such content".
+pub fn is_route_miss(body: &str) -> bool {
+    body.contains("null for uri") || !body.contains("statusCode")
 }
 
 /// `GET rest/api/content/{id}/restriction/byOperation`: the operations whose
@@ -740,6 +759,32 @@ pub fn operations_of(raw: &serde_json::Value) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_move_probe_tells_a_missing_route_from_a_missing_target() {
+        let json404 = |m: &str| {
+            Err(ApiError::NotFound(format!(r#"PUT …: {{"statusCode":404,"message":"{m}"}}"#)))
+        };
+        assert_eq!(
+            classify_move_probe(json404("No content found with id: ContentId{id=0}")),
+            Probe::Available
+        );
+        assert_eq!(
+            classify_move_probe(json404(
+                "null for uri: https://wiki.example.test/rest/api/content/1001/move/append/0"
+            )),
+            Probe::Unavailable
+        );
+        assert_eq!(
+            classify_move_probe(Err(ApiError::NotFound("PUT …: <html>Not Found</html>".into()))),
+            Probe::Unavailable
+        );
+        assert_eq!(
+            classify_move_probe(Err(ApiError::Server { status: 405, body: String::new() })),
+            Probe::Unavailable
+        );
+        assert_eq!(classify_move_probe(Err(ApiError::Network("down".into()))), Probe::Unknown);
+    }
 
     #[test]
     fn restrictions_name_only_the_operations_that_restrict_someone() {

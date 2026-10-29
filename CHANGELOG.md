@@ -20,6 +20,56 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-29
+
+### Added
+
+- **`confed instance mv` works on Data Center through the web UI's move.** Data
+  Center has no REST endpoint for moving a page (Atlassian documents
+  `rest/api/content/{id}/move` for Cloud only), so 0.11.0 could not move pages there.
+  When that route is missing, confed now posts the browser's "Move page" form to
+  `pages/movepage.action`, which keeps page ids, history, comments and attachments, and
+  moves the descendants. It is not a documented API, so:
+  - the dry run says the move will go this way
+  - every move is read back: a page that did not reach the destination space is exit 9,
+    and one under the wrong parent is moved under the right one
+  - a redirect to the login page is reported as the server not accepting this
+    credential for web actions
+
+  This has been tested against a fake server only; try it on a test page first.
+
+### Changed
+
+- **The move probe asks about a real page.** 0.11.0 asked to move page 0, and "no such
+  page" and "no such route" are both a 404, so its answer proved nothing. It now asks to
+  move a page of the workspace under a target that cannot exist, which still moves
+  nothing. On Data Center it then checks that the move dialog answers for that page.
+  `capabilities.move_between_spaces` gains `web_action`, and is `unknown` where there is
+  no pulled page to ask about.
+- **`confed instance mv --dry-run` exits 9 on a server that cannot move pages between
+  spaces**, instead of printing a plan for a move that would fail. A server that might
+  not be able to is a warning.
+- **`confed instance adopt --dry-run --move-credentials` says what would happen to the
+  credentials:** where the shared one would come from, which store it would go to,
+  which `.session.db` files would be removed, and which keyring entries would be deleted
+  (`result.credentials`).
+- **A personal space is cloned into `@` and its owner's username.** Newer Data Center
+  and Cloud key personal spaces by a long id, which made folders like
+  `@ff8081817a1b2c…`. The owner is looked up; the id is used only when that fails.
+  Spaces already registered keep their folder.
+- **`confed instance abort` asks the server first**, and refuses a move the server has
+  already made even if the journal has not recorded it.
+
+### Fixed
+
+- **Tables in `instance spaces` and `instance clone`/`adopt` lost their columns** with
+  long keys such as personal spaces'. Columns are now as wide as their contents,
+  measured in terminal cells, and padding no longer counts colour codes.
+- **The design note gave the wrong answer about Data Center's move API.**
+  [docs/design/07-instance-roots.md](docs/design/07-instance-roots.md) §5.1 now records
+  what Atlassian documents, what a probe found, how the fallback works, and what has not
+  been verified on a live server.
+
 ## [0.11.0] - 2026-10-29
 
 ### Added
@@ -843,7 +893,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/hxmn/confed/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/hxmn/confed/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/hxmn/confed/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/hxmn/confed/compare/v0.9.1...v0.9.2

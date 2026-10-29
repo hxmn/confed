@@ -1,7 +1,7 @@
 # 07 — Instance roots and moves between spaces
 
-Status: implemented in 0.11.0 (`confed instance`, alias `confed i`). `confed instance cp`
-is not implemented yet (§8).
+Status: implemented in 0.11.0 (`confed instance`, alias `confed i`); the move API
+findings in §5.1 corrected in 0.12.0. `confed instance cp` is not implemented yet (§8).
 
 ## 1. Problem
 
@@ -44,8 +44,11 @@ is marked by `.confed-instance.db` (SQLite, like `.state.db`):
   `.confed-instance-session.db`, and `*/.state.db`, `*/.session.db`, `*/.pages.db`,
   `*/.confed.lock`.
 - **Directories** are named for the space key. A personal space's key starts with `~`,
-  which a shell expands to a home directory, so `~alice` goes to **`@alice`**: no space
-  key can contain `@`, and the name never needs quoting. Personal spaces are left out of
+  which a shell expands to a home directory, so a personal space goes to **`@` and its
+  owner's username** (`@alice`). On newer Data Center spaces and on Cloud the key is
+  `~` and a long id, so the owner is looked up. If that fails, or the username is not a
+  safe directory name, the folder is `@` and the id. No space key can contain `@`, and
+  the name never needs quoting. Personal spaces are left out of
   `clone --all` unless `--type personal` asks for them, as with `confed clone --all`.
 
 ### Credentials
@@ -110,34 +113,69 @@ page yet names the parent (its directory) and the new title (its file name), as
 
 ### 5.1 Which server API moves a page to another space
 
+*Corrected in 0.12.0.* The first version of this note said the REST move endpoint was
+documented for Data Center. That was wrong: Atlassian documents
+`PUT …/content/{id}/move/{position}/{targetId}` for Cloud only, and a probe of a 9.x Data
+Center found no such route.
+
 | Candidate | Data Center 9.x | Cloud | confed |
 |---|---|---|---|
-| `PUT /rest/api/content/{id}/move/{position}/{targetId}` (`append`, `before`, `after`) | Documented in the DC REST API and already used by confed for sibling ordering. The target's space becomes the page's. Descendants move with it. | Same endpoint, under `/wiki`. | **Used.** |
+| `PUT /rest/api/content/{id}/move/{position}/{targetId}` (`append`, `before`, `after`) | Not documented, and absent on the server probed. | Documented, under `/wiki`. The target's space becomes the page's; descendants move with it. | **Used first**, on both flavors. |
+| `POST /pages/movepage.action`, the web UI's "Move page" dialog | What the browser uses. Keeps page ids, history, comments and attachments, and moves the descendants. Not a documented API. | — | **Data Center fallback**, when the REST route is missing. |
 | `PUT /rest/api/content/{id}` with another `space` and `ancestors`, version + 1 | Not documented as a space change. Whether the server accepts it, and whether children follow, is not something confed can rely on. | v2 has no space field on update. | Not used. |
 | Copy, then delete | Always possible. | Always possible. | **Never.** New ids, no history, comments and inline markers lost. |
 
 `move/append/{target}` puts the page under the target. `move/before|after/{target}`
 makes it the target's sibling: `KEY: --root` is `after` the home page, and `--position N`
-is `before` the Nth sibling. After the call, confed reads the root page back. If its
-space has not changed, the move is **exit 9** and nothing else happens. That covers a
-server that answered success without moving across spaces.
+is `before` the Nth sibling.
 
-**Capability probe.** `confed whoami` (`capabilities.move_between_spaces`) and
-`confed doctor` ("move between spaces") call the endpoint with page 0, which cannot
-exist:
+**The Data Center fallback.** When the REST route answers 405, or a 404 that is
+Jersey's `null for uri` rather than "no such content", confed posts the dialog's form to
+`pages/movepage.action`. The form carries `pageId`, `spaceKey` and `targetTitle` (the
+target's space and title), `targetId`, and `position`: `append`, or `above`/`below` for
+before/after. It sends `X-Atlassian-Token: no-check`, the documented way for a script to
+pass Confluence's XSRF check. The action answers with a web page whatever it did, so its
+answer is not trusted: a redirect to `login.action` is reported as the server not
+accepting this credential for web actions, and anything else is checked by reading the
+page back.
 
-- **available:** a JSON `statusCode` error naming the missing content.
-- **unavailable:** `405`, or a `404` that is not the server's JSON (`null for uri`).
-- **unknown:** anything else.
+**Read-back, on every move.** If the root page is not in the destination space, the move
+is **exit 9**, and nothing else happens. If it is in the right space under the wrong
+parent, confed moves it under the right one with the in-space update Data Center does
+support (`PUT content/{id}` with new `ancestors`). If that does not take either, the
+journal stops at `planned` with exit 7 and a hint.
 
-Nothing can move. A move that answers 404 for pages confed has just read is also
-reported as exit 9: the endpoint is missing, not the pages.
+**Capability probe.** `confed whoami` (`capabilities.move_between_spaces`), `confed
+doctor`, `confed instance doctor` ("move between spaces") and every `confed instance mv`
+pre-flight, dry run included, ask about **a real page**: one of the workspace's, or the
+subtree's root for a move. The probe moves it under a target that cannot exist
+(`move/append/0`). A missing page id could not tell anything apart, because "no such
+page" and "no such route" are both 404. With a real page, the answers differ:
 
-**What was verified, and how.** This was built and tested against the mock server and a
-stateful fake of the REST v1 routes (`crates/confed/tests/instance.rs`), not a live Data
-Center. The table above rests on Atlassian's REST documentation and on confed's existing
-use of the endpoint for sibling ordering. The read-back after every move, the probe and
-the exit 9 path are there so that a server behaving differently fails safely.
+- **available:** the request got past routing, so the server's JSON error is about the
+  target, or it refused the request itself (400, 403, 409).
+- **web_action** (Data Center): no REST route, but `GET pages/movepage.action?pageId=<page>`,
+  the move dialog with no target, answers without sending the credential to the login
+  page.
+- **unavailable:** neither. `instance mv` and its `--dry-run` exit 9 before anything is
+  written.
+- **unknown:** no pulled page to ask about, or an answer that says neither.
+
+Nothing can move during a probe: the REST request names a target that does not exist,
+and the dialog request names none.
+
+**What was verified, and how.** The REST route's absence on Data Center comes from
+Atlassian's documentation and a probe of a 9.x server. The fallback was built against
+the browser's endpoint and tested against a stateful fake of these routes
+(`crates/confed/tests/instance.rs`) and wire-format tests (`crates/confed-dc/tests/dc.rs`).
+**It has not yet moved a page on a live Data Center.** The form field names are those of
+the move dialog and are not a published contract, which is why every move is read back.
+A first real move should be a test page in a test space.
+
+**Within one space.** `confed mv --before/--after --push` on Data Center uses the same
+REST route for sibling ordering, so it probably fails on a server without it. Moving
+under another parent within a space uses the update with `ancestors`, which Data Center
+supports.
 
 ### 5.2 Does Confluence rewrite links when a page changes space?
 

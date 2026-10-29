@@ -857,7 +857,9 @@ wiki/
 └── @alice/                       the personal space ~alice
 ```
 
-A personal space (`~alice`) goes to `@alice`, because a shell expands `~`. Personal
+A personal space goes to `@` and its owner's username (`@alice`): a shell expands `~`,
+and on newer Data Center and on Cloud a personal key is `~` and a long id, so confed
+looks the owner up. If the owner can't be found, the folder is `@` and the id. Personal
 spaces are cloned only when asked for (`--type personal`, or by key).
 
 **Naming pages.** From the root, a page is a path from the current directory
@@ -997,8 +999,15 @@ to it and listed in `links_by_server`. `--no-rewrite-links` changes none.
 `links_rewritten[]` (`page_id`, `space`, `count`), `links_by_server[]`, `warnings[]`,
 `journal_id`.
 
-Exit 9 when the server cannot move pages between spaces. confed never falls back to
-copying and deleting, which would lose ids and history. A file that was never pushed is
+How the pages move: through the REST move endpoint where the server has it (Cloud).
+Data Center has no such REST route, so there confed uses the web UI's "Move page"
+action (`pages/movepage.action`). That action keeps ids and history the same way, but
+it is not a documented API, so the dry run warns about it. Every move is read back from
+the server: a page that is not in the destination space is exit 9, and one under the
+wrong parent is put right. The pre-flight, dry run included, asks the server about the
+subtree's root without moving it. A server that can do neither is exit 9 there, before
+anything is written. confed never falls back to copying and deleting, which would lose
+ids and history. A file that was never pushed is
 moved as a file, and the next push in the destination creates it.
 
 ### confed instance resume / abort
@@ -1009,6 +1018,7 @@ the journal entry.
 
 - `confed instance resume [ID]` finishes it from the last finished step, asking the
   server where each page actually is. It is safe to run again.
-- `confed instance abort [ID]` is allowed only before the server moved anything, and
-  undoes any title changes. After that, the way back is a move in the other direction.
+- `confed instance abort [ID]` is allowed only before the server moved anything. It
+  asks the server first, since the journal can lag a killed process, and undoes any
+  title changes. After that, the way back is a move in the other direction.
 

@@ -296,6 +296,9 @@ impl MovePosition {
 pub enum Probe {
     /// The server answered the way a server with the API does.
     Available,
+    /// Data Center without the REST move endpoint: confed falls back to the
+    /// web UI's move action, which is not a documented API.
+    WebAction,
     /// The server answered the way a server without the API does.
     Unavailable,
     /// The answer said neither: a proxy, an outage, or an unfamiliar server.
@@ -306,6 +309,7 @@ impl Probe {
     pub fn as_str(self) -> &'static str {
         match self {
             Probe::Available => "available",
+            Probe::WebAction => "web_action",
             Probe::Unavailable => "unavailable",
             Probe::Unknown => "unknown",
         }

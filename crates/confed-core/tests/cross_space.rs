@@ -389,18 +389,13 @@ async fn a_server_that_refuses_the_move_leaves_everything_as_it_was() {
     }
     assert!(h.instance.journal_unfinished().unwrap().is_empty());
 
-    // A server without the endpoint is exit 9, never a copy and delete.
+    // A server that cannot move is exit 9 already at the plan — a dry run
+    // says so — and never a copy and delete.
     h.mock.refuse_moves(None);
     h.mock.without_move_endpoint(true);
-    let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();
-    let id =
-        h.instance.journal_begin(crossmove::OP, &serde_json::to_value(&plan).unwrap()).unwrap();
-    let client = h.client();
-    let err =
-        crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, Step::Planned, 2)
-            .await
-            .unwrap_err();
+    let err = h.plan(&h.request("1002", "2002")).await.unwrap_err();
     assert_eq!(err.exit_code(), confed_core::ExitCode::Unsupported);
+    assert!(err.to_string().contains("cannot move pages between spaces"), "{err}");
     assert!(!h
         .mock
         .calls()
@@ -466,4 +461,19 @@ async fn a_parent_id_in_another_space_is_refused_by_push() {
         .unwrap();
     assert!(outcome.cross_space.is_empty());
     assert_eq!(outcome.pushed.len(), 1);
+}
+
+#[tokio::test]
+async fn abort_asks_the_server_and_refuses_a_move_the_journal_missed() {
+    let h = Harness::new().await;
+    let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();
+    let id =
+        h.instance.journal_begin(crossmove::OP, &serde_json::to_value(&plan).unwrap()).unwrap();
+    // Moved, but killed before the journal heard of it.
+    h.mock.move_page_to(&"1002".into(), MovePosition::Append, &"2002".into()).await.unwrap();
+    let client = h.client();
+    let err =
+        crossmove::abort(&h.instance, &id, &client, &mut plan, Step::Planned).await.unwrap_err();
+    assert!(err.hint().unwrap().contains("confed instance resume"), "{err:?}");
+    assert_eq!(h.instance.journal_entry(&id).unwrap().unwrap().state, Step::Planned);
 }

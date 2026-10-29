@@ -75,6 +75,71 @@ impl DcClient {
         self
     }
 
+    /// Move a page the way the browser's "Move page" dialog does, through
+    /// `pages/movepage.action`: Data Center's REST API has no move between
+    /// spaces. The action keeps the page's id and history like the REST move.
+    ///
+    /// It is not a documented API. Its parameters are the dialog's — the
+    /// destination space, the target page by title and id, and where to put
+    /// the page relative to it — and its answer is a web page whatever
+    /// happened, so success is not judged here: the caller reads the page
+    /// back. A redirect to the login page means the server does not accept
+    /// this credential for web actions.
+    async fn move_by_web_action(
+        &self,
+        id: &PageId,
+        position: MovePosition,
+        target: &PageId,
+    ) -> ApiResult<()> {
+        let target_page =
+            self.fetch_content(target.as_str(), &[("expand", "space".to_string())]).await?;
+        let form = [
+            ("pageId", id.0.clone()),
+            ("spaceKey", target_page.space_key().unwrap_or_default()),
+            ("targetTitle", target_page.title.clone().unwrap_or_default()),
+            ("targetId", target.0.clone()),
+            (
+                "position",
+                match position {
+                    MovePosition::Append => "append",
+                    MovePosition::Before => "above",
+                    MovePosition::After => "below",
+                }
+                .to_string(),
+            ),
+        ];
+        match self.http.post_form("pages/movepage.action", &form).await {
+            Ok((final_url, _)) if final_url.contains("login.action") => Err(ApiError::Auth(format!(
+                "pages/movepage.action sent this credential to the login page: the server does \
+                 not accept it for web actions ({final_url})"
+            ))),
+            Ok(_) => Ok(()),
+            Err(ApiError::NotFound(_)) | Err(ApiError::Server { status: 405, .. }) => {
+                Err(ApiError::unsupported(
+                    self.flavor(),
+                    "move a page (neither rest/api/content/{id}/move nor pages/movepage.action answers)",
+                ))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Whether the web move action is there and takes this credential: the
+    /// move dialog for `page`, asked for with no target, so nothing can move.
+    async fn probe_web_action(&self, page: &PageId) -> ApiResult<Probe> {
+        let answer =
+            self.http.get_text_at("pages/movepage.action", &[("pageId", page.0.clone())]).await;
+        Ok(match answer {
+            Ok((final_url, _)) if final_url.contains("login.action") => Probe::Unavailable,
+            Ok(_) => Probe::WebAction,
+            Err(ApiError::NotFound(_)) | Err(ApiError::Server { status: 405, .. }) => {
+                Probe::Unavailable
+            }
+            Err(ApiError::Auth(_)) => Probe::Unavailable,
+            Err(_) => Probe::Unknown,
+        })
+    }
+
     async fn fetch_content(&self, id: &str, query: &[(&str, String)]) -> ApiResult<v1::Content> {
         self.http.get_json(&format!("rest/api/content/{id}"), query).await
     }
@@ -481,11 +546,19 @@ impl ConfluenceClient for DcClient {
         position: MovePosition,
         target: &PageId,
     ) -> ApiResult<()> {
-        v1::move_page_to(&self.http, self.flavor(), id, position, target).await
+        match v1::move_page_to(&self.http, self.flavor(), id, position, target).await {
+            Err(ApiError::Unsupported { .. }) => {
+                self.move_by_web_action(id, position, target).await
+            }
+            other => other,
+        }
     }
 
-    async fn probe_move(&self) -> ApiResult<Probe> {
-        v1::probe_move(&self.http).await
+    async fn probe_move(&self, page: &PageId) -> ApiResult<Probe> {
+        match v1::probe_move(&self.http, page).await? {
+            Probe::Unavailable => self.probe_web_action(page).await,
+            other => Ok(other),
+        }
     }
 
     async fn page_restrictions(&self, id: &PageId) -> ApiResult<Vec<String>> {

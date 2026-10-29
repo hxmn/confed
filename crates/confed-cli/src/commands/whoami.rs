@@ -32,8 +32,12 @@ pub async fn run(ctx: &mut Context) -> Result<Output> {
         if caps.inline_comment_create { "create + resolve" } else { "read only" }
     );
 
-    // Asks the move endpoint to move a page that cannot exist; nothing moves.
-    let moves = client.probe_move().await.unwrap_or(confed_api::Probe::Unknown);
+    // Asks the move endpoint to move a real page under one that cannot exist;
+    // nothing moves. Without a pulled page there is nothing to ask about.
+    let moves = match crate::commands::doctor::probe_page(ctx) {
+        Some(page) => client.probe_move(&page).await.unwrap_or(confed_api::Probe::Unknown),
+        None => confed_api::Probe::Unknown,
+    };
     let _ = writeln!(human, "  move between spaces  {}", moves.as_str());
 
     // Record that these credentials worked, for `doctor`.

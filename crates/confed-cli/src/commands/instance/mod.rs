@@ -3,7 +3,7 @@
 //!
 //! Like `init`, each command is split in two: [`prepare`] runs before the
 //! async runtime starts — it may prompt, and it reads the OS keyring — and
-//! [`run`] does the rest. Commands that run in every space ([`fanout`]) call
+//! [`run`] does the rest. Commands that run in every space (`fanout`) call
 //! the single-space command in each workspace, in this process, over one
 //! client: one credential, and one request ceiling for all of them.
 
