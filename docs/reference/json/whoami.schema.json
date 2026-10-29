@@ -35,8 +35,8 @@
         "max_request_concurrency": { "type": "integer", "minimum": 1 },
         "move_between_spaces": {
           "type": "string",
-          "enum": ["available", "web_action", "unavailable", "unknown"],
-          "description": "Whether `confed instance mv` can move pages here, asked about a page of this workspace with a target that cannot exist, so nothing moves. `available`: the REST move endpoint answers. `web_action`: Data Center without it; confed moves through the web UI's move action (not a documented API) and reads each move back. `unavailable`: neither, or the web action does not accept this credential; `confed instance mv` exits 9. `unknown`: no pulled page to ask about, or an unclear answer."
+          "enum": ["available", "web_action", "web_action_refused", "unavailable", "unknown"],
+          "description": "Only with `--probe-move`, which sends a move request for one of this workspace's pages under a target that cannot exist: nothing moves, but it is a write request, so it is never sent unasked. `available`: the REST move endpoint answers. `web_action`: Data Center without it, whose web UI move action lets a script past its XSRF check; confed moves through it and reads each move back. `web_action_refused`: that check refuses scripts (403 \"Session Expired\"). `unavailable`: neither route exists. `unknown`: no pulled page to ask about, or an unclear answer. With any but the first two, `confed instance mv` exits 9."
         }
       }
     }

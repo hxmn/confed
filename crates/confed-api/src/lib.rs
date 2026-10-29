@@ -18,7 +18,7 @@ pub mod wire;
 
 pub use client::ConfluenceClient;
 pub use error::{ApiError, ApiResult};
-pub use http::{partial_path, Auth, Http, RetryPolicy, PARTIAL_SUFFIX};
+pub use http::{partial_path, Auth, Http, RetryPolicy, WebAnswer, PARTIAL_SUFFIX};
 pub use mock::MockClient;
 pub use secret::Secret;
 pub use types::*;

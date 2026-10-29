@@ -20,6 +20,56 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-29
+
+### Changed
+
+- **`whoami` and `doctor` no longer probe the move endpoint unasked.** The probe sends a
+  move request for one of the workspace's pages, under a target that cannot exist.
+  Nothing moves, but it is a write request against a real page, which in a production
+  workspace is a production page. Ask for it with `--probe-move` (`whoami`, `doctor`,
+  `instance doctor`); `capabilities.move_between_spaces` is present only then.
+  `confed instance mv` still asks, about the page it is moving.
+- **`confed mv --before/--after/--position` needs `--push`** (exit 2 without it). Order
+  among siblings lives on the server and a push never carried it: the command reported
+  `"pushed": true` and changed nothing. It now reorders on the server and reports
+  `reordered`. On Data Center it uses the web UI's move action, as `instance mv` does,
+  and warns that the order cannot be read back.
+- **`confed instance mv` checks whether the server can move last**, so a server that
+  cannot no longer hides a home page, an unpushed edit or a title collision: those are
+  exit 7, listed with it. When it is the only problem, the result is the full plan,
+  with the reason in `result.blocked`, and exit 9.
+
+### Added
+
+- **The Data Center web move tries the browser's way when no-check is refused.**
+  Confluence's XSRF check answers a form without a valid token with a 403 "Session
+  Expired" page. confed sends `X-Atlassian-Token: no-check`, then, if that is refused,
+  the `atl_token` and cookie of a session it opens by viewing the page. Refused both
+  ways is exit 9. Not yet confirmed on a live server.
+- **A finer move probe on Data Center.** It POSTs the move form for page 0, which cannot
+  move, and so finds out whether a script can get past the XSRF check:
+  `move_between_spaces` gains `web_action_refused`. Before, the probe opened the move
+  dialog for a real page without the header; that answered 403 whatever the form would
+  have done, and once the header got through it could have run the action with no target.
+- `confed doctor --offline` skips the server, and `confed instance doctor --offline`
+  now asks the server nothing in any space.
+- `confed instance status --short`.
+
+### Fixed
+
+- **`instance clone` into a root without a shared credential** left the new workspaces
+  with none. Each now gets its own copy of the credential it was cloned with, stored as
+  its source stores it, and the output says so.
+- **The `parent_id` refusal's hint** printed an unquoted command without the space key.
+  It now prints `confed instance mv "KEY:path" <parent id>`, which works as given.
+- **A gateway error (HTTP 502, 503, 504) that outlasts the retries is exit 5**, a
+  network problem, rather than 1.
+- **The "move between spaces" check names the 403** from the web move's XSRF check.
+- **Personal spaces whose owner cannot be looked up**, such as deactivated accounts, no
+  longer get `@<id>` folders: they are named for the space, which carries the owner's
+  display name (`@Alice-Ng`). A key that is a username already keeps it.
+
 ## [0.12.0] - 2026-10-29
 
 ### Added
@@ -893,7 +943,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/hxmn/confed/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/hxmn/confed/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/hxmn/confed/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/hxmn/confed/compare/v0.9.2...v0.10.0

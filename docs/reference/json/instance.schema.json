@@ -62,7 +62,11 @@
       "description": "`mv`, `resume`: restrictions that move with the pages, a rules page in the subtree, links the server updated. Also in the envelope's `warnings`.",
       "items": { "type": "string" }
     },
-    "dry_run": { "type": "boolean" }
+    "dry_run": { "type": "boolean" },
+    "blocked": {
+      "type": "string",
+      "description": "`mv`: why this server cannot make the move, when everything else checked out. The plan is still in the result to read; the exit code is 9 and nothing was written."
+    }
   },
   "$defs": {
     "location": {

@@ -94,35 +94,56 @@ pub async fn run(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
         ctx.workspace()?.state().upsert_page(&updated)?;
     }
 
+    // Order among siblings lives only on the server, and a push does not
+    // carry it: it is made there, now, or not at all.
     let reorder = args.before.is_some() || args.after.is_some() || args.position.is_some();
-    if reorder {
-        // Ordering lives on the server; record the intent for the next push.
-        let position = match (&args.before, &args.after, args.position) {
-            (_, _, Some(p)) => Some(p),
-            (Some(sibling), _, _) | (_, Some(sibling), _) => ctx
-                .workspace()?
-                .state()
-                .get_page(&ctx.resolve_page(sibling)?)?
-                .and_then(|p| p.position),
-            _ => None,
-        };
-        let mut updated = ctx.workspace()?.state().get_page(&page_id)?.unwrap_or(record.clone());
-        updated.position = position;
-        ctx.workspace()?.state().upsert_page(&updated)?;
+    if reorder && !args.push {
+        return Err(ConfedError::usage_with_hint(
+            "the order of pages lives on the server, and `confed push` does not carry it",
+            "add --push to reorder on the server now",
+        ));
     }
+    let sibling = if reorder { Some(reorder_target(ctx, &page_id, args)?) } else { None };
+    let asked_to_reorder = sibling.is_some();
 
     let mut human = format!("Moved {old_path} -> {new_path}\n");
     let mut pushed = false;
+    let mut reordered = false;
+    let mut warnings = Vec::new();
     if args.push {
         let client = ctx.build_client()?;
-        let engine = ctx.engine(client)?;
+        let engine = ctx.engine(client.clone())?;
         let ws = ctx.workspace_mut()?;
         let _lock = ws.lock()?;
-        engine
+        let outcome = engine
             .push(ws, &PushOptions { scope: vec![new_path.clone()], ..Default::default() })
             .await?;
-        pushed = true;
-        human.push_str("Applied on the server.\n");
+        if let Some(refused) = outcome.cross_space.first().or(outcome.skipped.first()) {
+            return Err(ConfedError::state(format!("{}: {}", refused.path, refused.reason)));
+        }
+        if let Some(failed) = outcome.failed.first() {
+            return Err(ConfedError::Other(format!("{}: {}", failed.page_id, failed.error)));
+        }
+        pushed = !outcome.pushed.is_empty() || !outcome.created.is_empty();
+        if let Some(target) = sibling.flatten() {
+            client
+                .move_page(&confed_api::PageId::new(&page_id), &target.parent, target.position)
+                .await?;
+            reordered = true;
+            if client.flavor() == confed_api::Flavor::DataCenter {
+                warnings.push(
+                    "Data Center does not report the order of pages, so confed cannot read it \
+                     back; check it in the browser"
+                        .to_string(),
+                );
+            }
+        }
+        human.push_str(match (pushed, reordered) {
+            (_, true) => "Applied on the server, and reordered there.\n",
+            (true, false) => "Applied on the server.\n",
+            (false, false) if asked_to_reorder => "Already in that place; nothing to send.\n",
+            (false, false) => "Nothing to send to the server.\n",
+        });
     } else {
         human.push_str(&ctx.style.dim("Run `confed push` to apply it on the server.\n"));
     }
@@ -135,9 +156,70 @@ pub async fn run(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
             "title_changed": title_changed,
             "parent_changed": parent_changed,
             "pushed": pushed,
+            "reordered": reordered,
         }),
         human,
-    ))
+    )
+    .warn_all(warnings))
+}
+
+/// Where a reorder puts the page: before or after a sibling, as the server
+/// takes it. `None` when `--position` is past the last sibling and the page
+/// is already last, or it has no siblings.
+struct ReorderTarget {
+    parent: confed_api::PageId,
+    position: confed_api::Position,
+}
+
+fn reorder_target(ctx: &Context, page_id: &str, args: &MvArgs) -> Result<Option<ReorderTarget>> {
+    let ws = ctx.workspace()?;
+    let parent_of = |id: &str| -> Result<Option<String>> {
+        Ok(ws.state().get_remote(id)?.and_then(|r| r.parent_id))
+    };
+    let numeric = |id: &str| {
+        id.parse::<u64>().map_err(|_| {
+            ConfedError::usage(format!("page id {id} is not a number the server takes"))
+        })
+    };
+    let parent = |id: &str| -> Result<confed_api::PageId> {
+        Ok(confed_api::PageId::new(parent_of(id)?.unwrap_or_default()))
+    };
+    if let Some(before) = &args.before {
+        let sibling = ctx.resolve_page(before)?;
+        return Ok(Some(ReorderTarget {
+            parent: parent(&sibling)?,
+            position: confed_api::Position::Before(numeric(&sibling)?),
+        }));
+    }
+    if let Some(after) = &args.after {
+        let sibling = ctx.resolve_page(after)?;
+        return Ok(Some(ReorderTarget {
+            parent: parent(&sibling)?,
+            position: confed_api::Position::After(numeric(&sibling)?),
+        }));
+    }
+    let Some(index) = args.position else { return Ok(None) };
+    let own_parent = parent_of(page_id)?;
+    let mut siblings: Vec<_> = ws
+        .state()
+        .all_remote()?
+        .into_iter()
+        .filter(|r| !r.deleted && r.parent_id == own_parent && r.page_id != page_id)
+        .collect();
+    siblings.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.title.cmp(&b.title)));
+    let index = usize::try_from(index.max(0)).unwrap_or(0);
+    let parent = confed_api::PageId::new(own_parent.unwrap_or_default());
+    Ok(match (siblings.get(index), siblings.last()) {
+        (Some(at), _) => Some(ReorderTarget {
+            parent,
+            position: confed_api::Position::Before(numeric(&at.page_id)?),
+        }),
+        (None, Some(last)) => Some(ReorderTarget {
+            parent,
+            position: confed_api::Position::After(numeric(&last.page_id)?),
+        }),
+        (None, None) => None,
+    })
 }
 
 /// A destination inside another workspace of the same instance root is a

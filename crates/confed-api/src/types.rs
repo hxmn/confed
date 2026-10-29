@@ -299,6 +299,10 @@ pub enum Probe {
     /// Data Center without the REST move endpoint: confed falls back to the
     /// web UI's move action, which is not a documented API.
     WebAction,
+    /// Data Center without the REST move endpoint, whose web move action
+    /// refuses scripted requests: its XSRF check passes neither
+    /// `X-Atlassian-Token: no-check` nor a session token.
+    WebActionRefused,
     /// The server answered the way a server without the API does.
     Unavailable,
     /// The answer said neither: a proxy, an outage, or an unfamiliar server.
@@ -310,6 +314,7 @@ impl Probe {
         match self {
             Probe::Available => "available",
             Probe::WebAction => "web_action",
+            Probe::WebActionRefused => "web_action_refused",
             Probe::Unavailable => "unavailable",
             Probe::Unknown => "unknown",
         }

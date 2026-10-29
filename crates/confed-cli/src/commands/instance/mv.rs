@@ -310,6 +310,21 @@ pub async fn run(
     };
     let mut plan = crossmove::plan(&client, &spaces, &request).await?;
 
+    if let Some(reason) = plan.blocked.clone() {
+        // Everything else checked out: show the plan, and why it cannot run.
+        let mut output = describe(ctx, &plan, None, true);
+        output.result["blocked"] = json!(reason);
+        output.exit = confed_core::ExitCode::Unsupported;
+        return Ok(output.with_errors(vec![crate::output::ErrorEntry {
+            code: confed_core::ExitCode::Unsupported.name(),
+            message: reason,
+            hint: Some(
+                "move the pages in the browser instead; then `confed instance pull` brings both \
+                 workspaces up to date (the source drops them, the destination downloads them)"
+                    .into(),
+            ),
+        }]));
+    }
     if args.dry_run {
         return Ok(describe(ctx, &plan, None, true));
     }

@@ -133,42 +133,60 @@ is `before` the Nth sibling.
 Jersey's `null for uri` rather than "no such content", confed posts the dialog's form to
 `pages/movepage.action`. The form carries `pageId`, `spaceKey` and `targetTitle` (the
 target's space and title), `targetId`, and `position`: `append`, or `above`/`below` for
-before/after. It sends `X-Atlassian-Token: no-check`, the documented way for a script to
-pass Confluence's XSRF check. The action answers with a web page whatever it did, so its
-answer is not trusted: a redirect to `login.action` is reported as the server not
-accepting this credential for web actions, and anything else is checked by reading the
-page back.
+before/after. The form must pass Confluence's XSRF check, in two attempts:
+
+1. `X-Atlassian-Token: no-check`, the documented way for a script.
+2. If the server answers that with its 403 "Session Expired" page (missing security
+   token), the form a browser sends: confed views the page
+   (`pages/viewpage.action`), takes the session cookie it sets and the `atl_token` the
+   page embeds, and posts once more with both.
+
+A second refusal means scripts cannot use the action on this server: exit 9. The action
+answers with a web page whatever it did, so its answer is not trusted. A redirect to
+`login.action` is reported as the server not accepting this credential for web
+actions, and anything else is checked by reading the page back.
 
 **Read-back, on every move.** If the root page is not in the destination space, the move
 is **exit 9**, and nothing else happens. If it is in the right space under the wrong
 parent, confed moves it under the right one with the in-space update Data Center does
 support (`PUT content/{id}` with new `ancestors`). If that does not take either, the
-journal stops at `planned` with exit 7 and a hint.
+journal stops at `planned` with exit 7 and a hint. `abort` asks the server where the
+page is before undoing anything.
 
-**Capability probe.** `confed whoami` (`capabilities.move_between_spaces`), `confed
-doctor`, `confed instance doctor` ("move between spaces") and every `confed instance mv`
-pre-flight, dry run included, ask about **a real page**: one of the workspace's, or the
-subtree's root for a move. The probe moves it under a target that cannot exist
-(`move/append/0`). A missing page id could not tell anything apart, because "no such
-page" and "no such route" are both 404. With a real page, the answers differ:
+**Capability probe.** It runs in every `confed instance mv` pre-flight, dry run
+included, last, so a server that cannot move does not hide the other problems. It also
+runs on request in `confed whoami --probe-move`, `confed doctor --probe-move` and
+`confed instance doctor --probe-move`, and never unasked: it is a write request against
+a real page, even though nothing moves.
 
-- **available:** the request got past routing, so the server's JSON error is about the
-  target, or it refused the request itself (400, 403, 409).
-- **web_action** (Data Center): no REST route, but `GET pages/movepage.action?pageId=<page>`,
-  the move dialog with no target, answers without sending the credential to the login
-  page.
-- **unavailable:** neither. `instance mv` and its `--dry-run` exit 9 before anything is
-  written.
-- **unknown:** no pulled page to ask about, or an answer that says neither.
+- **REST route:** the probe moves a real page (the subtree's root, or one of the
+  workspace's) under a target that cannot exist (`move/append/0`). A missing page id
+  could not tell anything apart, because "no such page" and "no such route" are both 404.
+  With a real page, a server with the route answers in its JSON about the target, and
+  one without answers Jersey's `null for uri` or 405.
+- **Web action (Data Center):** a POST of the move form for page **0**, with
+  `X-Atlassian-Token: no-check`, then if refused with a session token. The XSRF check
+  runs before the action looks for the page, and nothing has id 0, so nothing can move.
+  The probe never sends the form for a real page: past the check, a request with no
+  target could make the action do something with the page.
 
-Nothing can move during a probe: the REST request names a target that does not exist,
-and the dialog request names none.
+Results:
+
+- **available:** the REST route exists.
+- **web_action:** a script gets past the action's XSRF check.
+- **web_action_refused:** it does not, with either method. Exit 9, and the dry run still
+  shows the full plan, with the reason in `result.blocked`.
+- **unavailable:** neither route exists (Struts' "There is no Action mapped…").
+- **unknown:** no pulled page to ask about, or a 404 that does not say which. This is a
+  warning; the move finds out.
 
 **What was verified, and how.** The REST route's absence on Data Center comes from
 Atlassian's documentation and a probe of a 9.x server. The fallback was built against
 the browser's endpoint and tested against a stateful fake of these routes
 (`crates/confed/tests/instance.rs`) and wire-format tests (`crates/confed-dc/tests/dc.rs`).
-**It has not yet moved a page on a live Data Center.** The form field names are those of
+**It has not yet moved a page on a live Data Center.** On one 9.5.4 server, the form
+without a token was refused with the 403 "Session Expired" page. Whether no-check or a
+session token passes the check there is the open question. The form field names are those of
 the move dialog and are not a published contract, which is why every move is read back.
 A first real move should be a test page in a test space.
 

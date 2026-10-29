@@ -32,7 +32,7 @@ pub async fn status(
     let instance = ctx.instance()?;
     let members = selected(ctx, &instance)?;
     let clients = connection.map(|c| c.clients(ctx)).transpose()?;
-    let single = StatusArgs { fetch: args.fetch, short: false, exit_code: args.exit_code };
+    let single = StatusArgs { fetch: args.fetch, short: args.short, exit_code: args.exit_code };
     let single = &single;
     let runs = each_space(ctx, &instance, &members, clients.as_ref(), |mut child| async move {
         if single.fetch {
@@ -317,11 +317,13 @@ pub async fn doctor(
     // --- the server: where each tracked page really is ------------------
     let clients = connection.map(|c| c.clients(ctx)).transpose()?;
     if let Some(client) = clients.as_ref().map(|c| &c.shared) {
-        let page = spaces
-            .values()
-            .find_map(|ws| ws.state().all_pages().ok()?.into_iter().next())
-            .map(|p| PageId::new(p.page_id));
-        checks.push(doctor::move_check(client.as_ref(), page.as_ref()).await);
+        if args.probe_move {
+            let page = spaces
+                .values()
+                .find_map(|ws| ws.state().all_pages().ok()?.into_iter().next())
+                .map(|p| PageId::new(p.page_id));
+            checks.push(doctor::move_check(client.as_ref(), page.as_ref()).await);
+        }
         let mut astray = Vec::new();
         for (key, ws) in &spaces {
             let numeric = ws.space_numeric_id()?;
@@ -369,7 +371,8 @@ pub async fn doctor(
     let failed = root_report.exit != ExitCode::Ok;
 
     // --- and `doctor` in each space ---------------------------------------
-    let single = DoctorArgs { fix: args.fix };
+    // The probe is asked once, in the root; never in every space.
+    let single = DoctorArgs { fix: args.fix, offline: args.offline, probe_move: false };
     let single = &single;
     let runs = each_space(ctx, &instance, &members, clients.as_ref(), |mut child| async move {
         doctor::run(&mut child, single).await

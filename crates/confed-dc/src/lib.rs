@@ -83,8 +83,12 @@ impl DcClient {
     /// destination space, the target page by title and id, and where to put
     /// the page relative to it — and its answer is a web page whatever
     /// happened, so success is not judged here: the caller reads the page
-    /// back. A redirect to the login page means the server does not accept
-    /// this credential for web actions.
+    /// back.
+    ///
+    /// Confluence's XSRF check guards the form. It is tried first with
+    /// `X-Atlassian-Token: no-check`, the documented way for scripts; a server
+    /// that refuses that ("Session Expired", 403) gets the form a browser
+    /// sends: the `atl_token` of a session, with that session's cookie.
     async fn move_by_web_action(
         &self,
         id: &PageId,
@@ -93,7 +97,7 @@ impl DcClient {
     ) -> ApiResult<()> {
         let target_page =
             self.fetch_content(target.as_str(), &[("expand", "space".to_string())]).await?;
-        let form = [
+        let mut form = vec![
             ("pageId", id.0.clone()),
             ("spaceKey", target_page.space_key().unwrap_or_default()),
             ("targetTitle", target_page.title.clone().unwrap_or_default()),
@@ -108,35 +112,67 @@ impl DcClient {
                 .to_string(),
             ),
         ];
-        match self.http.post_form("pages/movepage.action", &form).await {
-            Ok((final_url, _)) if final_url.contains("login.action") => Err(ApiError::Auth(format!(
-                "pages/movepage.action sent this credential to the login page: the server does \
-                 not accept it for web actions ({final_url})"
-            ))),
-            Ok(_) => Ok(()),
-            Err(ApiError::NotFound(_)) | Err(ApiError::Server { status: 405, .. }) => {
-                Err(ApiError::unsupported(
-                    self.flavor(),
-                    "move a page (neither rest/api/content/{id}/move nor pages/movepage.action answers)",
-                ))
-            }
-            Err(e) => Err(e),
+        let answer = self.http.post_form(MOVE_ACTION, &form, None).await?;
+        if !answer.is_xsrf_refusal() {
+            return judge_web_move(&answer, self.flavor());
         }
+        let Some(session) = self.web_session(id).await? else {
+            return Err(xsrf_refused(
+                self.flavor(),
+                "no session token could be had from a page view",
+            ));
+        };
+        form.push(("atl_token", session.token.clone()));
+        let answer = self.http.post_form(MOVE_ACTION, &form, Some(&session.cookie)).await?;
+        if answer.is_xsrf_refusal() {
+            return Err(xsrf_refused(self.flavor(), "a session token was refused too"));
+        }
+        judge_web_move(&answer, self.flavor())
     }
 
-    /// Whether the web move action is there and takes this credential: the
-    /// move dialog for `page`, asked for with no target, so nothing can move.
-    async fn probe_web_action(&self, page: &PageId) -> ApiResult<Probe> {
+    /// The web UI's session, as a browser holds it after viewing `page`: its
+    /// cookie, and the `atl_token` the page carries for its forms. `None`
+    /// when the server keeps no session for this credential.
+    async fn web_session(&self, page: &PageId) -> ApiResult<Option<WebSession>> {
         let answer =
-            self.http.get_text_at("pages/movepage.action", &[("pageId", page.0.clone())]).await;
-        Ok(match answer {
-            Ok((final_url, _)) if final_url.contains("login.action") => Probe::Unavailable,
-            Ok(_) => Probe::WebAction,
-            Err(ApiError::NotFound(_)) | Err(ApiError::Server { status: 405, .. }) => {
-                Probe::Unavailable
-            }
-            Err(ApiError::Auth(_)) => Probe::Unavailable,
-            Err(_) => Probe::Unknown,
+            self.http.get_web("pages/viewpage.action", &[("pageId", page.0.clone())], None).await?;
+        if answer.status != 200 || answer.is_login_page() || answer.cookies.is_empty() {
+            return Ok(None);
+        }
+        Ok(page_token(&answer.body)
+            .map(|token| WebSession { cookie: answer.cookies.join("; "), token }))
+    }
+
+    /// Whether the web move action takes a scripted request past its XSRF
+    /// check, asked about page 0, which does not exist: the check runs before
+    /// the action looks for the page, and there is nothing to move.
+    async fn probe_web_action(&self, page: &PageId) -> ApiResult<Probe> {
+        let form = vec![
+            ("pageId", "0".to_string()),
+            ("targetId", "0".to_string()),
+            ("position", "append".to_string()),
+        ];
+        let answer = self.http.post_form(MOVE_ACTION, &form, None).await?;
+        let answer = if answer.is_xsrf_refusal() {
+            // The page whose view gives a session is a real one; viewing it
+            // changes nothing.
+            let Some(session) = self.web_session(page).await? else {
+                return Ok(Probe::WebActionRefused);
+            };
+            let mut form = form;
+            form.push(("atl_token", session.token));
+            self.http.post_form(MOVE_ACTION, &form, Some(&session.cookie)).await?
+        } else {
+            answer
+        };
+        Ok(match answer.status {
+            _ if answer.is_xsrf_refusal() || answer.is_login_page() => Probe::WebActionRefused,
+            200..=399 => Probe::WebAction,
+            405 => Probe::Unavailable,
+            // Struts' own answer for an action that is not there.
+            404 if answer.body.to_ascii_lowercase().contains("action mapped") => Probe::Unavailable,
+            // Any other 404: no such action, or no page 0 — not told apart.
+            _ => Probe::Unknown,
         })
     }
 
@@ -328,6 +364,66 @@ fn ancestors(parent: Option<&PageId>) -> serde_json::Value {
     match parent {
         Some(id) => json!([{ "id": id.as_str() }]),
         None => json!([]),
+    }
+}
+
+/// The web UI's move action, the one the "Move page" dialog submits.
+const MOVE_ACTION: &str = "pages/movepage.action";
+
+/// A web UI session: its cookie, and the token its forms carry.
+struct WebSession {
+    cookie: String,
+    token: String,
+}
+
+/// The `atl_token` a Confluence page embeds for its forms.
+fn page_token(html: &str) -> Option<String> {
+    for name in [r#"name="ajs-atl-token""#, r#"name="atlassian-token""#, r#"id="atlassian-token""#]
+    {
+        let Some(at) = html.find(name) else { continue };
+        // The tag around the attribute, whichever order its attributes are in.
+        let start = html[..at].rfind('<').unwrap_or(at);
+        let end = at + html[at..].find('>').unwrap_or(html.len() - at);
+        let tag = &html[start..end];
+        if let Some(value) = tag.split(r#"content=""#).nth(1).and_then(|v| v.split('"').next()) {
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn xsrf_refused(flavor: Flavor, detail: &str) -> ApiError {
+    ApiError::unsupported(
+        flavor,
+        format!(
+            "move a page: Data Center's web move action (pages/movepage.action) refused the \
+             request as a forged form — HTTP 403, missing XSRF security token — with \
+             X-Atlassian-Token: no-check, and {detail}"
+        ),
+    )
+}
+
+/// What the move form's answer says, short of reading the page back.
+fn judge_web_move(answer: &confed_api::WebAnswer, flavor: Flavor) -> ApiResult<()> {
+    if answer.is_login_page() {
+        return Err(ApiError::Auth(format!(
+            "pages/movepage.action sent this credential to the login page: the server does not \
+             accept it for web actions ({})",
+            answer.final_url
+        )));
+    }
+    match answer.status {
+        200..=399 => Ok(()),
+        404 | 405 => Err(ApiError::unsupported(
+            flavor,
+            "move a page (neither rest/api/content/{id}/move nor pages/movepage.action answers)",
+        )),
+        403 => Err(ApiError::Auth(
+            "pages/movepage.action: HTTP 403: you may not move this page there".into(),
+        )),
+        status => Err(ApiError::Server { status, body: "pages/movepage.action".into() }),
     }
 }
 
@@ -525,17 +621,14 @@ impl ConfluenceClient for DcClient {
                     .map_err(as_conflict)?;
                 Ok(())
             }
-            // Sibling ordering only exists on the dedicated move endpoint.
+            // Sibling ordering needs a move endpoint: the REST one where there is
+            // one, else — Data Center — the web UI's, as for a move between spaces.
             Position::Before(sibling) | Position::After(sibling) => {
-                let position = if matches!(pos, Position::Before(_)) { "before" } else { "after" };
-                let _: serde_json::Value = self
-                    .http
-                    .put_json(
-                        &format!("rest/api/content/{id}/move/{position}/{sibling}"),
-                        &json!({}),
-                    )
-                    .await?;
-                Ok(())
+                let position = match pos {
+                    Position::Before(_) => MovePosition::Before,
+                    _ => MovePosition::After,
+                };
+                self.move_page_to(id, position, &PageId::new(sibling.to_string())).await
             }
         }
     }

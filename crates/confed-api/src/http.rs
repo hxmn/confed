@@ -139,6 +139,35 @@ impl Pacer {
     }
 }
 
+/// A web page's answer, unjudged.
+#[derive(Clone, Debug)]
+pub struct WebAnswer {
+    pub status: u16,
+    /// Where redirects ended.
+    pub final_url: String,
+    /// `name=value` of every cookie the answer set.
+    pub cookies: Vec<String>,
+    pub body: String,
+}
+
+impl WebAnswer {
+    /// Confluence's answer to a form without a valid XSRF token: a 403 page
+    /// titled "Session Expired", about a missing security token.
+    pub fn is_xsrf_refusal(&self) -> bool {
+        let body = self.body.to_ascii_lowercase();
+        self.status == 403
+            && (body.contains("xsrf")
+                || body.contains("security token")
+                || body.contains("atl_token")
+                || body.contains("session expired"))
+    }
+
+    /// Sent to the login page: the credential is not accepted here.
+    pub fn is_login_page(&self) -> bool {
+        self.final_url.contains("login.action")
+    }
+}
+
 #[derive(Clone)]
 pub struct Http {
     client: reqwest::Client,
@@ -320,23 +349,24 @@ impl Http {
         Ok(resp.text().await?)
     }
 
-    /// [`Self::get_text`], also giving the URL the answer came from after
-    /// redirects — how a web page that sent us to the login page is told
-    /// from one that answered.
-    pub async fn get_text_at(
+    /// GET a web page (not the REST API) and keep whatever it answered:
+    /// status, where redirects ended, the cookies set, and the body. Web pages
+    /// answer errors as pages, so the caller is the one to judge them.
+    pub async fn get_web(
         &self,
         path: &str,
         query: &[(&str, String)],
-    ) -> ApiResult<(String, String)> {
+        cookie: Option<&str>,
+    ) -> ApiResult<WebAnswer> {
         let url = self.url(path)?;
-        let ctx = format!("GET {path}");
-        let resp = self
-            .send_with_retry(&ctx, true, || {
-                self.request(reqwest::Method::GET, url.clone()).query(query)
-            })
-            .await?;
-        let final_url = resp.url().to_string();
-        Ok((final_url, resp.text().await?))
+        self.send_web(|| {
+            let rb = self.request(reqwest::Method::GET, url.clone()).query(query);
+            match cookie {
+                Some(cookie) => rb.header(reqwest::header::COOKIE, cookie),
+                None => rb,
+            }
+        })
+        .await
     }
 
     pub async fn post_json<B: Serialize, T: DeserializeOwned>(
@@ -388,24 +418,49 @@ impl Http {
 
     /// POST a form the way a browser submits one, for the few things Data
     /// Center only does through its web UI. `X-Atlassian-Token: no-check` is
-    /// the documented way for a script to pass its XSRF check. Redirects are
-    /// followed; the answer is the final URL and the body.
+    /// the documented way for a script to pass Confluence's XSRF check; some
+    /// servers do not honour it, and then the form needs the session's
+    /// `atl_token` and the session's cookie, which `cookie` carries. Sent
+    /// once, never retried: a form post is not idempotent.
     pub async fn post_form(
         &self,
         path: &str,
         form: &[(&str, String)],
-    ) -> ApiResult<(String, String)> {
+        cookie: Option<&str>,
+    ) -> ApiResult<WebAnswer> {
         let url = self.url(path)?;
-        let ctx = format!("POST {path}");
-        let resp = self
-            .send_with_retry(&ctx, false, || {
-                self.request(reqwest::Method::POST, url.clone())
-                    .header("X-Atlassian-Token", "no-check")
-                    .form(form)
-            })
-            .await?;
+        self.send_web(|| {
+            let rb = self
+                .request(reqwest::Method::POST, url.clone())
+                .header("X-Atlassian-Token", "no-check")
+                .form(form);
+            match cookie {
+                Some(cookie) => rb.header(reqwest::header::COOKIE, cookie),
+                None => rb,
+            }
+        })
+        .await
+    }
+
+    async fn send_web<F>(&self, build: F) -> ApiResult<WebAnswer>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        let _permit = self.sem.acquire().await.expect("semaphore closed");
+        let resp = build().send().await?;
+        let status = resp.status().as_u16();
         let final_url = resp.url().to_string();
-        Ok((final_url, resp.text().await?))
+        let cookies = resp
+            .headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter_map(|v| v.split(';').next())
+            .map(|v| v.trim().to_string())
+            .filter(|v| v.contains('='))
+            .collect();
+        debug!(target: "confed::http", status, final_url = %final_url, "web page");
+        Ok(WebAnswer { status, final_url, cookies, body: resp.text().await? })
     }
 
     pub async fn delete(&self, path: &str) -> ApiResult<()> {

@@ -48,6 +48,34 @@ struct World {
     no_rest_move: bool,
     /// …and without the web UI's move action either.
     no_web_move: bool,
+    /// How the web forms' XSRF check treats a script.
+    xsrf: Xsrf,
+    /// Every request, reads included.
+    requests: usize,
+    /// Requests to a move route, probes included.
+    move_requests: usize,
+}
+
+/// Confluence's check against forged form submissions.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum Xsrf {
+    /// `X-Atlassian-Token: no-check` passes it.
+    #[default]
+    NoCheckPasses,
+    /// Only a session's `atl_token`, with that session's cookie, passes it.
+    TokenOnly,
+    /// Nothing a script sends passes it.
+    RefusesAll,
+}
+
+const SESSION: &str = "JSESSIONID=9000000abc";
+const ATL_TOKEN: &str = "9000000def";
+
+fn xsrf_page() -> ResponseTemplate {
+    ResponseTemplate::new(403).set_body_string(
+        "<html><head><title>Session Expired - Confluence</title></head><body>\
+         XSRF Security Token Missing: a required security token was not present</body></html>",
+    )
 }
 
 #[derive(Clone)]
@@ -201,8 +229,15 @@ impl Respond for Confluence {
         let query: BTreeMap<String, String> = req.url.query_pairs().into_owned().collect();
         let method = req.method.as_str().to_string();
         let mut world = self.world();
-        // The move probe names a target that cannot exist: it cannot write.
-        if method != "GET" && !path.ends_with("/move/append/0") {
+        world.requests += 1;
+        if path.contains("/move/") || path.ends_with("movepage.action") {
+            world.move_requests += 1;
+        }
+        // A probe names a page or target that cannot exist: it cannot write.
+        let form = if method == "POST" { parse_form(&req.body) } else { BTreeMap::new() };
+        let probe =
+            path.ends_with("/move/append/0") || form.get("pageId").is_some_and(|p| p == "0");
+        if method != "GET" && !probe {
             world.writes.push(format!("{method} {path}"));
         }
         let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
@@ -252,23 +287,41 @@ impl Respond for Confluence {
             ("PUT", ["rest", "api", "content", _, "move", _, _]) if world.no_rest_move => {
                 error(404, &format!("null for uri: {path}"))
             }
-            ("GET", ["pages", "movepage.action"]) if !world.no_web_move => {
-                ResponseTemplate::new(200).set_body_string("<html>Move page</html>")
-            }
+            ("GET", ["pages", "viewpage.action"]) => ResponseTemplate::new(200)
+                .insert_header("Set-Cookie", format!("{SESSION}; Path=/; HttpOnly").as_str())
+                .set_body_string(format!(
+                    r#"<html><head><meta name="ajs-atl-token" content="{ATL_TOKEN}"></head></html>"#
+                )),
             ("POST", ["pages", "movepage.action"]) if !world.no_web_move => {
-                let form = parse_form(&req.body);
-                let (id, space, title) = (&form["pageId"], &form["spaceKey"], &form["targetTitle"]);
-                let Some(target) = world
-                    .pages
-                    .iter()
-                    .find(|(_, p)| &p.space == space && &p.title == title)
-                    .map(|(id, _)| id.clone())
-                else {
-                    return ResponseTemplate::new(200).set_body_string("<html>No such page</html>");
+                let no_check = req
+                    .headers
+                    .get("x-atlassian-token")
+                    .is_some_and(|v| v.to_str().unwrap_or_default() == "no-check");
+                let token = form.get("atl_token").is_some_and(|t| t == ATL_TOKEN)
+                    && req
+                        .headers
+                        .get("cookie")
+                        .is_some_and(|c| c.to_str().unwrap_or_default().contains(SESSION));
+                let passes = match world.xsrf {
+                    Xsrf::NoCheckPasses => no_check || token,
+                    Xsrf::TokenOnly => token,
+                    Xsrf::RefusesAll => false,
                 };
+                if !passes {
+                    return xsrf_page();
+                }
+                if form["pageId"] == "0" {
+                    return ResponseTemplate::new(200).set_body_string("<html>Page not found</html>");
+                }
+                let id = &form["pageId"];
+                let target = &form["targetId"];
+                if !world.pages.contains_key(id) || !world.pages.contains_key(target) {
+                    return ResponseTemplate::new(200).set_body_string("<html>No such page</html>");
+                }
+                let space = world.pages[target].space.clone();
                 let parent = match form["position"].as_str() {
                     "append" => Some(target.clone()),
-                    _ => world.pages[&target].parent.clone(),
+                    _ => world.pages[target].parent.clone(),
                 };
                 for moved in world.subtree(id) {
                     world.pages.get_mut(&moved).unwrap().space = space.clone();
@@ -322,6 +375,10 @@ impl Respond for Confluence {
                 let id = id.to_string();
                 ok(world.content(&id, true))
             }
+            ("GET" | "POST", ["pages", _]) => ResponseTemplate::new(404).set_body_string(format!(
+                "<html>There is no Action mapped for namespace [/pages] and action name [{}]</html>",
+                segments[1].trim_end_matches(".action")
+            )),
             _ => error(404, &format!("null for uri: {path}")),
         }
     }
@@ -792,7 +849,10 @@ async fn single_space_commands_point_at_instance_mv_for_another_space() {
     assert_eq!(code(&out), 7, "{}", stderr(&out));
     let env = envelope(&out, "push");
     let message = env["errors"][0]["message"].as_str().unwrap();
-    assert!(message.contains("space ENG") && message.contains("confed instance mv"), "{message}");
+    assert!(
+        message.contains(r#"confed instance mv "DOCS:Team Handbook/Policies.md" 2001"#),
+        "the hint is a command that works as it is: {message}"
+    );
     assert!(confluence.world().writes.is_empty(), "{:?}", confluence.world().writes);
 }
 
@@ -937,8 +997,8 @@ async fn a_dry_run_on_a_server_that_cannot_move_is_exit_9() {
     assert!(message.contains("cannot move pages between spaces"), "{message}");
     assert!(confluence.world().writes.is_empty(), "{:?}", confluence.world().writes);
 
-    // whoami says the same, without moving anything.
-    let out = run(&root.path().join("DOCS"), &["whoami", "--json"]);
+    // whoami says the same when asked, without moving anything.
+    let out = run(&root.path().join("DOCS"), &["whoami", "--probe-move", "--json"]);
     let env = envelope(&out, "whoami");
     assert_eq!(env["result"]["capabilities"]["move_between_spaces"], "unavailable");
 }
@@ -967,4 +1027,138 @@ async fn a_personal_space_is_cloned_under_its_owners_name_and_tables_line_up() {
         assert_eq!(&line[name_at - 1..name_at], " ", "misaligned row:\n{table}");
     }
     assert!(table.contains("@alice"), "{table}");
+}
+
+#[tokio::test]
+async fn a_web_action_that_wants_a_session_token_gets_one() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    {
+        let mut world = confluence.world();
+        world.no_rest_move = true;
+        world.xsrf = Xsrf::TokenOnly;
+    }
+    let src = "DOCS:Team Handbook/Onboarding.md";
+    let out = run(root.path(), &["instance", "mv", src, "ENG:", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let out = run(root.path(), &["instance", "mv", src, "ENG:", "-y", "-m", "move", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(confluence.world().pages["1002"].space, "ENG");
+}
+
+#[tokio::test]
+async fn a_server_whose_web_action_refuses_scripts_still_shows_the_whole_plan() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    {
+        let mut world = confluence.world();
+        world.no_rest_move = true;
+        world.xsrf = Xsrf::RefusesAll;
+    }
+    let src = "DOCS:Team Handbook/Onboarding.md";
+    let out = run(root.path(), &["instance", "mv", src, "ENG:", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 9, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let result = &env["result"];
+    assert_eq!(result["pages"].as_array().unwrap().len(), 2, "the plan is there: {env}");
+    assert!(!result["links"].as_array().unwrap().is_empty());
+    assert!(result["blocked"].as_str().unwrap().contains("XSRF"), "{env}");
+    let error = &env["errors"][0];
+    assert_eq!(error["code"], "UNSUPPORTED");
+    assert!(error["hint"].as_str().unwrap().contains("confed instance pull"));
+
+    // Without --dry-run and without -y: still the server's answer, and the plan.
+    let out = run(root.path(), &["instance", "mv", src, "ENG:", "--json"]);
+    assert_eq!(code(&out), 9, "{}", stderr(&out));
+
+    // Other problems are not hidden behind it: they come first, with it.
+    let out = run(root.path(), &["instance", "mv", "1001", "ENG:", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 7, "{}", stderr(&out));
+    let message = envelope(&out, "instance")["errors"][0]["message"].as_str().unwrap().to_string();
+    assert!(message.contains("home page") && message.contains("XSRF"), "{message}");
+    assert!(confluence.world().writes.is_empty(), "{:?}", confluence.world().writes);
+
+    let out = run(&root.path().join("DOCS"), &["doctor", "--probe-move", "--json"]);
+    let env = envelope(&out, "doctor");
+    let check = env["result"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "move between spaces")
+        .unwrap()
+        .clone();
+    assert!(check["detail"].as_str().unwrap().contains("403"), "{check}");
+}
+
+#[tokio::test]
+async fn nothing_probes_a_page_unless_asked_and_offline_asks_the_server_nothing() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let docs = root.path().join("DOCS");
+
+    let before = confluence.world().requests;
+    let moves_before = confluence.world().move_requests;
+    for args in [&["whoami", "--json"][..], &["doctor", "--json"][..]] {
+        let out = run(&docs, args);
+        assert!(code(&out) == 0 || code(&out) == 1, "{}", stderr(&out));
+    }
+    let out = run(root.path(), &["instance", "doctor", "--json"]);
+    let env = envelope(&out, "instance");
+    let checks = env["result"]["instance"]["checks"].as_array().unwrap();
+    assert!(!checks.iter().any(|c| c["name"] == "move between spaces"));
+    assert!(confluence.world().requests > before);
+    assert_eq!(confluence.world().move_requests, moves_before, "no move request, not even a probe");
+    let out = run(&docs, &["whoami", "--json"]);
+    assert!(envelope(&out, "whoami")["result"]["capabilities"]
+        .get("move_between_spaces")
+        .is_none());
+
+    let before = confluence.world().requests;
+    let out = run(root.path(), &["instance", "doctor", "--offline", "--json"]);
+    assert!(code(&out) == 0 || code(&out) == 1, "{}", stderr(&out));
+    assert_eq!(confluence.world().requests, before, "--offline sends nothing, in any space");
+}
+
+#[tokio::test]
+async fn reordering_happens_on_the_server_or_not_at_all() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let docs = root.path().join("DOCS");
+    let args = ["mv", "Team Handbook/Policies.md", "--before", "Team Handbook/Onboarding.md"];
+
+    let out = run(&docs, &args);
+    assert_eq!(code(&out), 2, "without --push there is nothing that could carry it");
+
+    let mut with_push = args.to_vec();
+    with_push.extend(["--push", "--json"]);
+    let out = run(&docs, &with_push);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(envelope(&out, "mv")["result"]["reordered"], true);
+    assert!(confluence
+        .world()
+        .writes
+        .iter()
+        .any(|w| w == "PUT /rest/api/content/1004/move/before/1002"));
+
+    // Data Center without the REST route: the web action, as for a move.
+    confluence.world().no_rest_move = true;
+    let out = run(&docs, &with_push);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(confluence.world().writes.iter().any(|w| w == "POST /pages/movepage.action"));
+}
+
+#[tokio::test]
+async fn a_space_cloned_into_a_root_without_a_shared_credential_gets_its_own() {
+    let (server, _) = server().await;
+    let root = tempfile::tempdir().unwrap();
+    clone_alone(root.path(), &server, "DOCS");
+    let out = run(root.path(), &["instance", "adopt", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(!root.path().join(".confed-instance-session.db").exists());
+
+    let out = run(root.path(), &["instance", "clone", "OPS", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(root.path().join("OPS/.session.db").exists());
+    let out = run(&root.path().join("OPS"), &["fetch", "--json"]);
+    assert_eq!(code(&out), 0, "the new space works on its own: {}", stderr(&out));
 }

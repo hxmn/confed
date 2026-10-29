@@ -147,6 +147,10 @@ pub struct MovePlan {
     /// The source's rules page, when it is in the subtree.
     #[serde(default)]
     pub rules_page: Option<String>,
+    /// Why this server cannot make the move, when it cannot: everything else
+    /// checked out, and the plan is there to read, but it will not run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
 
@@ -267,33 +271,6 @@ pub async fn plan(
             req.root_id, req.source.dir, req.source.dir
         ))
     })?;
-
-    // Before anything else: can this server move a page between spaces at
-    // all? A plan for a move that cannot happen is no plan.
-    match client.probe_move(&PageId::new(&req.root_id)).await {
-        Ok(confed_api::Probe::Available) => {}
-        Ok(confed_api::Probe::WebAction) => warnings.push(
-            "this Data Center has no REST move endpoint, so confed will move the pages through \
-             the web UI's move action (pages/movepage.action), which is not a documented API; \
-             it reads the pages back afterwards and stops (exit 9) if they are not where they \
-             should be"
-                .to_string(),
-        ),
-        Ok(confed_api::Probe::Unavailable) => {
-            return Err(ConfedError::Unsupported(format!(
-                "this server cannot move pages between spaces for you: rest/api/content/{}/move \
-                 does not answer, and on Data Center the web UI's move action is missing or \
-                 does not accept this credential; confed will not copy and delete instead, \
-                 which would lose ids and history",
-                req.root_id
-            )))
-        }
-        Ok(confed_api::Probe::Unknown) | Err(_) => warnings.push(
-            "could not tell whether this server can move pages between spaces; if it cannot, \
-             the move stops with exit 9 before anything else changes"
-                .to_string(),
-        ),
-    }
 
     // Home pages stay where they are: a space without one is broken.
     let source_space = client.get_space(&req.source.key).await?;
@@ -544,6 +521,7 @@ pub async fn plan(
         relativize: req.relativize,
         message: req.message.clone(),
         rules_page,
+        blocked: None,
         warnings,
         renamed: Vec::new(),
         moved: Vec::new(),
@@ -596,10 +574,52 @@ pub async fn plan(
         }
     }
 
+    // Last, so that a server that cannot move does not hide everything else
+    // that is wrong with the move: can this server move a page between spaces
+    // at all? Asked about the subtree's root, without moving it.
+    let blocked = match client.probe_move(&PageId::new(&req.root_id)).await {
+        Ok(confed_api::Probe::Available) => None,
+        Ok(confed_api::Probe::WebAction) => {
+            plan.warnings.push(
+                "this Data Center has no REST move endpoint, so confed will move the pages \
+                 through the web UI's move action (pages/movepage.action), which is not a \
+                 documented API; it reads the pages back afterwards and stops (exit 9) if they \
+                 are not where they should be"
+                    .to_string(),
+            );
+            None
+        }
+        Ok(confed_api::Probe::WebActionRefused) => Some(
+            "this Data Center has no REST move endpoint, and its web UI's move action \
+             (pages/movepage.action) refuses scripted requests: its XSRF check answered 403 \
+             (\"Session Expired\", missing security token) to X-Atlassian-Token: no-check and \
+             to a session token. Pages can be moved in the browser only; confed will not copy \
+             and delete instead, which would lose ids and history"
+                .to_string(),
+        ),
+        Ok(confed_api::Probe::Unavailable) => Some(format!(
+            "this server cannot move pages between spaces: rest/api/content/{}/move does not \
+             answer, and on Data Center the web UI's move action is missing or does not accept \
+             this credential; confed will not copy and delete instead, which would lose ids \
+             and history",
+            req.root_id
+        )),
+        Ok(confed_api::Probe::Unknown) | Err(_) => {
+            plan.warnings.push(
+                "could not tell whether this server can move pages between spaces; if it \
+                 cannot, the move stops with exit 9 before anything else changes"
+                    .to_string(),
+            );
+            None
+        }
+    };
+
     if !refusal.problems.is_empty() {
+        refusal.problems.extend(blocked);
         return Err(refusal
             .into_error(&format!("cannot move {} to space {}", root.local_path, req.dest.key)));
     }
+    plan.blocked = blocked;
     Ok(plan)
 }
 
@@ -683,6 +703,9 @@ pub async fn execute(
     done: Step,
     concurrency: usize,
 ) -> Result<()> {
+    if let Some(reason) = &plan.blocked {
+        return Err(ConfedError::Unsupported(reason.clone()));
+    }
     let steps = [
         Step::ServerMoved,
         Step::LocalDstWritten,

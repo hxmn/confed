@@ -66,6 +66,11 @@ impl ApiError {
                 ApiError::NotFound(format!("{context}: {}", truncate(&body)))
             }
             409 => ApiError::Conflict(format!("{context}: {}", truncate(&body))),
+            // A gateway that still cannot reach Confluence after the retries:
+            // the network, from where confed stands, not a server answer.
+            502..=504 => ApiError::Network(format!(
+                "{context}: HTTP {status} from a gateway in front of Confluence"
+            )),
             429 => ApiError::RateLimited(format!("{context}: {}", truncate(&body))),
             _ => ApiError::Server { status, body: format!("{context}: {}", truncate(&body)) },
         }

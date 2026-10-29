@@ -713,14 +713,16 @@ fn truncate(text: &str, width: usize) -> String {
 }
 
 /// The directory a space is cloned into: its key, or for a personal space
-/// `@` and its owner's username.
+/// `@` and its owner's name.
 ///
-/// A personal space's key is `~` and an id of its owner — the username on
+/// A personal space's key is `~` and an id of its owner: the username on
 /// older Data Center spaces, the user key on newer ones (a long hex string),
-/// the account id on Cloud — so the owner is looked up, and the folder is
-/// named for who it is. When the owner cannot be found, or their username
-/// would not make a safe directory name, or another space already has that
-/// directory, it is `@` and the id.
+/// the account id on Cloud. In that order of preference the folder is named
+/// for the owner's username, as the server reports it; for an id that is a
+/// username already; or for the space's name, which is the owner's display
+/// name (`@Alice-Ng`) — what is left when the owner cannot be looked up, as
+/// for a deactivated account. Only when none of them makes a safe directory
+/// name, or another space has it, is the folder `@` and the id.
 async fn folder_for(
     client: &dyn confed_api::ConfluenceClient,
     instance: &Instance,
@@ -734,19 +736,43 @@ async fn folder_for(
         Flavor::DataCenter => confed_api::UserReference::UserKey(id.to_string()),
         Flavor::Cloud => confed_api::UserReference::AccountId(id.to_string()),
     };
-    let Ok(user) = client.lookup_user(&reference).await else { return fallback };
-    let Some(name) = user.username.filter(|n| safe_dir_name(n)) else { return fallback };
-    let dir = format!("@{name}");
-    let taken = instance
-        .members()
-        .unwrap_or_default()
-        .iter()
-        .any(|m| m.dir.eq_ignore_ascii_case(&dir) && m.space_key != space.id.key);
-    if taken {
-        fallback
-    } else {
-        dir
+    let username = client.lookup_user(&reference).await.ok().and_then(|u| u.username);
+    let candidates = [
+        username.filter(|n| safe_dir_name(n)),
+        Some(id.to_string()).filter(|id| safe_dir_name(id) && !looks_like_an_id(id)),
+        name_as_dir(&space.name),
+    ];
+    let members = instance.members().unwrap_or_default();
+    for name in candidates.into_iter().flatten() {
+        let dir = format!("@{name}");
+        let taken =
+            members.iter().any(|m| m.dir.eq_ignore_ascii_case(&dir) && m.space_key != space.id.key);
+        if !taken {
+            return dir;
+        }
     }
+    fallback
+}
+
+/// A user key or account id rather than a name: long, and hex, or with the
+/// `:` of a Cloud account id.
+fn looks_like_an_id(id: &str) -> bool {
+    id.contains(':') || (id.len() >= 20 && id.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// A display name as a directory name: letters and digits of any script
+/// kept, spaces made `-`, anything else dropped. `Alice Ng` → `Alice-Ng`.
+fn name_as_dir(name: &str) -> Option<String> {
+    let mut out = String::new();
+    for c in name.trim().chars() {
+        if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') {
+            out.push(c);
+        } else if c.is_whitespace() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let out = out.trim_matches(|c| c == '-' || c == '.').to_string();
+    safe_dir_name(&out).then_some(out)
 }
 
 /// A username that can be a directory name as it is, on every platform.
@@ -861,6 +887,7 @@ pub async fn clone(
     // Bind the new workspaces and register them, one after another: quick,
     // and the register is one database.
     let mut work: Vec<(Space, String, Workspace)> = Vec::new();
+    let mut own_credentials = false;
     let mut entries: Vec<Value> = Vec::new();
     let mut errors: Vec<ErrorEntry> = Vec::new();
     let mut codes: Vec<ExitCode> = Vec::new();
@@ -893,8 +920,11 @@ pub async fn clone(
                     "status": format!("would_{}", if reinit { "reinit" } else { "clone" }),
                 }));
             }
-            Plan::Clone { .. } => match bind(&root.join(&rel), &connection, &space) {
-                Ok(ws) => {
+            Plan::Clone { .. } => match bind(&root.join(&rel), &connection, &space)
+                .and_then(|ws| give_credential(&root, &ws, &connection).map(|own| (ws, own)))
+            {
+                Ok((ws, own)) => {
+                    own_credentials |= own;
                     instance.add_member(&key, space.id.numeric.as_deref(), &rel)?;
                     if !args.no_agent_docs {
                         agent_docs::write(
@@ -988,6 +1018,16 @@ pub async fn clone(
         let _ = writeln!(human, "No spaces matched.");
     }
 
+    if own_credentials {
+        let _ = writeln!(
+            human,
+            "\n{}",
+            style.dim(
+                "The root keeps no shared credential, so each new workspace got its own copy \
+                 of the one used here; `confed instance adopt --move-credentials` shares one."
+            )
+        );
+    }
     if !args.dry_run && !args.no_agent_docs {
         let members = instance.members()?;
         agent_docs::write_instance(&root, &connection.base_url, connection.flavor, &members)?;
@@ -1013,8 +1053,29 @@ fn failed_entry(key: &str, dir: &str, e: &ConfedError) -> Value {
     })
 }
 
-/// A new workspace for `space`, bound and ignored, with no credential of its
-/// own: it uses the root's.
+/// Give a new workspace the credential it was cloned with, when the root
+/// keeps none to share — otherwise it could not be used on its own. Stored
+/// the way its source stores it. Returns whether it wrote one.
+fn give_credential(root: &Path, ws: &Workspace, connection: &Connection) -> Result<bool> {
+    if SessionStore::instance_exists(root) {
+        return Ok(false);
+    }
+    let session = Session {
+        base_url: connection.base_url.clone(),
+        flavor: connection.flavor,
+        auth_method: connection.auth_method,
+        username: connection.username.clone(),
+        secret_backend: SecretBackend::Keyring,
+        created_at: now(),
+        last_verified_at: Some(now()),
+    };
+    let backend = connection.session.as_ref().map(|s| s.secret_backend);
+    SessionStore::open(ws.root())?.save(&session, &connection.secret, backend)?;
+    Ok(true)
+}
+
+/// A new workspace for `space`, bound and ignored. Its credential is the
+/// root's, or — when the root keeps none — see [`give_credential`].
 fn bind(dir: &Path, connection: &Connection, space: &Space) -> Result<Workspace> {
     let ws = match Workspace::open(dir) {
         Ok(ws) if dir.join(STATE_DB_FILENAME).exists() => ws,
@@ -1176,6 +1237,17 @@ mod tests {
         for bad in ["", ".", "..", ".hidden", "a/b", "a\\b", "ali ce", "a:b"] {
             assert!(!safe_dir_name(bad), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_display_name_becomes_a_directory_name_and_an_id_is_not_a_name() {
+        assert_eq!(name_as_dir("Alice Ng").as_deref(), Some("Alice-Ng"));
+        assert_eq!(name_as_dir("  Иван  Петров ").as_deref(), Some("Иван-Петров"));
+        assert_eq!(name_as_dir("Dana (Deactivated)").as_deref(), Some("Dana-Deactivated"));
+        assert_eq!(name_as_dir("???"), None);
+        assert!(looks_like_an_id("ff8081817a1b2c3d4e5f6071"));
+        assert!(looks_like_an_id("900000:0a1b2c3d-aaaa"));
+        assert!(!looks_like_an_id("alice"));
     }
 
     #[test]

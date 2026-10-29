@@ -156,7 +156,7 @@ pub enum Command {
     User(UserCommand),
 
     /// Show the authenticated user and instance capabilities.
-    Whoami,
+    Whoami(WhoamiArgs),
 
     /// Inspect and change stored settings.
     Config(ConfigArgs),
@@ -208,7 +208,7 @@ impl Command {
             Command::Search(_) => "search",
             Command::Spaces(_) => "spaces",
             Command::User(_) => "user",
-            Command::Whoami => "whoami",
+            Command::Whoami(_) => "whoami",
             Command::Config(_) => "config",
             Command::Doctor(_) => "doctor",
             Command::Export(_) => "export",
@@ -685,11 +685,30 @@ pub struct ConfigArgs {
     pub force_keychain: bool,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct DoctorArgs {
     /// Apply the safe fixes (.gitignore, agent docs).
     #[arg(long)]
     pub fix: bool,
+
+    /// Skip the checks that ask the server.
+    #[arg(long)]
+    pub offline: bool,
+
+    /// Also ask whether the server can move pages between spaces. This sends
+    /// a move request for one of this workspace's pages, under a target that
+    /// cannot exist: nothing moves, but it is a write request against a real
+    /// page, so it is only sent when asked for.
+    #[arg(long, conflicts_with = "offline")]
+    pub probe_move: bool,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct WhoamiArgs {
+    /// Also ask whether the server can move pages between spaces (see
+    /// `confed doctor --probe-move`).
+    #[arg(long)]
+    pub probe_move: bool,
 }
 
 #[derive(Args, Debug)]
@@ -927,6 +946,10 @@ pub struct InstanceStatusArgs {
     #[arg(long)]
     pub fetch: bool,
 
+    /// One line per page, machine-friendly, in each space.
+    #[arg(long)]
+    pub short: bool,
+
     /// Exit 10 when anything differs in any space.
     #[arg(long)]
     pub exit_code: bool,
@@ -991,9 +1014,14 @@ pub struct InstanceDoctorArgs {
     #[arg(long)]
     pub fix: bool,
 
-    /// Skip the checks that ask the server where each page is.
+    /// Ask the server nothing, in the root or in any space.
     #[arg(long)]
     pub offline: bool,
+
+    /// Also ask whether the server can move pages between spaces, about one
+    /// registered page (see `confed doctor --probe-move`).
+    #[arg(long, conflicts_with = "offline")]
+    pub probe_move: bool,
 }
 
 #[derive(Args, Debug)]

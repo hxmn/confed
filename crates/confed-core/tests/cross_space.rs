@@ -389,13 +389,22 @@ async fn a_server_that_refuses_the_move_leaves_everything_as_it_was() {
     }
     assert!(h.instance.journal_unfinished().unwrap().is_empty());
 
-    // A server that cannot move is exit 9 already at the plan — a dry run
-    // says so — and never a copy and delete.
+    // A server that cannot move: the plan is made, so a dry run can show it,
+    // but it says why it cannot run, and running it is exit 9 — never a copy
+    // and delete.
     h.mock.refuse_moves(None);
     h.mock.without_move_endpoint(true);
-    let err = h.plan(&h.request("1002", "2002")).await.unwrap_err();
+    let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();
+    assert!(plan.blocked.as_deref().unwrap().contains("cannot move pages between spaces"));
+    assert_eq!(plan.pages.len(), 2);
+    let id =
+        h.instance.journal_begin(crossmove::OP, &serde_json::to_value(&plan).unwrap()).unwrap();
+    let client = h.client();
+    let err =
+        crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, Step::Planned, 2)
+            .await
+            .unwrap_err();
     assert_eq!(err.exit_code(), confed_core::ExitCode::Unsupported);
-    assert!(err.to_string().contains("cannot move pages between spaces"), "{err}");
     assert!(!h
         .mock
         .calls()

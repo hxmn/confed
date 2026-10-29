@@ -241,6 +241,9 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
     checks.push(converter_self_test());
 
     // --- server -----------------------------------------------------------
+    if args.offline {
+        return Ok(report(ctx, checks));
+    }
     match ctx.build_client() {
         Err(e) => checks.push(Check::fail("server", e.to_string())),
         Ok(client) => match client.whoami().await {
@@ -259,7 +262,9 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
                         yes_no(caps.comment_resolve)
                     ),
                 ));
-                checks.push(move_check(client.as_ref(), probe_page(ctx).as_ref()).await);
+                if args.probe_move {
+                    checks.push(move_check(client.as_ref(), probe_page(ctx).as_ref()).await);
+                }
             }
             Err(e) => checks.push(Check::fail("server", e.to_string())),
         },
@@ -295,6 +300,13 @@ pub(crate) async fn move_check(
             "no REST move endpoint; `confed instance mv` uses the web UI's move action \
              (pages/movepage.action), which is not a documented API, and checks every move \
              by reading the page back",
+        ),
+        Ok(confed_api::Probe::WebActionRefused) => Check::warn(
+            NAME,
+            "no REST move endpoint, and the web UI's move action (pages/movepage.action) refuses \
+             scripted requests: its XSRF check answered 403 (\"Session Expired\", missing \
+             security token) to X-Atlassian-Token: no-check and to a session token; \
+             `confed instance mv` exits 9 here",
         ),
         Ok(confed_api::Probe::Unavailable) => Check::warn(
             NAME,

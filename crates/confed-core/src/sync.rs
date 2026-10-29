@@ -2599,10 +2599,11 @@ impl SyncEngine {
                         page_id: op.page_id.clone().unwrap_or_default(),
                         path: op.path.clone(),
                         reason: format!(
-                            "parent_id {parent} is a page in space {space}, not {}; a page moves \
-                             to another space only with `confed instance mv {} {space}:<parent>` \
-                             from the instance root",
-                            self.space.key, op.path
+                            "parent_id {parent} is a page in space {space}, not {own}; a page \
+                             moves to another space only with `confed instance mv \"{own}:{path}\" \
+                             {parent}` from the instance root (a page id names the new parent)",
+                            own = self.space.key,
+                            path = op.path
                         ),
                     };
                     plan.skipped.push(blocked.clone());

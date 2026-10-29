@@ -175,7 +175,7 @@ async fn dispatch(
         Command::Search(args) => commands::search::run(&mut ctx, &args).await,
         Command::Spaces(args) => commands::spaces::run(&mut ctx, &args).await,
         Command::User(args) => commands::user::run(&mut ctx, &args).await,
-        Command::Whoami => commands::whoami::run(&mut ctx).await,
+        Command::Whoami(args) => commands::whoami::run(&mut ctx, &args).await,
         Command::Doctor(args) => commands::doctor::run(&mut ctx, &args).await,
         Command::Export(args) => commands::export::run(&mut ctx, &args).await,
         Command::Config(_)

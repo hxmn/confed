@@ -446,6 +446,13 @@ confed mv "Drafts/Plan.md" "Roadmap/2026 Plan.md" --rename-title
 confed mv "Roadmap/2026 Plan.md" --after "Roadmap/2025 Plan.md" --push
 ```
 
+`--before`, `--after` and `--position` change the order on the server, which `push`
+does not carry, so they need `--push` (exit 2 without it). `result.reordered` says
+whether the server was asked. On Data Center, which has no REST route for it, this
+goes through the web UI's move action, as for `confed instance mv`. Data Center does
+not report the order of pages back, so confed can't read the result back: check it in
+the browser.
+
 `confed mv` moves within one space. In an [instance root](#confed-instance), a destination
 inside another space's workspace (`../ENG/Runbooks/Plan.md`, or `ENG:Runbooks/Plan.md`)
 is exit 2. The error prints the `confed instance mv` command that makes the move.
@@ -636,7 +643,14 @@ possible CI probe: exit 3 means the token is wrong or expired.
 confed whoami
 confed whoami --json | jq '{user: .result.user.display_name, flavor: .result.flavor}'
 confed whoami --json | jq -e '.result.capabilities.inline_comment_create'  # 1 on Data Center
+confed whoami --probe-move --json | jq -r '.result.capabilities.move_between_spaces'
 ```
+
+`--probe-move` also asks whether `confed instance mv` can move pages on this server
+(`available`, `web_action`, `web_action_refused`, `unavailable`, `unknown`). It sends a
+move request for one of this workspace's pages, under a target that cannot exist.
+Nothing moves, but it is a write request against a real page, so it is never sent
+unasked.
 
 ## confed config
 
@@ -708,6 +722,8 @@ Checks cover the workspace root, `.state.db` integrity and schema version, `.git
 coverage, the stored credential and its backend, keyring availability, `.session.db`
 permissions, hand-edited frontmatter, unparseable page files, fetch age, the agent
 contract files, a converter round-trip self-test, and a live `whoami` against the server.
+`--offline` skips the server. `--probe-move` adds the "move between spaces" check,
+which sends the same request as `whoami --probe-move`.
 
 The agent-docs check warns both when `CLAUDE.md` / `AGENTS.md` are missing and when
 they were written by a different confed than the one running — the version is stamped
@@ -859,7 +875,9 @@ wiki/
 
 A personal space goes to `@` and its owner's username (`@alice`): a shell expands `~`,
 and on newer Data Center and on Cloud a personal key is `~` and a long id, so confed
-looks the owner up. If the owner can't be found, the folder is `@` and the id. Personal
+looks the owner up. When the owner can't be found, as for a deactivated account, the
+folder is named for the space, which carries the owner's display name (`@Alice-Ng`).
+Only when that can't be a directory name either is it `@` and the id. Personal
 spaces are cloned only when asked for (`--type personal`, or by key).
 
 **Naming pages.** From the root, a page is a path from the current directory
@@ -921,8 +939,10 @@ confed instance clone DOCS ENG
 confed instance clone --all --exclude OPS
 ```
 
-Clones the spaces that are not cloned yet, in parallel, into `<root>/<KEY>`, with no
-credential of their own. A space already cloned is skipped (`--force` initializes it
+Clones the spaces that are not cloned yet, in parallel, into `<root>/<KEY>`. They use
+the root's shared credential. When the root has none, because it was adopted without
+`--move-credentials`, each new workspace gets its own copy of the credential used,
+stored the way its source stores it. A space already cloned is skipped (`--force` initializes it
 again), so a second run does nothing and exits 0. A space that fails is reported and the
 rest still run; any failure exits 8. Clone flags pass through: `--no-agent-docs`,
 `--no-attachments`, `--no-comments`, plus `--type`, `--include-archived` and
@@ -939,16 +959,19 @@ refuses (exit 7) while the workspace has local changes, conflicts or unsent comm
 Run the single-space command in every registered space (or `--space …`) and report the
 results side by side.
 
-- `status [--fetch] [--exit-code]`
+- `status [--fetch] [--short] [--exit-code]`
 - `fetch [--since …]`
 - `pull [--no-fetch] [--no-merge] [--dry-run] [--no-attachments] [--no-comments]`
 - `push -m "why" [--dry-run] [--allow-delete] [--no-attachments] [--no-comments]`:
   `-m` is required. Every space's dry run comes first; then it asks (or takes `--yes`)
   and pushes the spaces with work. Without a terminal and without `--yes` it is exit 2.
-- `doctor [--fix] [--offline]` adds checks that span spaces: registrations, the root's
-  `.gitignore` and agent docs, the shared credential, pages tracked by two workspaces,
-  unfinished moves, pages whose space on the server is not their workspace's (skipped
-  with `--offline`), and whether the server can move pages between spaces.
+- `doctor [--fix] [--offline] [--probe-move]` adds checks that span spaces:
+  registrations, the root's `.gitignore` and agent docs, the shared credential, pages
+  tracked by two workspaces, unfinished moves, and pages whose space on the server is
+  not their workspace's. `--offline` asks the server nothing, in the root or in any
+  space. `--probe-move` also asks whether the server can move pages between spaces:
+  that sends a move request for one registered page under a target that cannot exist,
+  so nothing moves, but it is a write request against a real page.
 
 ### confed instance search
 
@@ -1002,12 +1025,19 @@ to it and listed in `links_by_server`. `--no-rewrite-links` changes none.
 How the pages move: through the REST move endpoint where the server has it (Cloud).
 Data Center has no such REST route, so there confed uses the web UI's "Move page"
 action (`pages/movepage.action`). That action keeps ids and history the same way, but
-it is not a documented API, so the dry run warns about it. Every move is read back from
+it is not a documented API, so the dry run warns about it. The form must pass
+Confluence's XSRF check. confed sends `X-Atlassian-Token: no-check`, the documented way
+for scripts, and if the server refuses that ("Session Expired", 403), the `atl_token`
+of a session it opens by viewing the page. If the server refuses both, the move can't
+be made by a script there: exit 9. Every move is read back from
 the server: a page that is not in the destination space is exit 9, and one under the
 wrong parent is put right. The pre-flight, dry run included, asks the server about the
 subtree's root without moving it. A server that can do neither is exit 9 there, before
-anything is written. confed never falls back to copying and deleting, which would lose
-ids and history. A file that was never pushed is
+anything is written. Even then the dry run returns the whole plan (`result.pages`,
+`links`, restrictions), with the reason in `result.blocked`. Any other problem, such as
+a home page, an unpushed edit or a title collision, is reported first, together with
+the server's inability (exit 7). confed never falls back to copying and deleting, which
+would lose ids and history. A file that was never pushed is
 moved as a file, and the next push in the destination creates it.
 
 ### confed instance resume / abort
