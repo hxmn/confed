@@ -253,6 +253,21 @@ impl ConfluenceClient for CloudClient {
         Ok(spaces)
     }
 
+    async fn list_archived_spaces(&self) -> ApiResult<Vec<Space>> {
+        let raw: Vec<v2::Space> = collect_cursor(
+            &self.http,
+            "api/v2/spaces",
+            &[("limit", PAGE_SIZE.to_string()), ("status", "archived".to_string())],
+            None,
+        )
+        .await?;
+        let mut spaces: Vec<Space> = raw.into_iter().map(|s| s.into_domain()).collect();
+        for space in &mut spaces {
+            space.status.get_or_insert_with(|| "archived".to_string());
+        }
+        Ok(spaces)
+    }
+
     async fn list_pages(&self, space: &SpaceId) -> ApiResult<Vec<PageSummary>> {
         let numeric = self.numeric_space_id(space).await?;
         let key = if space.key.is_empty() {
@@ -356,6 +371,27 @@ impl ConfluenceClient for CloudClient {
             .put_json(&format!("rest/api/content/{id}/move/{position}/{target}"), &json!({}))
             .await?;
         Ok(())
+    }
+
+    async fn move_page_to(
+        &self,
+        id: &PageId,
+        position: MovePosition,
+        target: &PageId,
+    ) -> ApiResult<()> {
+        v1::move_page_to(&self.http, self.flavor(), id, position, target).await
+    }
+
+    async fn probe_move(&self) -> ApiResult<Probe> {
+        v1::probe_move(&self.http).await
+    }
+
+    async fn page_restrictions(&self, id: &PageId) -> ApiResult<Vec<String>> {
+        v1::page_restrictions(&self.http, id).await
+    }
+
+    async fn page_operations(&self, id: &PageId) -> ApiResult<Option<Vec<String>>> {
+        v1::page_operations(&self.http, id).await
     }
 
     async fn get_labels(&self, id: &PageId) -> ApiResult<Vec<String>> {

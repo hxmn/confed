@@ -535,6 +535,10 @@ pub struct PushOutcome {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub comments_pending: Vec<String>,
     pub skipped: Vec<BlockedPage>,
+    /// The pages among `skipped` whose `parent_id` names a page in another
+    /// space: a move between spaces, which only `confed instance mv` makes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cross_space: Vec<BlockedPage>,
     pub failed: Vec<FailedPage>,
     pub dry_run: bool,
 }
@@ -2452,10 +2456,12 @@ impl SyncEngine {
 
     /// Upload local changes.
     pub async fn push(&self, ws: &mut Workspace, opts: &PushOptions) -> Result<PushOutcome> {
-        let plan = self.plan_push(ws, opts)?;
+        let mut plan = self.plan_push(ws, opts)?;
+        let cross_space = self.refuse_other_space_parents(ws, &mut plan).await?;
         let mut outcome = PushOutcome {
             dry_run: opts.dry_run,
             skipped: plan.skipped.clone(),
+            cross_space,
             ..Default::default()
         };
 
@@ -2535,6 +2541,78 @@ impl SyncEngine {
 
         self.progress.finish();
         Ok(outcome)
+    }
+
+    /// Take out of the plan every page whose `parent_id` names a page in
+    /// another space, and return them.
+    ///
+    /// The server would either refuse such a parent or move the page — and
+    /// everything under it — out of this space behind confed's back, leaving
+    /// this workspace tracking pages it no longer has and the other one
+    /// unaware of them. Moving between spaces is `confed instance mv`'s job. A
+    /// parent this workspace knows is in this space by definition, so only an
+    /// unknown one costs a request.
+    async fn refuse_other_space_parents(
+        &self,
+        ws: &Workspace,
+        plan: &mut PushPlan,
+    ) -> Result<Vec<BlockedPage>> {
+        let mut refused = Vec::new();
+        let mut kept = Vec::new();
+        for op in std::mem::take(&mut plan.ops) {
+            let wants_parent = match op.kind {
+                PushKind::Update => op.ops.iter().any(|o| o == "parent"),
+                PushKind::Create => true,
+                PushKind::Delete => false,
+            };
+            let parent = if wants_parent {
+                std::fs::read_to_string(ws.absolute(&op.path))
+                    .ok()
+                    .and_then(|text| crate::frontmatter::parse(&text, &op.path).ok())
+                    .and_then(|file| file.frontmatter.parent_id)
+            } else {
+                None
+            };
+            let Some(parent) = parent else {
+                kept.push(op);
+                continue;
+            };
+            let known = ws.state().get_page(&parent)?.is_some()
+                || ws.state().get_remote(&parent)?.is_some_and(|r| !r.deleted);
+            if known {
+                kept.push(op);
+                continue;
+            }
+            let elsewhere =
+                match self.client.get_page(&PageId::new(&parent), BodyFormat::Storage).await {
+                    Ok(page)
+                        if !page.summary.space_key.is_empty()
+                            && page.summary.space_key != self.space.key =>
+                    {
+                        Some(page.summary.space_key)
+                    }
+                    _ => None,
+                };
+            match elsewhere {
+                Some(space) => {
+                    let blocked = BlockedPage {
+                        page_id: op.page_id.clone().unwrap_or_default(),
+                        path: op.path.clone(),
+                        reason: format!(
+                            "parent_id {parent} is a page in space {space}, not {}; a page moves \
+                             to another space only with `confed instance mv {} {space}:<parent>` \
+                             from the instance root",
+                            self.space.key, op.path
+                        ),
+                    };
+                    plan.skipped.push(blocked.clone());
+                    refused.push(blocked);
+                }
+                None => kept.push(op),
+            }
+        }
+        plan.ops = kept;
+        Ok(refused)
     }
 
     /// Apply the attachment half of a plan: upload new and changed files, and

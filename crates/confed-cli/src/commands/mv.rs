@@ -10,6 +10,9 @@ use confed_core::sync::{write_atomic, PushOptions};
 use serde_json::json;
 
 pub async fn run(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
+    if let Some(destination) = &args.destination {
+        refuse_other_space(ctx, &args.source, destination)?;
+    }
     let page_id = ctx.resolve_page(&args.source)?;
     let ws = ctx.workspace()?;
     let record = ws
@@ -134,5 +137,70 @@ pub async fn run(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
             "pushed": pushed,
         }),
         human,
+    ))
+}
+
+/// A destination inside another workspace of the same instance root is a
+/// move between spaces, which only `confed instance mv` makes: say how, with
+/// the paths as that command takes them, and touch nothing (exit 2).
+fn refuse_other_space(ctx: &Context, source: &str, destination: &str) -> Result<()> {
+    let Ok(instance) = ctx.instance() else { return Ok(()) };
+    let ws = ctx.workspace()?;
+    let own = ws.space_key()?;
+    let (member, rest) = match crate::context::split_space_ref(destination) {
+        Some((key, rest)) if !key.eq_ignore_ascii_case(&own) => match instance.member(key)? {
+            Some(member) => (member, rest.to_string()),
+            None => return Ok(()),
+        },
+        Some(_) => return Ok(()),
+        None => {
+            let mut absolute = std::path::PathBuf::new();
+            for part in ctx.cwd.join(destination).components() {
+                match part {
+                    std::path::Component::ParentDir => {
+                        absolute.pop();
+                    }
+                    std::path::Component::CurDir => {}
+                    other => absolute.push(other),
+                }
+            }
+            let Some(member) = instance.member_for_path(&absolute)? else { return Ok(()) };
+            if member.space_key.eq_ignore_ascii_case(&own) {
+                return Ok(());
+            }
+            let dir = instance.member_dir(&member);
+            let dir = dir.canonicalize().unwrap_or(dir);
+            let parent =
+                absolute.parent().map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
+            let absolute = match (parent, absolute.file_name()) {
+                (Some(parent), Some(name)) => parent.join(name),
+                _ => absolute,
+            };
+            let rest = absolute
+                .strip_prefix(&dir)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            (member, rest)
+        }
+    };
+    let from = match ctx.resolve_page(source) {
+        Ok(id) => ws
+            .state()
+            .get_page(&id)?
+            .map(|p| format!("{own}:{}", p.local_path))
+            .unwrap_or_else(|| id.clone()),
+        Err(_) => format!("{own}:{source}"),
+    };
+    let to = format!("{}:{rest}", member.space_key);
+    Err(ConfedError::usage_with_hint(
+        format!(
+            "{destination} is in the workspace of space {}, not {own}: that is a move between \
+             spaces",
+            member.space_key
+        ),
+        format!(
+            "from the instance root ({}), run: confed instance mv \"{from}\" \"{to}\" --dry-run",
+            instance.root().display()
+        ),
     ))
 }

@@ -240,6 +240,80 @@ impl PageStore {
     }
 
     /// How many page versions are cached, for `doctor` and tests.
+    /// Copy everything cached for these pages into `other` — every version
+    /// of the body and the attachment and comment snapshot — keeping what
+    /// `other` already has. A page moved to another space keeps its cache, so
+    /// the destination never downloads what the source already had.
+    pub fn copy_pages_to(&self, other: &PageStore, page_ids: &[String]) -> Result<()> {
+        for page_id in page_ids {
+            let mut stmt = self.conn.prepare(
+                "SELECT version, storage_body, storage_hash, fetched_at FROM page_versions
+                 WHERE page_id = ?1",
+            )?;
+            let versions = stmt
+                .query_map(params![page_id], |r| {
+                    Ok((
+                        r.get::<_, u32>(0)?,
+                        r.get::<_, Vec<u8>>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (version, body, hash, fetched_at) in versions {
+                other.conn.execute(
+                    "INSERT OR IGNORE INTO page_versions
+                       (page_id, version, storage_body, storage_hash, fetched_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![page_id, version, body, hash, fetched_at],
+                )?;
+            }
+            let extras = self
+                .conn
+                .query_row(
+                    "SELECT version, attachments, comments, fetched_at FROM page_extras
+                     WHERE page_id = ?1",
+                    params![page_id],
+                    |r| {
+                        Ok((
+                            r.get::<_, u32>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((version, attachments, comments, fetched_at)) = extras {
+                other.conn.execute(
+                    "INSERT OR IGNORE INTO page_extras
+                       (page_id, version, attachments, comments, fetched_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![page_id, version, attachments, comments, fetched_at],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop everything cached for these pages.
+    pub fn forget_pages(&self, page_ids: &[String]) -> Result<()> {
+        for page_id in page_ids {
+            self.conn.execute("DELETE FROM page_versions WHERE page_id = ?1", params![page_id])?;
+            self.conn.execute("DELETE FROM page_extras WHERE page_id = ?1", params![page_id])?;
+        }
+        Ok(())
+    }
+
+    /// Versions cached for a page, newest first.
+    pub fn versions(&self, page_id: &str) -> Result<Vec<u32>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT version FROM page_versions WHERE page_id = ?1 ORDER BY version DESC",
+        )?;
+        let rows = stmt.query_map(params![page_id], |r| r.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn len(&self) -> Result<usize> {
         let count: i64 =
             self.conn.query_row("SELECT COUNT(*) FROM page_versions", [], |r| r.get(0))?;

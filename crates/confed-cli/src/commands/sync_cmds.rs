@@ -346,7 +346,25 @@ pub mod push {
         if !args.dry_run {
             output = output.warn_all(agent_docs::sync_rules_after(ctx.workspace()?));
         }
-        if !outcome.failed.is_empty() {
+        if !outcome.cross_space.is_empty() {
+            // A move between spaces is not a push: refused, with the way to do it.
+            output = output.with_errors(
+                outcome
+                    .cross_space
+                    .iter()
+                    .map(|blocked| crate::output::ErrorEntry {
+                        code: ExitCode::State.name(),
+                        message: format!("{}: {}", blocked.path, blocked.reason),
+                        hint: Some(
+                            "pages move between spaces only with `confed instance mv`, which \
+                             keeps both workspaces in step; restore the page's parent_id"
+                                .into(),
+                        ),
+                    })
+                    .collect(),
+            );
+            output.exit = ExitCode::State;
+        } else if !outcome.failed.is_empty() {
             output.exit = ExitCode::Partial;
         } else if outcome
             .skipped

@@ -32,11 +32,13 @@ pub async fn run(ctx: &mut Context) -> Result<Output> {
         if caps.inline_comment_create { "create + resolve" } else { "read only" }
     );
 
+    // Asks the move endpoint to move a page that cannot exist; nothing moves.
+    let moves = client.probe_move().await.unwrap_or(confed_api::Probe::Unknown);
+    let _ = writeln!(human, "  move between spaces  {}", moves.as_str());
+
     // Record that these credentials worked, for `doctor`.
-    if let Ok(ws) = ctx.workspace() {
-        if let Ok(store) = ws.session_store() {
-            let _ = store.mark_verified();
-        }
+    if let Ok(Some((store, _))) = ctx.session_store() {
+        let _ = store.mark_verified();
     }
 
     Ok(Output::new(
@@ -55,6 +57,7 @@ pub async fn run(ctx: &mut Context) -> Result<Output> {
                 "comment_resolve": caps.comment_resolve,
                 "adf": caps.adf,
                 "max_request_concurrency": caps.max_request_concurrency,
+                "move_between_spaces": moves.as_str(),
             },
         }),
         human,

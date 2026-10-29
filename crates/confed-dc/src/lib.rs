@@ -337,6 +337,22 @@ impl ConfluenceClient for DcClient {
         Ok(raw.into_iter().map(|s| s.into_domain()).collect())
     }
 
+    async fn list_archived_spaces(&self) -> ApiResult<Vec<Space>> {
+        let raw: Vec<v1::Space> = collect_offset(
+            &self.http,
+            "rest/api/space",
+            &[("expand", "homepage".to_string()), ("status", "archived".to_string())],
+            PAGE_SIZE,
+            None,
+        )
+        .await?;
+        let mut spaces: Vec<Space> = raw.into_iter().map(|s| s.into_domain()).collect();
+        for space in &mut spaces {
+            space.status.get_or_insert_with(|| "archived".to_string());
+        }
+        Ok(spaces)
+    }
+
     async fn list_pages(&self, space: &SpaceId) -> ApiResult<Vec<PageSummary>> {
         let raw: Vec<v1::Content> = collect_offset(
             &self.http,
@@ -457,6 +473,27 @@ impl ConfluenceClient for DcClient {
                 Ok(())
             }
         }
+    }
+
+    async fn move_page_to(
+        &self,
+        id: &PageId,
+        position: MovePosition,
+        target: &PageId,
+    ) -> ApiResult<()> {
+        v1::move_page_to(&self.http, self.flavor(), id, position, target).await
+    }
+
+    async fn probe_move(&self) -> ApiResult<Probe> {
+        v1::probe_move(&self.http).await
+    }
+
+    async fn page_restrictions(&self, id: &PageId) -> ApiResult<Vec<String>> {
+        v1::page_restrictions(&self.http, id).await
+    }
+
+    async fn page_operations(&self, id: &PageId) -> ApiResult<Option<Vec<String>>> {
+        v1::page_operations(&self.http, id).await
     }
 
     async fn get_labels(&self, id: &PageId) -> ApiResult<Vec<String>> {

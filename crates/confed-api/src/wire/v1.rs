@@ -238,6 +238,8 @@ pub struct Space {
     pub kind: Option<String>,
     #[serde(default)]
     pub homepage: Option<Box<Content>>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 impl Space {
@@ -248,6 +250,7 @@ impl Space {
             name: self.name.unwrap_or_else(|| key.clone()),
             kind: self.kind,
             homepage_id: self.homepage.map(|h| PageId::new(h.id.as_string())),
+            status: self.status.map(|s| s.to_ascii_lowercase()),
         }
     }
 }
@@ -635,9 +638,133 @@ async fn recent_activity(
     Ok(ContentActivity::Pages(pages))
 }
 
+/// `PUT rest/api/content/{id}/move/{position}/{target}`: the move endpoint
+/// both flavors serve under REST v1. The target's space becomes the page's,
+/// and the page's descendants go with it.
+///
+/// A 405 is a server without the endpoint, which is exit 9 rather than a
+/// server error; a 404 is left as it is, since it may just as well be a page
+/// that is gone, and the caller is the one who can tell the two apart.
+pub async fn move_page_to(
+    http: &crate::http::Http,
+    flavor: Flavor,
+    id: &PageId,
+    position: MovePosition,
+    target: &PageId,
+) -> ApiResult<()> {
+    let path = format!("rest/api/content/{id}/move/{}/{target}", position.as_str());
+    match http.put_json::<_, serde_json::Value>(&path, &serde_json::json!({})).await {
+        Ok(_) => Ok(()),
+        Err(ApiError::Server { status: 405, .. }) => {
+            Err(ApiError::unsupported(flavor, "move a page through rest/api/content/{id}/move"))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Ask the move endpoint to move page 0, which never exists. A server with
+/// the endpoint answers in its own JSON error format, naming the content it
+/// could not find (or refusing the request); one without it answers 405, or
+/// a 404 that is not its JSON. Nothing can move: there is no page 0.
+pub async fn probe_move(http: &crate::http::Http) -> ApiResult<Probe> {
+    let answer = http
+        .put_json::<_, serde_json::Value>(
+            "rest/api/content/0/move/append/0",
+            &serde_json::json!({}),
+        )
+        .await;
+    Ok(match answer {
+        Ok(_) => Probe::Available,
+        Err(ApiError::Server { status: 405, .. }) => Probe::Unavailable,
+        Err(ApiError::NotFound(body)) | Err(ApiError::Server { status: 400, body }) => {
+            if body.contains("statusCode") && !body.contains("null for uri") {
+                Probe::Available
+            } else {
+                Probe::Unavailable
+            }
+        }
+        Err(ApiError::Network(_)) | Err(ApiError::RateLimited(_)) => Probe::Unknown,
+        Err(_) => Probe::Unknown,
+    })
+}
+
+/// `GET rest/api/content/{id}/restriction/byOperation`: the operations whose
+/// restriction names at least one person or group.
+pub async fn page_restrictions(http: &crate::http::Http, id: &PageId) -> ApiResult<Vec<String>> {
+    let raw: serde_json::Value =
+        http.get_json(&format!("rest/api/content/{id}/restriction/byOperation"), &[]).await?;
+    Ok(restricted_operations(&raw))
+}
+
+/// The operations of a `restriction/byOperation` answer that restrict anyone.
+pub fn restricted_operations(raw: &serde_json::Value) -> Vec<String> {
+    let Some(map) = raw.as_object() else { return Vec::new() };
+    let mut out: Vec<String> = map
+        .iter()
+        .filter(|(_, entry)| {
+            let restrictions = &entry["restrictions"];
+            ["user", "group"].iter().any(|kind| {
+                let who = &restrictions[*kind];
+                who["results"].as_array().is_some_and(|r| !r.is_empty())
+                    || who["size"].as_u64().is_some_and(|n| n > 0)
+            })
+        })
+        .map(|(operation, _)| operation.clone())
+        .collect();
+    out.sort();
+    out
+}
+
+/// `GET rest/api/content/{id}?expand=operations`: what the signed-in user may
+/// do. `None` when the server ignores the expansion.
+pub async fn page_operations(
+    http: &crate::http::Http,
+    id: &PageId,
+) -> ApiResult<Option<Vec<String>>> {
+    let raw: serde_json::Value = http
+        .get_json(&format!("rest/api/content/{id}"), &[("expand", "operations".to_string())])
+        .await?;
+    Ok(operations_of(&raw))
+}
+
+/// The `operation` names of an `operations` expansion, or `None` without one.
+pub fn operations_of(raw: &serde_json::Value) -> Option<Vec<String>> {
+    let list = raw["operations"].as_array()?;
+    let mut out: Vec<String> =
+        list.iter().filter_map(|op| op["operation"].as_str().map(str::to_string)).collect();
+    out.sort();
+    out.dedup();
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restrictions_name_only_the_operations_that_restrict_someone() {
+        let raw = serde_json::json!({
+            "read": { "operation": "read", "restrictions": {
+                "user": { "results": [], "size": 0 }, "group": { "results": [], "size": 0 } } },
+            "update": { "operation": "update", "restrictions": {
+                "user": { "results": [{ "type": "known" }], "size": 1 },
+                "group": { "results": [], "size": 0 } } }
+        });
+        assert_eq!(restricted_operations(&raw), ["update"]);
+        assert!(restricted_operations(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn operations_are_read_from_the_expansion_or_reported_unknown() {
+        let raw = serde_json::json!({ "id": "1", "operations": [
+            { "operation": "read", "targetType": "page" },
+            { "operation": "update", "targetType": "page" },
+            { "operation": "create", "targetType": "page" },
+            { "operation": "create", "targetType": "blogpost" }
+        ] });
+        assert_eq!(operations_of(&raw).unwrap(), ["create", "read", "update"]);
+        assert_eq!(operations_of(&serde_json::json!({ "id": "1" })), None);
+    }
 
     #[test]
     fn the_comment_search_asks_by_age_on_the_servers_clock() {

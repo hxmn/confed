@@ -19,6 +19,8 @@ same list from the binary itself.
   [`doctor`](#confed-doctor), [`export`](#confed-export),
   [`version`](#confed-version), [`completion`](#confed-completion)
 - Interactive: [`tui`](#confed-tui)
+- Several spaces: [`instance`](#confed-instance) — init, adopt, spaces, clone, add,
+  remove, status, fetch, pull, push, doctor, mv, search, resume, abort
 
 ## Global flags
 
@@ -325,6 +327,11 @@ would do: `result.attachments_uploaded` and `result.attachments_deleted` hold
 sidecar-relative paths, and an attachment gone locally without `--allow-delete` joins
 `result.skipped` rather than being dropped quietly.
 
+A `parent_id:` that names a page in another space is a move between spaces, which a push
+does not make. The page is refused: it is in `result.skipped` and `result.cross_space`,
+with an `errors` entry, and the command exits 7. The hint names `confed instance mv`.
+Other pages push as usual.
+
 confed's own partial downloads (`*.confed-part`, left by a `pull` that died
 mid-stream) are never push candidates and never appear in a plan. The next `pull` of
 the page sweeps them out of the sidecar.
@@ -438,6 +445,10 @@ unless `--push` is given.
 confed mv "Drafts/Plan.md" "Roadmap/2026 Plan.md" --rename-title
 confed mv "Roadmap/2026 Plan.md" --after "Roadmap/2025 Plan.md" --push
 ```
+
+`confed mv` moves within one space. In an [instance root](#confed-instance), a destination
+inside another space's workspace (`../ENG/Runbooks/Plan.md`, or `ENG:Runbooks/Plan.md`)
+is exit 2. The error prints the `confed instance mv` command that makes the move.
 
 ## confed rm
 
@@ -826,3 +837,178 @@ Places where the accepted command line is ahead of the behaviour, or where
   that reports the JSON-schema and state-schema versions too.
 - **`errors[]` entries carry `code`, `message` and `hint` only** — the `page_id` and
   `path` fields sketched in design 04 are not emitted.
+
+## confed instance
+
+Alias `confed i`. An **instance root** is a directory holding one workspace per space of
+one Confluence, marked by `.confed-instance.db`. Each workspace in it is an ordinary
+workspace and keeps working on its own. The root adds three things: one shared
+credential, commands that run in every space, and moves between spaces. Run these from
+the root, or from anywhere inside it: confed finds the root by walking up, as it finds a
+workspace. Design: [docs/design/07-instance-roots.md](design/07-instance-roots.md).
+
+```
+wiki/
+├── .confed-instance.db           registered spaces and the move journal
+├── .confed-instance-session.db   the shared credential (mode 0600), if not in the keyring
+├── CLAUDE.md · AGENTS.md         the root's agent contract
+├── DOCS/                         the workspace of space DOCS
+├── ENG/
+└── @alice/                       the personal space ~alice
+```
+
+A personal space (`~alice`) goes to `@alice`, because a shell expands `~`. Personal
+spaces are cloned only when asked for (`--type personal`, or by key).
+
+**Naming pages.** From the root, a page is a path from the current directory
+(`DOCS/Team Handbook.md`), `KEY:path` (`DOCS:Team Handbook.md`), or a page id, looked up
+in every registered space.
+
+**Which spaces.** The global `--space KEY` restricts a command to those spaces. Repeat
+it, or separate keys with commas: `--space DOCS,ENG`. `CONFED_SPACE` does the same.
+
+**JSON.** The envelope's `command` is `instance`, and `result.action` names the
+subcommand ([schema](reference/json/instance.schema.json)). Commands that run in every
+space give one entry per space:
+
+```json
+{ "space_key": "DOCS", "dir": "DOCS", "ok": true, "exit_code": 0, "result": { … } }
+```
+
+`result` is that command's own result in that workspace, unchanged. A space that failed
+has `"ok": false` and `errors`, and its errors are also in the envelope's `errors`,
+prefixed with the key. The exit code is 0 when every space succeeded, the shared code
+when every space failed the same way, and 8 otherwise.
+
+**Concurrency.** `--concurrency` caps requests in flight across all spaces together.
+
+### confed instance init
+
+```bash
+confed instance init ~/wiki --base-url https://wiki.example.test
+```
+
+Creates the root and authenticates once: it asks for the token, checks it with
+`whoami`, and stores it in the keyring (`--credential-store sqlite` for a 0600 file).
+It writes the root's `.gitignore` and agent docs (not with `--no-agent-docs`). Run it
+again on the same root to replace the credential.
+
+### confed instance adopt
+
+```bash
+cd ~/Confluence && confed instance adopt --move-credentials
+```
+
+Makes an existing folder of workspaces a root. It registers every workspace directly
+inside it, or only the `DIR`s given. All of them must be on one base URL and flavor;
+otherwise it is exit 7, naming each workspace with its instance. With
+`--move-credentials` (asked at a terminal), it checks the credential, stores it once in
+the root, and removes each workspace's `.session.db`. `--dry-run` reports what it would
+do. Each workspace's `CLAUDE.md` gains a short "Part of an instance" section.
+
+### confed instance spaces
+
+A table of registered workspaces: key, name, directory, pages, dirty and conflicted
+pages, last fetch. `--remote` adds the server's spaces, marking those not cloned.
+`--type global|personal` and `--status current|archived` filter the server's list.
+
+### confed instance clone
+
+```bash
+confed instance clone DOCS ENG
+confed instance clone --all --exclude OPS
+```
+
+Clones the spaces that are not cloned yet, in parallel, into `<root>/<KEY>`, with no
+credential of their own. A space already cloned is skipped (`--force` initializes it
+again), so a second run does nothing and exits 0. A space that fails is reported and the
+rest still run; any failure exits 8. Clone flags pass through: `--no-agent-docs`,
+`--no-attachments`, `--no-comments`, plus `--type`, `--include-archived` and
+`--dry-run`.
+
+### confed instance add / remove
+
+`add KEY [DIR]` registers an existing workspace (default `DIR`: the key). `remove KEY`
+unregisters a space and leaves its files. With `--delete-files` it deletes them too, but
+refuses (exit 7) while the workspace has local changes, conflicts or unsent comments.
+
+### confed instance status / fetch / pull / push / doctor
+
+Run the single-space command in every registered space (or `--space …`) and report the
+results side by side.
+
+- `status [--fetch] [--exit-code]`
+- `fetch [--since …]`
+- `pull [--no-fetch] [--no-merge] [--dry-run] [--no-attachments] [--no-comments]`
+- `push -m "why" [--dry-run] [--allow-delete] [--no-attachments] [--no-comments]`:
+  `-m` is required. Every space's dry run comes first; then it asks (or takes `--yes`)
+  and pushes the spaces with work. Without a terminal and without `--yes` it is exit 2.
+- `doctor [--fix] [--offline]` adds checks that span spaces: registrations, the root's
+  `.gitignore` and agent docs, the shared credential, pages tracked by two workspaces,
+  unfinished moves, pages whose space on the server is not their workspace's (skipped
+  with `--offline`), and whether the server can move pages between spaces.
+
+### confed instance search
+
+`confed instance search <cql|text> [--limit N]` searches every registered space. Each
+result names its space, its workspace directory and its local path when pulled.
+
+### confed instance mv
+
+```bash
+confed instance mv "DOCS:Team Handbook/Onboarding.md" "ENG:Runbooks.md" --dry-run --json
+confed instance mv "DOCS:Team Handbook/Onboarding.md" "ENG:Runbooks.md" -m "ENG owns it" -y
+confed instance mv 1002 ENG:                 # to the top of ENG, under its home page
+confed instance mv 1002 ENG: --root          # a top-level page beside the home page
+```
+
+Moves a page, and every page under it, to another space. The server moves the pages,
+so page ids, versions, history, comments, inline markers, attachments and labels stay
+as they are. `DEST` is an existing page (the new parent), `KEY:` (the top of that space),
+or a new path, which also renames the page. `--before`, `--after` and `--position` work
+as in `confed mv`.
+
+Everything is checked before anything is written. Both spaces are fetched first, and
+every problem is listed together (exit 7, or 2 for bad arguments):
+
+- every page in the subtree, and the new parent, is in sync: no local edits, conflicts,
+  unpushed comment drafts or attachment changes (`--push-first -m …` pushes them first)
+- no title is already used in the destination. `--on-conflict suffix` appends
+  ` (KEY)`, and `--title-map FILE` takes `{"<page id or title>": "<new title>"}`.
+- the page is not a home page. A subtree holding the source's rules page needs `--yes`.
+- you may update and delete the pages, and add pages where they land (where the server
+  says). Restrictions in the subtree are reported, since they move with the pages.
+- nothing is in the way on disk in the destination
+- the pages, in every registered space, whose links the move would break
+
+`--dry-run` stops there and prints the plan: the subtree before and after, collisions,
+and the pages whose links will change. A real run asks first, or takes `--yes`. Without
+a terminal it is exit 2.
+
+Links: a link by title names a space only when it is another one. So confed rewrites,
+on the server, the links that change meaning: links to the moved pages from the space
+they left, links from the moved pages to pages left behind, and any link naming the
+source space for a moved page. Only `ri:space-key` and `ri:content-title` change, and
+each page is saved once, with the `-m` message. Links the server already fixed are left
+to it and listed in `links_by_server`. `--no-rewrite-links` changes none.
+`--relativize` drops the space key from a link that ends up in its own space.
+
+`--json` result: `moved[]` (`page_id`, `title`, `from`/`to` `{space, path}`, `version`),
+`links_rewritten[]` (`page_id`, `space`, `count`), `links_by_server[]`, `warnings[]`,
+`journal_id`.
+
+Exit 9 when the server cannot move pages between spaces. confed never falls back to
+copying and deleting, which would lose ids and history. A file that was never pushed is
+moved as a file, and the next push in the destination creates it.
+
+### confed instance resume / abort
+
+Each step of a move is written to the journal in `.confed-instance.db` before the next
+starts. A move that stops part-way exits with the cause's code, or 7, and its hint names
+the journal entry.
+
+- `confed instance resume [ID]` finishes it from the last finished step, asking the
+  server where each page actually is. It is safe to run again.
+- `confed instance abort [ID]` is allowed only before the server moved anything, and
+  undoes any title changes. After that, the way back is a move in the other direction.
+

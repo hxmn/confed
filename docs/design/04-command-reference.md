@@ -335,6 +335,13 @@ conversion is stretch). JSON: `{ "exported": [{"path","out"}…] }`.
 Shell completions (bash/zsh/fish); version prints binary + JSON-schema + state-schema
 versions (`--json`).
 
+### `confed instance <subcommand>` (alias `i`)
+
+One workspace per space of one instance, under an instance root
+(`.confed-instance.db`): `init`, `adopt`, `spaces`, `clone`, `add`, `remove`, the
+fan-out `status`/`fetch`/`pull`/`push`/`doctor`, `search`, and moves between spaces with
+`mv`, `resume` and `abort`. See [07-instance-roots.md](07-instance-roots.md).
+
 ### `confed tui`
 
 Full-screen browser: page tree with status badges, preview, diff view, conflict

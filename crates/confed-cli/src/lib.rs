@@ -85,7 +85,10 @@ fn run(cli: Cli, views: Views) -> Result<Output> {
 /// it. After an upgrade an agent would follow obsolete rules, so every command
 /// in the workspace says so until it is regenerated.
 fn stale_guide_warning(ctx: &Context, command: &Command) -> Option<String> {
-    if matches!(command, Command::Doctor(_) | Command::Init(_) | Command::Clone(_)) {
+    if matches!(
+        command,
+        Command::Doctor(_) | Command::Init(_) | Command::Clone(_) | Command::Instance(_)
+    ) {
         return None;
     }
     let root = ctx.workspace().ok()?.root().to_path_buf();
@@ -119,9 +122,14 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
     }
 
     // Credentials are read here, outside the runtime: the OS keyring blocks.
+    let mut prepared_instance = None;
     let prepared_init = match &command {
         Command::Init(args) => Some(commands::init::prepare(&mut ctx, args)?),
         Command::Clone(args) => Some(commands::clone::prepare(&mut ctx, args)?),
+        Command::Instance(cmd) => {
+            prepared_instance = Some(commands::instance::prepare(&mut ctx, cmd)?);
+            None
+        }
         _ => {
             ctx.preload_credentials()?;
             None
@@ -133,15 +141,19 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
         .build()
         .map_err(|e| ConfedError::io("starting the async runtime", e))?;
 
-    runtime.block_on(dispatch(ctx, command, prepared_init))
+    runtime.block_on(dispatch(ctx, command, prepared_init, prepared_instance))
 }
 
 async fn dispatch(
     mut ctx: Context,
     command: Command,
     prepared_init: Option<commands::init::InitInput>,
+    prepared_instance: Option<commands::instance::Prepared>,
 ) -> Result<Output> {
     match command {
+        Command::Instance(cmd) => {
+            commands::instance::run(&mut ctx, cmd, prepared_instance.expect("prepared above")).await
+        }
         Command::Init(args) => {
             commands::init::run(&mut ctx, &args, prepared_init.expect("prepared above")).await
         }

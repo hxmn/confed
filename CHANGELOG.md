@@ -20,6 +20,84 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-29
+
+### Added
+
+- **Instance roots: one folder, one workspace per space, managed together.**
+  `confed instance` (alias `confed i`) treats a directory holding a workspace per space
+  of one Confluence as a unit, marked by `.confed-instance.db`. Every workspace in it
+  stays an ordinary workspace and keeps working on its own. Design:
+  [docs/design/07-instance-roots.md](docs/design/07-instance-roots.md).
+  - `instance init [DIR] --base-url …` creates a root and authenticates once.
+  - `instance adopt [DIR…]` makes an existing folder of workspaces a root. It refuses
+    workspaces of different instances and names each one. `--move-credentials` checks
+    the credential, stores it once in the root and removes each workspace's copy.
+  - `instance spaces [--remote]` compares the cloned workspaces with the server's
+    spaces: pages, dirty and conflicted pages, last fetch, what is not cloned
+    (`--type`, `--status current|archived`).
+  - `instance clone KEY… | --all [--exclude …]` clones the missing spaces in parallel
+    with no credential of their own. A cloned space is skipped, so a second run does
+    nothing; any failure is exit 8. A personal space `~alice` goes to `@alice`.
+  - `instance add` and `instance remove [--delete-files]` keep the register.
+    `--delete-files` refuses a workspace with local changes.
+  - `instance status`, `fetch`, `pull`, `push` and `doctor` run the command in every
+    space (or `--space KEY,…`). The result has one entry per space: `space_key`, `dir`,
+    `ok`, `exit_code`, and the single-space `result` unchanged. The exit code is 0 when
+    all succeeded, their shared code when all failed alike, and 8 otherwise. `push`
+    needs `-m`, shows every space's dry run first, and asks or takes `--yes`.
+    `--concurrency` caps requests across all spaces together. `doctor` also reports
+    pages tracked by two workspaces, pages whose space on the server is not their
+    workspace's, and unfinished moves.
+  - `instance search` runs CQL across the registered spaces; each result names its
+    space, directory and path.
+- **`confed instance mv` moves a page tree to another space** with the server's own
+  move. Page ids, versions, history, comments, inline markers, attachments and labels
+  stay with the pages. Every check runs before any write, and every problem is listed
+  at once (exit 7):
+  - both spaces are fetched first
+  - every page involved must be in sync: local edits, conflicts, unsent comments,
+    attachment changes (`--push-first -m …` pushes them first)
+  - titles must be free in the destination, checked on the server
+    (`--on-conflict suffix`, `--title-map`)
+  - home pages are refused, and a subtree holding the rules page needs `--yes`
+  - permissions are checked where the server reports them, and restrictions are listed
+  - inbound links in every registered space are found, and nothing may be in the way
+    on disk
+
+  `--dry-run` prints the plan. Each page's file, sidecar, state rows and cache move to
+  the destination workspace without being downloaded again, and the tool-managed
+  frontmatter follows. Links whose meaning a move changes are fixed on the server; only
+  `ri:space-key` and `ri:content-title` change, Cyrillic titles included. Links the
+  server already fixed are left to it. Each step is journaled: `instance resume`
+  finishes an interrupted move, and `instance abort` undoes one before the server moved
+  anything. A server that cannot move pages between spaces is exit 9; confed never
+  copies and deletes instead.
+- **A workspace in an instance root uses the root's credential** when it has none of
+  its own. Credentials resolve flag → `CONFED_TOKEN` → the workspace's `.session.db` →
+  the root's `.confed-instance-session.db` (or keyring entry) → a prompt.
+- `confed whoami` reports `capabilities.move_between_spaces` and `confed doctor` has a
+  "move between spaces" check. Both ask the move endpoint to move page 0, which cannot
+  exist, so nothing moves.
+- `CLAUDE.md`/`AGENTS.md` of a root describe its layout, `KEY:path` addressing, the
+  fan-out JSON, journal and resume, and the cross-space link form
+  `[Title](<base>/display/KEY/Title)`. A member's contract gains a "Part of an instance"
+  section naming `confed instance mv` as the only way to move a page between spaces.
+  `--no-agent-docs` is respected.
+
+### Changed
+
+- **`push` refuses a `parent_id:` that names a page in another space** (exit 7). The
+  page goes into `skipped` and the new `cross_space`, with an `errors` entry whose hint
+  names `confed instance mv`. Before, the server either refused it or moved the page out
+  of the space behind confed's back.
+- **`confed mv` into another space's workspace is exit 2**, and prints the equivalent
+  `confed instance mv` command.
+- `--space` takes several keys (repeat it, or `DOCS,ENG`) for `confed instance`
+  commands; single-space commands use the last one.
+- `errors` in the JSON envelope can hold several entries: one per failed space of an
+  instance command. No field was added or removed, so `confed.schema` stays 1.
+
 ## [0.10.0] - 2026-10-27
 
 ### Added
@@ -765,7 +843,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/hxmn/confed/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/hxmn/confed/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/hxmn/confed/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/hxmn/confed/compare/v0.9.0...v0.9.1

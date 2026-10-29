@@ -207,7 +207,7 @@ pub fn prepare_with(ctx: &mut Context, args: &InitArgs, known: Known) -> Result<
         secret,
         flavor_hint,
         space: known.space.or_else(|| {
-            ctx.resolver.lookup(&config::SPACE, ctx.global.space.as_deref()).map(|r| r.value)
+            ctx.resolver.lookup(&config::SPACE, ctx.global.space_flag()).map(|r| r.value)
         }),
         credential_store,
     })
@@ -216,20 +216,7 @@ pub fn prepare_with(ctx: &mut Context, args: &InitArgs, known: Known) -> Result<
 /// Whether two base URLs name the same Confluence: scheme, host, port and
 /// path, ignoring case in the host and a trailing slash.
 pub fn same_instance(a: &str, b: &str) -> bool {
-    fn normalize(raw: &str) -> String {
-        let raw = raw.trim().trim_end_matches('/');
-        match url::Url::parse(raw) {
-            Ok(url) => format!(
-                "{}://{}:{}{}",
-                url.scheme(),
-                url.host_str().unwrap_or_default(),
-                url.port_or_known_default().unwrap_or_default(),
-                url.path().trim_end_matches('/')
-            ),
-            Err(_) => raw.to_ascii_lowercase(),
-        }
-    }
-    normalize(a) == normalize(b)
+    confed_core::instance::same_instance(a, b)
 }
 
 pub async fn run(ctx: &mut Context, args: &InitArgs, input: InitInput) -> Result<Output> {

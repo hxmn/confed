@@ -451,6 +451,7 @@ mod tests {
             name: key.to_string(),
             kind: Some(kind.to_string()),
             homepage_id: None,
+            status: None,
         }
     }
 

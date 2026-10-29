@@ -13,6 +13,7 @@ use confed_api::{Auth, ConfluenceClient, Flavor, Secret};
 use confed_cloud::CloudClient;
 use confed_core::config::{self, ConfigResolver, NoPrompt, Resolved};
 use confed_core::error::{ConfedError, Result};
+use confed_core::instance::Instance;
 use confed_core::session::{AuthMethod, Session, SessionStore};
 use confed_core::sync::SyncEngine;
 use confed_core::workspace::Workspace;
@@ -26,9 +27,14 @@ pub struct Context {
     pub resolver: ConfigResolver,
     pub style: Style,
     workspace: Option<Workspace>,
+    /// The instance root above the current directory, if there is one.
+    instance_root: Option<PathBuf>,
     /// Resolved once, before the async runtime starts: the OS keyring is a
     /// blocking API and must not be called from inside it.
     secret: Option<Secret>,
+    /// A client handed in from outside — the one an instance command shares
+    /// between all its spaces, so that one request ceiling covers them all.
+    client: Option<Arc<dyn ConfluenceClient>>,
 }
 
 impl Context {
@@ -41,6 +47,10 @@ impl Context {
         };
 
         let workspace = Workspace::discover(&cwd).ok();
+        let instance_root = match &workspace {
+            Some(ws) => ws.root().parent().and_then(confed_core::instance::find_root),
+            None => confed_core::instance::find_root(&cwd),
+        };
         let interactive = global.interactive();
         let mut resolver = if interactive {
             ConfigResolver::from_env(true, Box::new(TtyPrompter))
@@ -53,12 +63,77 @@ impl Context {
         }
 
         let style = Style::detect(global.json);
-        Ok(Self { global, cwd, resolver, style, workspace, secret: None })
+        Ok(Self {
+            global,
+            cwd,
+            resolver,
+            style,
+            workspace,
+            instance_root,
+            secret: None,
+            client: None,
+        })
     }
 
-    /// The workspace, or the "run confed init" error.
+    /// A context for one member workspace of an instance command: it never
+    /// prompts, prints nothing of its own, and uses the instance's client.
+    pub fn for_member(
+        parent: &Context,
+        ws: Workspace,
+        client: Option<Arc<dyn ConfluenceClient>>,
+    ) -> Result<Self> {
+        let mut global = parent.global.clone();
+        global.directory = Some(ws.root().to_path_buf());
+        global.non_interactive = true;
+        global.silent = true;
+        let resolver =
+            ConfigResolver::from_env(false, Box::new(NoPrompt)).with_stored(ws.stored_config()?);
+        Ok(Self {
+            cwd: ws.root().to_path_buf(),
+            style: Style::plain(),
+            resolver,
+            instance_root: parent.instance_root.clone(),
+            workspace: Some(ws),
+            secret: parent.secret.clone(),
+            client,
+            global,
+        })
+    }
+
+    /// The instance root this directory is in, opened.
+    pub fn instance(&self) -> Result<Instance> {
+        let root = self.instance_root.as_ref().ok_or_else(not_an_instance)?;
+        Instance::open(root)
+    }
+
+    pub fn instance_root(&self) -> Option<&std::path::Path> {
+        self.instance_root.as_deref()
+    }
+
+    /// Whether `key` is a registered space of this directory's instance.
+    fn is_member(&self, key: &str) -> bool {
+        self.instance().ok().and_then(|i| i.member(key).ok().flatten()).is_some()
+    }
+
+    /// Use this client instead of building one.
+    pub fn set_client(&mut self, client: Arc<dyn ConfluenceClient>) {
+        self.client = Some(client);
+    }
+
+    /// The workspace, or the "run confed init" error — which, at an instance
+    /// root, points at the commands that work there.
     pub fn workspace(&self) -> Result<&Workspace> {
-        self.workspace.as_ref().ok_or_else(ConfedError::not_initialized)
+        self.workspace.as_ref().ok_or_else(|| match &self.instance_root {
+            Some(root) => ConfedError::state_with_hint(
+                format!(
+                    "{} is an instance root, not a workspace: each space is in a directory of its own",
+                    root.display()
+                ),
+                "run `confed instance …` here (status, pull, push, …), or `confed -C <KEY> …` \
+                 for one space",
+            ),
+            None => ConfedError::not_initialized(),
+        })
     }
 
     pub fn workspace_mut(&mut self) -> Result<&mut Workspace> {
@@ -92,7 +167,7 @@ impl Context {
 
     #[allow(dead_code)]
     pub fn space_key(&self) -> Result<Resolved<String>> {
-        self.resolver.require(&config::SPACE, self.global.space.as_deref())
+        self.resolver.require(&config::SPACE, self.global.space_flag())
     }
 
     pub fn concurrency(&self) -> usize {
@@ -104,13 +179,30 @@ impl Context {
             .unwrap_or(0)
     }
 
-    /// The stored session, if this directory has been initialized.
+    /// The stored session: the workspace's own, or else — for a member of an
+    /// instance root — the one the root keeps for all its spaces.
     pub fn session(&self) -> Result<Option<Session>> {
-        let Some(ws) = &self.workspace else { return Ok(None) };
-        if !SessionStore::exists(ws.root()) {
-            return Ok(None);
+        Ok(self.session_store()?.and_then(|(_, session)| session))
+    }
+
+    /// The store the session comes from, without creating one where there is
+    /// none: a workspace's `.session.db`, else the instance root's shared one.
+    pub fn session_store(&self) -> Result<Option<(SessionStore, Option<Session>)>> {
+        if let Some(ws) = &self.workspace {
+            if SessionStore::exists(ws.root()) {
+                let store = ws.session_store()?;
+                let session = store.load()?;
+                return Ok(Some((store, session)));
+            }
         }
-        ws.session()
+        if let Some(root) = &self.instance_root {
+            if SessionStore::instance_exists(root) {
+                let store = SessionStore::open_instance(root)?;
+                let session = store.load()?;
+                return Ok(Some((store, session)));
+            }
+        }
+        Ok(None)
     }
 
     /// Read credentials into memory. Call this from `main` before entering the
@@ -132,6 +224,9 @@ impl Context {
     ///
     /// [`preload_credentials`](Self::preload_credentials) must have run first.
     pub fn build_client(&self) -> Result<Arc<dyn ConfluenceClient>> {
+        if let Some(client) = &self.client {
+            return Ok(client.clone());
+        }
         let session = self.session()?;
 
         let base_url = match self
@@ -192,6 +287,30 @@ impl Context {
         })
     }
 
+    /// [`Self::client_for`], drawing on a request ceiling shared with other
+    /// clients: one per credential, one limit for all of them.
+    pub fn client_with_limit(
+        &self,
+        flavor: Flavor,
+        base_url: &str,
+        auth: Auth,
+        limit: Arc<tokio::sync::Semaphore>,
+    ) -> Result<Arc<dyn ConfluenceClient>> {
+        let concurrency = self.concurrency();
+        Ok(match flavor {
+            Flavor::Cloud => {
+                let client = CloudClient::new(base_url, auth, concurrency)?;
+                let http = client.http().clone().with_limit(limit);
+                Arc::new(client.with_http(http))
+            }
+            Flavor::DataCenter => {
+                let client = DcClient::new(base_url, auth, concurrency)?;
+                let http = client.http().clone().with_limit(limit);
+                Arc::new(client.with_http(http))
+            }
+        })
+    }
+
     fn resolve_flavor(&self, base_url: &str, session: Option<&Session>) -> Result<Flavor> {
         if let Some(flag) = &self.global.flavor {
             return flag.parse().map_err(ConfedError::usage);
@@ -217,8 +336,8 @@ impl Context {
         if let Some(resolved) = self.resolver.lookup(&config::TOKEN, self.global.token.as_deref()) {
             return Ok(Secret::new(resolved.value));
         }
-        if let (Some(session), Some(ws)) = (session, &self.workspace) {
-            if let Some(secret) = ws.session_store()?.load_secret(session)? {
+        if let (Some(session), Some((store, _))) = (session, self.session_store()?) {
+            if let Some(secret) = store.load_secret(session)? {
                 return Ok(secret);
             }
         }
@@ -322,6 +441,19 @@ impl Context {
 
     pub fn resolve_page(&self, reference: &str) -> Result<String> {
         let ws = self.workspace()?;
+        // `KEY:path` names a page of this space, or of another member of this
+        // instance; anything else with a colon is just a path.
+        let own = ws.space_key().unwrap_or_default();
+        let reference = match split_space_ref(reference) {
+            Some((key, path)) if key.eq_ignore_ascii_case(&own) => path,
+            Some((key, _)) if self.is_member(key) => {
+                return Err(ConfedError::usage_with_hint(
+                    format!("`{reference}` names a page in space {key}, not in {own}"),
+                    "run the command in that space's workspace, or use `confed instance` from the root",
+                ));
+            }
+            _ => reference,
+        };
         let normalized = self.workspace_path(reference);
 
         for candidate in [normalized.clone(), format!("{normalized}.md")] {
@@ -367,6 +499,31 @@ impl Context {
             "no page matching `{reference}`: looked for {looked}; {hint}"
         )))
     }
+}
+
+/// `DOCS:Team Handbook/Onboarding.md` → (`DOCS`, `Team Handbook/Onboarding.md`).
+///
+/// A space key is capital letters and digits (or `~user` for a personal
+/// space), so a Windows drive (`C:\…`), a URL or a file name with a colon in
+/// it (`Plan: draft.md`) is never taken for one.
+pub fn split_space_ref(reference: &str) -> Option<(&str, &str)> {
+    let (key, path) = reference.split_once(':')?;
+    let personal = key.strip_prefix('~').is_some_and(|u| !u.is_empty() && !u.contains(' '));
+    let plain = key.len() > 1
+        && key.starts_with(|c: char| c.is_ascii_uppercase())
+        && key.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+    if !(personal || plain) || path.starts_with("//") || path.starts_with('\\') {
+        return None;
+    }
+    Some((key, path))
+}
+
+fn not_an_instance() -> ConfedError {
+    ConfedError::state_with_hint(
+        "this directory is not inside an instance root (.confed-instance.db not found)",
+        "run `confed instance init <dir> --base-url <url>`, or `confed instance adopt` in a \
+         folder that holds workspaces",
+    )
 }
 
 /// `a/./b/../c` → `a/c`, without touching the filesystem.
@@ -438,6 +595,18 @@ mod path_tests {
         assert_eq!(normalize_rel("Handbook 1/./Test.md"), "Handbook 1/Test.md");
         assert_eq!(normalize_rel("Handbook 1/../Other.md"), "Other.md");
         assert_eq!(normalize_rel("./Test.md"), "Test.md");
+    }
+
+    #[test]
+    fn space_references_are_told_from_paths() {
+        assert_eq!(split_space_ref("DOCS:Team Handbook.md"), Some(("DOCS", "Team Handbook.md")));
+        assert_eq!(split_space_ref("ENG:"), Some(("ENG", "")));
+        assert_eq!(split_space_ref("~alice:Notes.md"), Some(("~alice", "Notes.md")));
+        assert_eq!(split_space_ref("Team Handbook.md"), None);
+        assert_eq!(split_space_ref("C:\\work\\a.md"), None, "a drive letter is not a key");
+        assert_eq!(split_space_ref("https://wiki.example.test/x"), None);
+        assert_eq!(split_space_ref("Plan: draft.md"), None);
+        assert_eq!(split_space_ref("Docs:a.md"), None, "keys are capitals");
     }
 
     #[test]

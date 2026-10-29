@@ -32,16 +32,16 @@ pub struct Check {
 }
 
 impl Check {
-    fn pass(name: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn pass(name: &'static str, detail: impl Into<String>) -> Self {
         Self { name, status: CheckStatus::Pass, detail: detail.into(), fix_applied: false }
     }
-    fn warn(name: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn warn(name: &'static str, detail: impl Into<String>) -> Self {
         Self { name, status: CheckStatus::Warn, detail: detail.into(), fix_applied: false }
     }
-    fn fail(name: &'static str, detail: impl Into<String>) -> Self {
+    pub(crate) fn fail(name: &'static str, detail: impl Into<String>) -> Self {
         Self { name, status: CheckStatus::Fail, detail: detail.into(), fix_applied: false }
     }
-    fn fixed(mut self) -> Self {
+    pub(crate) fn fixed(mut self) -> Self {
         self.fix_applied = true;
         self.status = CheckStatus::Pass;
         self
@@ -259,12 +259,33 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
                         yes_no(caps.comment_resolve)
                     ),
                 ));
+                checks.push(move_check(client.as_ref()).await);
             }
             Err(e) => checks.push(Check::fail("server", e.to_string())),
         },
     }
 
     Ok(report(ctx, checks))
+}
+
+/// Whether the server can move pages between spaces, which
+/// `confed instance mv` needs.
+pub(crate) async fn move_check(client: &dyn confed_api::ConfluenceClient) -> Check {
+    const NAME: &str = "move between spaces";
+    match client.probe_move().await {
+        Ok(confed_api::Probe::Available) => {
+            Check::pass(NAME, "the page move endpoint answers (`confed instance mv`)")
+        }
+        Ok(confed_api::Probe::Unavailable) => Check::warn(
+            NAME,
+            "this server has no page move endpoint; `confed instance mv` exits 9 here",
+        ),
+        Ok(confed_api::Probe::Unknown) | Err(_) => Check::warn(
+            NAME,
+            "could not tell whether the page move endpoint is there; `confed instance mv` \
+             reports it if not",
+        ),
+    }
 }
 
 /// Whether `CLAUDE.md` and `AGENTS.md` carry the rules the workspace asks for.
@@ -360,7 +381,7 @@ fn yes_no(value: bool) -> &'static str {
     }
 }
 
-fn report(ctx: &Context, checks: Vec<Check>) -> Output {
+pub(crate) fn report(ctx: &Context, checks: Vec<Check>) -> Output {
     let style = &ctx.style;
     let mut human = String::new();
 

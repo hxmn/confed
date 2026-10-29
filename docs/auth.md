@@ -67,13 +67,16 @@ same way, and stops at the first place it is found:
 2. **the environment variable**, e.g. `CONFED_TOKEN`
 3. **stored configuration** written by `confed init` (`.state.db` for the base URL, space,
    and flavor; `.session.db` for the credential)
-4. **an interactive prompt** — only when stdin is a terminal *and* neither `--json` nor
+4. **for a workspace inside an instance root, with no `.session.db` of its own**, the
+   root's shared credential in `.confed-instance-session.db` or its keyring entry
+   (see [Sharing one credential](#sharing-one-credential-between-spaces))
+5. **an interactive prompt** — only when stdin is a terminal *and* neither `--json` nor
    `--non-interactive` was passed
 
 An empty string counts as absent, so `CONFED_SPACE= confed status` falls through to the
 stored value rather than failing.
 
-In step 4's absence — no TTY, `--json`, or `--non-interactive` — confed does not hang. It
+In step 5's absence — no TTY, `--json`, or `--non-interactive` — confed does not hang. It
 exits **2** immediately with a message naming the missing value, its flag, and its
 environment variable:
 
@@ -152,6 +155,29 @@ confed clone --all ~/wiki --from ~/wiki/DOCS # every space you can see
 At a terminal, `clone` without `--from` also offers the credential of the one workspace
 already in the target's parent folder (for the same base URL, when one was given). It
 asks first, and with more than one candidate it offers none.
+
+## Sharing one credential between spaces
+
+An instance root (`confed instance`, see [commands](commands.md#confed-instance)) keeps
+one credential for all of its workspaces, so a rotated token is stored once:
+
+```bash
+confed instance init ~/wiki --base-url https://wiki.example.test   # asks for the token once
+confed instance adopt --move-credentials                           # or: share the existing ones
+```
+
+`adopt --move-credentials` takes the token from `--token`/`CONFED_TOKEN`, or from the
+first workspace that stores one. It checks the token with `whoami`, and stores it in the
+root: in the keyring, or `.confed-instance-session.db` (mode 0600) with
+`--credential-store sqlite`. Only then does it remove each workspace's `.session.db`. A
+workspace's keyring entry is left alone when the root's credential is that same entry
+(same base URL and user).
+
+A workspace that still has a `.session.db` keeps using it, alone and in `confed instance`
+commands. Remove the file to make it use the root's. To rotate the shared token, run
+`confed instance init <root> --base-url …` again: it replaces the root's credential and
+leaves the spaces alone. `confed config --no-keychain` and `--force-keychain`, run in a
+workspace without a credential of its own, move the root's.
 
 ## CI and automation
 

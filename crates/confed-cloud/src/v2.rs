@@ -16,6 +16,8 @@ pub struct Space {
     pub kind: Option<String>,
     #[serde(default)]
     pub homepage_id: Option<Id>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 impl Space {
@@ -25,6 +27,7 @@ impl Space {
             name: self.name.unwrap_or(self.key),
             kind: self.kind,
             homepage_id: self.homepage_id.map(|h| PageId::new(h.as_string())),
+            status: self.status.map(|s| s.to_ascii_lowercase()),
         }
     }
 }

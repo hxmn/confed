@@ -32,7 +32,12 @@
         },
         "comment_resolve": { "type": "boolean", "description": "False on Data Center." },
         "adf": { "type": "boolean", "description": "Whether the server speaks Atlassian Document Format." },
-        "max_request_concurrency": { "type": "integer", "minimum": 1 }
+        "max_request_concurrency": { "type": "integer", "minimum": 1 },
+        "move_between_spaces": {
+          "type": "string",
+          "enum": ["available", "unavailable", "unknown"],
+          "description": "Whether the page move endpoint `confed instance mv` uses answers, asked by moving page 0, which cannot exist. `unavailable` means `confed instance mv` exits 9 on this server."
+        }
       }
     }
   }

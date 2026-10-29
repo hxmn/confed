@@ -54,7 +54,8 @@ pub fn write(
     space_key: &str,
     rules: Option<&Rules>,
 ) -> Result<Vec<String>> {
-    let content = with_rules(&render(base_url, flavor, space_key), rules);
+    let instance = instance_of(dir);
+    let content = with_rules(&render_in(base_url, flavor, space_key, instance.as_deref()), rules);
     let mut written = Vec::new();
     for name in FILENAMES {
         write_file(dir, name, &content)?;
@@ -259,7 +260,194 @@ pub fn audit(dir: &Path) -> (Vec<&'static str>, Vec<(&'static str, String)>) {
     (missing, stale)
 }
 
+/// The way up from a registered member to its instance root (`..`), or
+/// `None` when `dir` is no member of one.
+pub fn instance_of(dir: &Path) -> Option<String> {
+    let root = confed_core::instance::find_root(dir.parent()?)?;
+    let instance = confed_core::instance::Instance::open(&root).ok()?;
+    let member = instance.member_for_path(dir).ok()??;
+    Some(member.dir.split('/').map(|_| "..").collect::<Vec<_>>().join("/"))
+}
+
 pub fn render(base_url: &str, flavor: Flavor, space_key: &str) -> String {
+    render_in(base_url, flavor, space_key, None)
+}
+
+/// What a member workspace's contract adds: where it belongs, and the rule
+/// that keeps pages from wandering between spaces.
+fn instance_section(space_key: &str, up: &str) -> String {
+    format!(
+        r#"
+## Part of an instance
+
+This workspace is the space **{space_key}** of the instance root at `{up}`, which holds
+one workspace per space of this Confluence; `{up}/CLAUDE.md` describes it. When this
+directory has no `.session.db`, confed uses the root's shared credential.
+
+- **Never move a page to another space by moving its file** into another workspace's
+  directory, and never set `parent_id` to a page of another space: `push` refuses that
+  page (exit 7) and `confed mv` into another workspace exits 2. The only way is, from the
+  root: `confed instance mv {space_key}:<path> <KEY>:<parent path>` (`--dry-run` first).
+- A page of another space is linked as `[Title](<base url>/display/KEY/Title)`.
+"#
+    )
+}
+
+/// The contract of an instance root.
+pub fn render_instance(
+    base_url: &str,
+    flavor: Flavor,
+    members: &[confed_core::instance::Member],
+) -> String {
+    let mut spaces = String::new();
+    for member in members {
+        let state = if member.enabled { "" } else { "  (disabled)" };
+        spaces.push_str(&format!(
+            "| `{}` | `{}/`{state} |
+",
+            member.space_key, member.dir
+        ));
+    }
+    if spaces.is_empty() {
+        spaces.push_str(
+            "| — | none yet: `confed instance clone <KEY>` |
+",
+        );
+    }
+    format!(
+        r#"{STAMP_PREFIX}{VERSION} -->
+# confed instance root
+
+This directory holds one confed workspace per space of the Confluence at {base_url}
+({flavor}). Each workspace is an ordinary confed workspace with its own `CLAUDE.md`:
+read that one before editing pages in it. This file covers what spans spaces.
+
+These rules describe **confed {VERSION}**; `confed version --json` says what you are
+running, and `confed instance doctor --fix` rewrites this file.
+
+## Layout
+
+```
+.confed-instance.db           registered spaces and the move journal — never edit or delete
+.confed-instance-session.db   the shared credential (mode 0600) — never read, never commit
+DOCS/                         the workspace of space DOCS
+@alice/                       a personal space (~alice); `~` would be expanded by a shell
+```
+
+| Space | Workspace |
+|---|---|
+{spaces}
+## Naming a page
+
+From the root, a page is any of:
+
+- a path from the current directory: `DOCS/Team Handbook/Onboarding.md`
+- `KEY:path`, the path inside that space's workspace: `DOCS:Team Handbook/Onboarding.md`
+- its page id: `1001`, looked up in every registered space
+
+## Commands across spaces
+
+```bash
+confed instance status --json            # every space; --space KEY (repeatable) narrows it
+confed instance fetch --json
+confed instance pull --json
+confed instance push --dry-run --json    # everything every space would send
+confed instance push -m "reason" -y      # -m is required; without -y it asks first
+confed instance doctor --json
+confed instance search "text" --json     # results name their space, dir and path
+confed instance spaces --remote          # what is cloned, and what is not
+confed instance clone KEY                # clone a missing space; --all for every one
+```
+
+Each prints the usual envelope, with one entry per space in `result.spaces`:
+
+```json
+{{ "space_key": "DOCS", "dir": "DOCS", "ok": true, "exit_code": 0, "result": {{ … }} }}
+```
+
+`result` is exactly what the command prints in that workspace alone. A space that
+failed has `"ok": false`, its `exit_code` and `errors`, and its errors are also in
+the envelope's `errors`. The exit code is 0 when every space succeeded, the shared
+code when every space failed the same way, and 8 otherwise.
+
+## Moving pages between spaces
+
+**Only `confed instance mv` moves a page to another space.** Never move a file from
+one workspace directory to another, never set `parent_id` to a page of another space
+(`push` refuses it with exit 7), and never use `confed mv` for it (exit 2). The
+server keeps the page's id, history, comments and attachments only through a real move.
+
+```bash
+confed instance mv DOCS:Handbook/Onboarding.md ENG:Runbooks.md --dry-run --json
+confed instance mv DOCS:Handbook/Onboarding.md ENG:Runbooks.md -m "reason"
+confed instance mv 1002 ENG:              # to the top of ENG, under its home page
+```
+
+The page moves with every page under it. Before anything is written, confed checks
+that every page involved is in sync (exit 7 lists each one that is not — push or pull
+first, or `--push-first -m …`), that no title is already used in the destination
+(`--on-conflict suffix` appends ` (KEY)`), that the page is not a home page, and what
+you may do there. `--dry-run` prints the whole plan: pages, collisions, restrictions,
+and every page whose links will be rewritten.
+
+Links between spaces are written `[Title](<base url>/display/KEY/Title)`. A link by
+title names its space only when it is another one, so a move changes which links need
+a key; confed rewrites those links on the server (nothing else in the page) and pulls
+the result. `--no-rewrite-links` leaves them alone.
+
+## When a move is interrupted
+
+Every step of a move is recorded in `.confed-instance.db` before it runs. If confed is
+stopped part-way, every command keeps working, `confed instance doctor` reports the
+unfinished move, and:
+
+```bash
+confed instance resume       # finish it; safe to run again
+confed instance abort        # only before the server moved anything
+```
+
+After the server has moved the pages, the way back is another `confed instance mv`.
+
+## Exit codes
+
+As in every workspace (see its `CLAUDE.md`), plus: 8 when some spaces failed and others
+did not, and 9 when the server cannot move pages between spaces.
+"#,
+        flavor = flavor,
+    )
+}
+
+/// Write the instance root's contract files. Returns the filenames written.
+pub fn write_instance(
+    root: &Path,
+    base_url: &str,
+    flavor: Flavor,
+    members: &[confed_core::instance::Member],
+) -> Result<Vec<String>> {
+    let content = render_instance(base_url, flavor, members);
+    let mut written = Vec::new();
+    for name in FILENAMES {
+        write_file(root, name, &content)?;
+        written.push((*name).to_string());
+    }
+    Ok(written)
+}
+
+/// Regenerate a member's contract after it joined or left an instance,
+/// keeping its rules. Nothing is written where there was no contract.
+pub fn refresh_member(ws: &Workspace) -> Result<Vec<String>> {
+    let dir = ws.root();
+    if FILENAMES.iter().all(|name| !dir.join(name).exists()) {
+        return Ok(Vec::new());
+    }
+    let base_url = ws.base_url()?.unwrap_or_default();
+    let flavor = ws.flavor()?.unwrap_or(Flavor::DataCenter);
+    let rules = current_rules(ws).unwrap_or(None);
+    write(dir, &base_url, flavor, &ws.space_key()?, rules.as_ref())
+}
+
+fn render_in(base_url: &str, flavor: Flavor, space_key: &str, instance: Option<&str>) -> String {
+    let instance_note = instance.map(|up| instance_section(space_key, up)).unwrap_or_default();
     let flavor_note = match flavor {
         Flavor::Cloud => "Confluence Cloud (REST v2). Inline comments can be created and resolved.",
         Flavor::DataCenter => {
@@ -298,7 +486,7 @@ command model. Server: {flavor_note}
 
 These rules describe **confed {VERSION}**. Before relying on them, check that the
 binary in your path is still that one — see [When confed is upgraded](#when-confed-is-upgraded).
-
+{instance_note}
 ## Layout
 
 ```
@@ -623,6 +811,48 @@ mod tests {
         let agents = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
         assert_eq!(claude, agents);
         assert!(claude.contains("DOCS"));
+    }
+
+    #[test]
+    fn a_member_of_an_instance_says_so_and_names_the_only_way_between_spaces() {
+        let root = tempfile::tempdir().unwrap();
+        let instance = confed_core::instance::Instance::create(
+            root.path(),
+            "https://wiki.example.test",
+            Flavor::DataCenter,
+        )
+        .unwrap();
+        let dir = root.path().join("DOCS");
+        Workspace::create(&dir).unwrap();
+
+        write(&dir, "https://wiki.example.test", Flavor::DataCenter, "DOCS", None).unwrap();
+        let alone = std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+        assert!(!alone.contains("Part of an instance"), "not registered yet");
+
+        instance.add_member("DOCS", None, "DOCS").unwrap();
+        write(&dir, "https://wiki.example.test", Flavor::DataCenter, "DOCS", None).unwrap();
+        let member = std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap();
+        assert!(member.contains("## Part of an instance"));
+        assert!(member.contains("instance root at `..`"));
+        assert!(member.contains("confed instance mv DOCS:<path>"));
+        assert_eq!(generated_version(&member), Some(VERSION));
+
+        let rooted = render_instance(
+            "https://wiki.example.test",
+            Flavor::DataCenter,
+            &instance.members().unwrap(),
+        );
+        assert_eq!(generated_version(&rooted), Some(VERSION));
+        for required in [
+            "Only `confed instance mv` moves a page to another space",
+            "KEY:path",
+            "confed instance resume",
+            "/display/KEY/Title",
+            "| `DOCS` | `DOCS/` |",
+            "\"exit_code\": 0",
+        ] {
+            assert!(rooted.contains(required), "the root contract is missing: {required}");
+        }
     }
 
     #[test]

@@ -160,6 +160,35 @@ keyring, or a `0600` file).
 
 Every command, flag and exit code is in [docs/commands.md](https://github.com/hxmn/confed/blob/main/docs/commands.md).
 
+## 🗂️ Managing several spaces
+
+An **instance root** is a folder holding one workspace per space of one Confluence. The
+root keeps one shared credential, `confed instance` (or `confed i`) runs a command in
+every space at once, and a page tree moves between spaces with its ids, history,
+comments and attachments:
+
+```bash
+confed instance init ~/wiki --base-url https://wiki.example.test   # authenticate once
+cd ~/wiki && confed instance clone DOCS ENG                        # or: clone --all
+confed instance status --json                                      # every space, one envelope
+confed instance pull
+confed instance push -m "Quarterly review" --dry-run
+confed instance mv "DOCS:Team Handbook/Onboarding.md" "ENG:Runbooks.md" --dry-run
+```
+
+Already have a folder of workspaces? `confed instance adopt --move-credentials` registers
+them and replaces their copies of the token with one in the root, after checking it works.
+Each workspace keeps working on its own: `confed -C ENG status` is unchanged.
+
+A move checks everything before it writes anything: every page involved is in sync, no
+title is taken in the destination, it is not a home page, and what you may do there.
+`--dry-run` shows the plan. It moves the pages on the server with Confluence's own move,
+so nothing is copied. It carries each page's file, sidecar and state into the other
+workspace, and fixes the links that change meaning when a page changes space. Every step
+is journaled, so an interrupted move is finished by `confed instance resume`. Details are
+in [docs/commands.md](https://github.com/hxmn/confed/blob/main/docs/commands.md#confed-instance) and
+[design 07](https://github.com/hxmn/confed/blob/main/docs/design/07-instance-roots.md).
+
 ## 📁 Layout on disk
 
 ```

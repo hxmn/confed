@@ -206,14 +206,16 @@ fn set_rules_page(ctx: &Context, reference: Option<&str>, pick_page: PagePicker)
 /// Reading it may prompt once if it currently lives in the keychain; after a
 /// move to the database, nothing prompts again.
 fn switch_credential_store(ctx: &Context, target: SecretBackend) -> Result<Output> {
-    let ws = ctx.workspace()?;
-    let store = ws.session_store()?;
-    let session = store.load()?.ok_or_else(|| {
+    ctx.workspace()?;
+    let none_stored = || {
         ConfedError::state_with_hint(
             "no credentials are stored in this directory",
             "run `confed init` first",
         )
-    })?;
+    };
+    // A member of an instance root without its own keeps the root's.
+    let (store, session) = ctx.session_store()?.ok_or_else(none_stored)?;
+    let session = session.ok_or_else(none_stored)?;
 
     let previous = session.secret_backend;
     if previous == target {

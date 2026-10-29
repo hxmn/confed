@@ -1,0 +1,267 @@
+# 07 — Instance roots and moves between spaces
+
+Status: implemented in 0.11.0 (`confed instance`, alias `confed i`). `confed instance cp`
+is not implemented yet (§8).
+
+## 1. Problem
+
+A confed workspace is one directory bound to one space. Someone working in several
+spaces of one Confluence ends up with a folder of workspaces that confed knows nothing
+about:
+
+```
+Confluence/          ← not a workspace; nothing ties the three together
+├── DOCS/   .state.db, .session.db, CLAUDE.md, pages…
+├── ENG/    .state.db, .session.db, …
+└── OPS/    .state.db, .session.db, … (rules_page_id set)
+```
+
+- The credential is stored three times, so rotating a token means `confed init` three
+  times.
+- Every command runs in one space; nothing reports across them.
+- A page cannot move to another space. Moved in the browser, both workspaces drift: the
+  source still tracks the page, the destination does not know it.
+- Links between the spaces are common, and a move turns links within a space into links
+  across spaces and back.
+
+## 2. The model
+
+An **instance root** is a directory holding one workspace per space of one instance. It
+is marked by `.confed-instance.db` (SQLite, like `.state.db`):
+
+| Table | What it holds |
+|---|---|
+| `meta` | `schema_version`, `base_url`, `flavor`, `created_at` |
+| `spaces` | `space_key`, `space_id`, `dir` (relative to the root), `added_at`, `enabled` |
+| `journal` | operations that span workspaces: `id`, `op`, `state` (last step finished), `plan` (JSON), `error` |
+
+- **Members are ordinary workspaces.** Nothing about a workspace changes when it joins:
+  `confed -C ENG status` works as before, and a workspace taken out of the root keeps
+  working on its own. A root cannot be a workspace, nor be inside one.
+- **Discovery** walks up from the current directory, as for `.state.db`: from inside a
+  member, confed finds the member first and the root above it. `-C` works as everywhere.
+- **The root's `.gitignore`** covers `.confed-instance.db`,
+  `.confed-instance-session.db`, and `*/.state.db`, `*/.session.db`, `*/.pages.db`,
+  `*/.confed.lock`.
+- **Directories** are named for the space key. A personal space's key starts with `~`,
+  which a shell expands to a home directory, so `~alice` goes to **`@alice`**: no space
+  key can contain `@`, and the name never needs quoting. Personal spaces are left out of
+  `clone --all` unless `--type personal` asks for them, as with `confed clone --all`.
+
+### Credentials
+
+The root keeps one credential in `.confed-instance-session.db` (mode 0600), or its
+keyring entry, which has the same shape as a workspace's `.session.db`. A workspace
+resolves its credential in this order:
+
+1. `--token`
+2. `CONFED_TOKEN`
+3. its own `.session.db`
+4. the instance root's shared session, found by walking up
+5. a prompt, at a terminal
+
+`confed instance adopt --move-credentials` verifies the shared credential with
+`whoami` before it removes any workspace's own. A workspace's keyring entry is deleted
+only if it is not the same entry the shared session now uses: a workspace and the root
+on the same base URL and user share one keyring account, and clearing it would take the
+shared secret with it.
+
+Fan-out commands keep the order. A member that still has its own `.session.db` uses that
+credential, and the others use the root's. Every client draws on **one request
+semaphore**, so `--concurrency` caps requests across all spaces together, not per space.
+
+## 3. Fan-out
+
+`status`, `fetch`, `pull`, `push` and `doctor` run the single-space command in each
+member, in-process, with a context of its own. That context never prompts and prints
+nothing directly. The JSON is:
+
+```json
+{ "confed": { "command": "instance", … },
+  "result": { "action": "status", "spaces": [
+    { "space_key": "DOCS", "dir": "DOCS", "ok": true,  "exit_code": 0, "result": { … } },
+    { "space_key": "ENG",  "dir": "ENG",  "ok": false, "exit_code": 3, "errors": [ … ] } ] },
+  "errors": [ { "code": "AUTH", "message": "ENG: …" } ], "warnings": [ … ] }
+```
+
+A space's `result` is the single-space result unchanged, so its schema still applies.
+The exit code is 0 when every space succeeded, the shared code when every space failed
+the same way, and 8 otherwise. `clone` exits 8 on any failure, as `clone --all` does.
+`push` needs `-m`. It always runs every space's dry run first, then asks (or takes
+`--yes`) and pushes only the spaces that have work.
+
+The envelope gains no top-level field: `errors` may now hold several entries, one per
+failed space. `confed.schema` stays 1.
+
+## 4. Addressing
+
+From the root a page is a path from the current directory (`DOCS/Team Handbook.md`),
+`KEY:path` (`DOCS:Team Handbook.md`), or a page id, looked up in every registered
+`.state.db`. A key is capitals and digits, or `~user`, so `C:\…`, URLs and file names
+with a colon in them are never taken for one. A single-space command only reads
+`KEY:path` when `KEY` is its own space or a registered member.
+
+As a move destination, an existing page becomes the new parent. `KEY:` alone means the
+top of that space: under its home page, or beside it with `--root`. A path that is not a
+page yet names the parent (its directory) and the new title (its file name), as
+`confed mv` does. `--before`, `--after` and `--position` work as in `confed mv`.
+
+## 5. Moving pages between spaces
+
+### 5.1 Which server API moves a page to another space
+
+| Candidate | Data Center 9.x | Cloud | confed |
+|---|---|---|---|
+| `PUT /rest/api/content/{id}/move/{position}/{targetId}` (`append`, `before`, `after`) | Documented in the DC REST API and already used by confed for sibling ordering. The target's space becomes the page's. Descendants move with it. | Same endpoint, under `/wiki`. | **Used.** |
+| `PUT /rest/api/content/{id}` with another `space` and `ancestors`, version + 1 | Not documented as a space change. Whether the server accepts it, and whether children follow, is not something confed can rely on. | v2 has no space field on update. | Not used. |
+| Copy, then delete | Always possible. | Always possible. | **Never.** New ids, no history, comments and inline markers lost. |
+
+`move/append/{target}` puts the page under the target. `move/before|after/{target}`
+makes it the target's sibling: `KEY: --root` is `after` the home page, and `--position N`
+is `before` the Nth sibling. After the call, confed reads the root page back. If its
+space has not changed, the move is **exit 9** and nothing else happens. That covers a
+server that answered success without moving across spaces.
+
+**Capability probe.** `confed whoami` (`capabilities.move_between_spaces`) and
+`confed doctor` ("move between spaces") call the endpoint with page 0, which cannot
+exist:
+
+- **available:** a JSON `statusCode` error naming the missing content.
+- **unavailable:** `405`, or a `404` that is not the server's JSON (`null for uri`).
+- **unknown:** anything else.
+
+Nothing can move. A move that answers 404 for pages confed has just read is also
+reported as exit 9: the endpoint is missing, not the pages.
+
+**What was verified, and how.** This was built and tested against the mock server and a
+stateful fake of the REST v1 routes (`crates/confed/tests/instance.rs`), not a live Data
+Center. The table above rests on Atlassian's REST documentation and on confed's existing
+use of the endpoint for sibling ordering. The read-back after every move, the probe and
+the exit 9 path are there so that a server behaving differently fails safely.
+
+### 5.2 Does Confluence rewrite links when a page changes space?
+
+Confluence's link refactoring is documented for the browser's move and rename. It updates
+links to the moved page from other pages, and gives the links from the moved page to
+pages left behind their old space's key. Whether the REST move endpoint triggers the same
+refactoring on every 9.x release, and whether it saves new page versions when it does,
+is not documented. confed therefore depends on neither:
+
+- After the move, every page the plan expected to need fixing is read from the server and
+  checked again. A page the server already fixed is left alone and listed in
+  `links_by_server`, with a warning.
+- A page still broken is fixed on the server, as one new version with the move's `-m`
+  message, and listed in `links_rewritten`.
+
+So whatever a server does, links end up resolving, and the output says who fixed them.
+
+### 5.3 Pre-flight: every check before any write
+
+Both spaces are fetched first, under both locks. Then:
+
+1. **Source and destination** are registered workspaces on this instance and are
+   different spaces. A file that was never pushed has no page to move on the server, so it
+   moves as a file into the destination's tree, and the next push there creates it.
+2. **In sync.** Every page in the subtree, and the new parent, must be unchanged
+   locally and on the server: no local edits, conflicts, tampered frontmatter, unpushed
+   comment drafts, attachment changes, or new pages filed under a moved one.
+   `--push-first -m …` pushes the subtree's work first.
+3. **Titles.** Every title is checked against the destination's page listing from the
+   server, case-insensitively. `--on-conflict suffix` appends ` (KEY)`; `--title-map
+   FILE` takes a JSON object of new titles keyed by page id or title. Titles are changed
+   on the server just before the move, and `abort` changes them back.
+4. **Permissions.** If the server answers `expand=operations`, the user needs
+   `update` and `delete` on the root and `create` where it lands. Otherwise there is a
+   warning, and a 403 from the move itself is reported as exit 3 with what is needed.
+5. **Special pages.** A space's home page is refused. If the subtree holds the source's
+   `rules_page_id`, the move needs `--yes`, and the source's setting is cleared afterwards.
+6. **Restrictions** on any page in the subtree are listed. They move with the pages.
+7. **Links.** The stored body of every page in every registered workspace is scanned
+   (§6). With `--rewrite-links` (the default), a page that needs a fix must not have
+   local changes.
+8. **Placement.** Each page's path in the destination is worked out by the
+   destination's own rules (the same `plan_from_records` pull uses), and nothing may be
+   in the way on disk.
+
+Problems are collected and reported together, as exit 7 (exit 2 for bad arguments).
+`--dry-run` stops here and prints the plan.
+
+### 5.4 Steps and the journal
+
+Each step is recorded in the journal when it finishes. Each step checks what is already
+true before it acts, so running it again is safe:
+
+| Step | What it does | On resume |
+|---|---|---|
+| `planned` | journal entry created | — |
+| `server_moved` | title changes, then `move_page_to` on the root, then read back | asks the server where the root is; does not move twice |
+| `local_dst_written` | page cache (`page_versions`, `page_extras`), then in one transaction the `pages`, `remote_pages`, `attachments`, `comments` and `removed_attachments` rows and any `users` the destination lacks; then each `.md` and sidecar, moved to its destination path; `confed.space_key` and the root's `parent_id` rewritten | skips rows already there; moves files from wherever they are |
+| `local_src_removed` | rows deleted from the source (and its cache, its fetch queue), empty directories pruned | idempotent |
+| `links_rewritten` | §5.2 | skips pages already done |
+| `done` | a scoped pull in every space written to; checks that each page is tracked once, in the destination, clean | — |
+
+Bodies are not downloaded again. A moved page keeps its base storage and cache, and
+its render key is cleared. The closing pull then renders it again in the destination's
+context, which is what turns `[Team Handbook](../Team Handbook.md)` into
+`[Team Handbook](<base>/display/DOCS/Team%20Handbook)`. A page whose server version
+changed beyond the move is fetched by that pull like any other.
+
+**Locks** are taken in space-key order, and a held lock fails at once with exit 7: the
+source and destination first, then any other space whose links are rewritten.
+
+**Failure.** A move that stops part-way keeps its codes for network (5), auth (3),
+conflict (4) and not found (6). Anything else is exit 7, as a local state to finish. The
+hint names `confed instance resume <id>`, and `confed instance doctor` reports the
+unfinished entry. `confed instance abort` is allowed only before `server_moved`, and
+reverts any title changes. After that, the way back is a move in the other direction.
+
+`confed instance doctor` also reports pages tracked by two workspaces at once, and
+(online) pages whose space on the server is not their workspace's.
+
+## 6. Links
+
+A link by title names a space only when it is another one: `<ri:page
+ri:content-title="T"/>` means "T in this space". So a move changes four kinds of links:
+
+| Link | Before | After |
+|---|---|---|
+| from a page left behind, to a moved page | `ri:content-title="T"` | `ri:space-key="DEST" ri:content-title="T"` |
+| from a moved page, to a page left behind | `ri:content-title="Q"` | `ri:space-key="SRC" ri:content-title="Q"` |
+| between two moved pages | `ri:content-title="T"` | unchanged |
+| from any page naming the source explicitly | `ri:space-key="SRC" …T` | `ri:space-key="DEST" …T` (or no key with `--relativize`, when it ends up in its own space) |
+
+A renamed page's links also get its new `ri:content-title`. The rewrite edits only
+those two attributes, in place. Everything else in the storage stays byte for byte: macro
+bodies, `ac:macro-id`, the inside of ```` ```confluence ```` blocks, and links by
+`ri:content-id` (Cloud), which survive a move as they are. Titles are compared as text,
+with XML entities decoded, so Cyrillic titles and `&amp;` match. Running the rewrite
+twice changes nothing the second time.
+
+In the Markdown, a link to a page in another space is written
+`[Title](<base url>/display/KEY/Title)`, as the workspace agent docs already say. A page
+in the destination that names a moved page by its new space renders as a relative file
+link on the next pull. With the explicit key it still resolves; `--relativize` drops the
+key.
+
+## 7. Single-space guardrails
+
+- A `parent_id:` naming a page this workspace does not track is looked up. If it is in
+  another space, `push` refuses that page: it goes into `skipped` and `cross_space`,
+  with an `errors` entry, exit 7, and a hint naming `confed instance mv`. Pages in this
+  space push as before.
+- `confed mv` with a destination inside another member's directory, or `KEY:path` of
+  another member, exits 2 and prints the equivalent `confed instance mv` command.
+- Inside a member, a single-space command given another member's `KEY:path` exits 2.
+  At the root, a single-space command says that the root is not a workspace and points
+  at `confed instance` and `-C <KEY>`.
+
+## 8. Not done
+
+- **`confed instance cp`**, copying a page tree into another space as new pages, is not
+  implemented. The design stands for when it is. It would use the server's
+  page-hierarchy copy if a probe finds it, and otherwise create pages parent first
+  through the push path. Attachments would be uploaded again and labels copied, but not
+  comments. Links inside the tree would point at the copies, and links out of it at the
+  originals. It would share the pre-flight, title handling and journal of `mv`.
+- Moving or copying between instances, moving whole spaces, and space permissions or
+  settings are out of scope, as is an instance-wide MkDocs site.

@@ -15,6 +15,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 pub const SESSION_DB_FILENAME: &str = ".session.db";
+/// The one credential an instance root keeps for all of its workspaces. A
+/// member workspace without a `.session.db` of its own uses it.
+pub const INSTANCE_SESSION_DB_FILENAME: &str = ".confed-instance-session.db";
 const KEYRING_SERVICE: &str = "confed";
 
 const SCHEMA: &str = r#"
@@ -114,7 +117,21 @@ pub struct SessionStore {
 
 impl SessionStore {
     pub fn open(dir: &Path) -> Result<Self> {
-        let path = dir.join(SESSION_DB_FILENAME);
+        Self::open_file(&dir.join(SESSION_DB_FILENAME))
+    }
+
+    /// The instance root's shared credential, `.confed-instance-session.db`.
+    pub fn open_instance(root: &Path) -> Result<Self> {
+        Self::open_file(&root.join(INSTANCE_SESSION_DB_FILENAME))
+    }
+
+    pub fn instance_exists(root: &Path) -> bool {
+        root.join(INSTANCE_SESSION_DB_FILENAME).exists()
+    }
+
+    /// Open (or create, `0600`) the credential database at `path`.
+    pub fn open_file(path: &Path) -> Result<Self> {
+        let path = path.to_path_buf();
         let existed = path.exists();
         if existed {
             check_permissions(&path)?;
@@ -323,6 +340,15 @@ impl SessionStore {
         self.conn.execute("DELETE FROM session WHERE id = 1", [])?;
         Ok(())
     }
+}
+
+/// Whether two sessions keep their secret under the same keyring entry, so
+/// that clearing one would take the other's secret with it.
+pub fn same_keyring_entry(a: &Session, b: &Session) -> bool {
+    a.secret_backend == SecretBackend::Keyring
+        && b.secret_backend == SecretBackend::Keyring
+        && keyring_account(&a.base_url, a.username.as_deref())
+            == keyring_account(&b.base_url, b.username.as_deref())
 }
 
 fn keyring_account(base_url: &str, username: Option<&str>) -> String {

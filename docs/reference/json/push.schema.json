@@ -77,6 +77,11 @@
           "description": "Work push refused: unresolved conflicts, tampered frontmatter, a stale base, or a local deletion (of a page or an attachment) without --allow-delete.",
           "items": { "$ref": "#/$defs/blocked_page" }
         },
+        "cross_space": {
+          "type": "array",
+          "description": "The pages among `skipped` whose `parent_id` names a page in another space: a move between spaces, which only `confed instance mv` makes. Non-empty means exit 7. Absent when empty.",
+          "items": { "$ref": "#/$defs/blocked_page" }
+        },
         "failed": {
           "type": "array",
           "description": "Pages the server rejected. Non-empty means exit 8.",

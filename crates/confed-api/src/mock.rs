@@ -55,6 +55,18 @@ struct MockState {
     /// Attachments, by filename, that cannot be downloaded.
     downloads_down: Vec<String>,
     spaces: HashMap<String, Space>,
+    /// The status every `move_page_to` answers with instead of moving, to
+    /// exercise a server that refuses (403), cannot find (404) or conflicts (409).
+    move_refusal: Option<u16>,
+    /// Whether the server lacks the move endpoint altogether.
+    move_unsupported: bool,
+    /// Whether a cross-space move fixes the page links that point at the
+    /// moved pages, the way Confluence's link refactoring would.
+    refactor_links_on_move: bool,
+    /// Restricted operations, by page.
+    restrictions: HashMap<String, Vec<String>>,
+    /// Operations the signed-in user may not perform, by page.
+    denied: HashMap<String, Vec<String>>,
     /// Every mutating call recorded, so tests can assert "--dry-run wrote nothing".
     calls: Vec<String>,
 }
@@ -84,6 +96,7 @@ impl MockClient {
                 name: "Documentation".into(),
                 kind: Some("global".into()),
                 homepage_id: None,
+                status: Some("current".into()),
             },
         );
         Self {
@@ -147,10 +160,98 @@ impl MockClient {
         parent: Option<&str>,
         body_storage: &str,
     ) -> PageId {
+        self.seed_page_in("DOCS", id, title, parent, body_storage)
+    }
+
+    /// Add a space beside `DOCS`, with its home page if it has one.
+    pub fn seed_space(&self, key: &str, name: &str, kind: &str, homepage: Option<&str>) {
+        let numeric = (2000 + self.state.lock().expect("mock poisoned").spaces.len()).to_string();
+        self.state.lock().expect("mock poisoned").spaces.insert(
+            key.to_string(),
+            Space {
+                id: SpaceId { key: key.into(), numeric: Some(numeric) },
+                name: name.into(),
+                kind: Some(kind.into()),
+                homepage_id: homepage.map(PageId::new),
+                status: Some("current".into()),
+            },
+        );
+    }
+
+    /// Archive a space, as an administrator would.
+    pub fn archive_space(&self, key: &str) {
+        if let Some(space) = self.state.lock().expect("mock poisoned").spaces.get_mut(key) {
+            space.status = Some("archived".into());
+        }
+    }
+
+    /// Make a seeded page the home page of its space.
+    pub fn set_homepage(&self, key: &str, page_id: &str) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        if let Some(space) = state.spaces.get_mut(key) {
+            space.homepage_id = Some(PageId::new(page_id));
+        }
+    }
+
+    /// The space a page is in now.
+    pub fn page_space(&self, id: &str) -> Option<String> {
+        self.state.lock().expect("mock poisoned").pages.get(id).map(|p| p.summary.space_key.clone())
+    }
+
+    pub fn page_parent(&self, id: &str) -> Option<String> {
+        let state = self.state.lock().expect("mock poisoned");
+        state.pages.get(id).and_then(|p| p.summary.parent_id.as_ref().map(|p| p.0.clone()))
+    }
+
+    /// Make every move answer with this HTTP status instead, or move again.
+    pub fn refuse_moves(&self, status: Option<u16>) {
+        self.state.lock().expect("mock poisoned").move_refusal = status;
+    }
+
+    /// Make the server one without the move endpoint.
+    pub fn without_move_endpoint(&self, missing: bool) {
+        self.state.lock().expect("mock poisoned").move_unsupported = missing;
+    }
+
+    /// Make a cross-space move fix the links to the pages it moves, as a
+    /// new version of each page it changes.
+    pub fn refactor_links_on_move(&self, refactor: bool) {
+        self.state.lock().expect("mock poisoned").refactor_links_on_move = refactor;
+    }
+
+    /// Restrict operations on a page to somebody.
+    pub fn restrict_page(&self, id: &str, operations: &[&str]) {
+        self.state
+            .lock()
+            .expect("mock poisoned")
+            .restrictions
+            .insert(id.to_string(), operations.iter().map(|o| o.to_string()).collect());
+    }
+
+    /// Take an operation away from the signed-in user on one page.
+    pub fn deny(&self, id: &str, operation: &str) {
+        self.state
+            .lock()
+            .expect("mock poisoned")
+            .denied
+            .entry(id.to_string())
+            .or_default()
+            .push(operation.to_string());
+    }
+
+    /// Seed a page into a given space.
+    pub fn seed_page_in(
+        &self,
+        space: &str,
+        id: &str,
+        title: &str,
+        parent: Option<&str>,
+        body_storage: &str,
+    ) -> PageId {
         let summary = PageSummary {
             id: PageId::new(id),
             title: title.to_string(),
-            space_key: "DOCS".into(),
+            space_key: space.into(),
             parent_id: parent.map(PageId::new),
             position: None,
             version: 1,
@@ -429,6 +530,68 @@ impl MockClient {
     }
 }
 
+/// What Confluence's link refactoring does to the pages around a move
+/// between spaces, as far as confed relies on it: a link by title that
+/// resolved in the old space keeps resolving. Each page it changes gets a new
+/// version, attributed to nobody in particular.
+fn refactor_links(
+    state: &mut MockState,
+    moved: &[String],
+    titles: &[String],
+    old_space: &str,
+    new_space: &str,
+) {
+    for page in state.pages.values_mut().filter(|p| !p.deleted) {
+        let own = page.summary.space_key.clone();
+        let was_moved = moved.contains(&page.summary.id.0);
+        let mut body = page.body.clone();
+        for title in titles {
+            let bare = format!(r#"<ri:page ri:content-title="{title}""#);
+            let in_old =
+                format!(r#"<ri:page ri:space-key="{old_space}" ri:content-title="{title}""#);
+            let in_new =
+                format!(r#"<ri:page ri:space-key="{new_space}" ri:content-title="{title}""#);
+            // Links without a key from pages left behind meant the old space.
+            if !was_moved && own == old_space {
+                body = body.replace(&bare, &in_new);
+            }
+            body = body.replace(&in_old, &in_new);
+        }
+        if was_moved {
+            // Links without a key from a moved page to a page left behind.
+            let others: Vec<String> = titles.to_vec();
+            let mut rebuilt = String::new();
+            let mut rest = body.as_str();
+            while let Some(at) = rest.find(r#"<ri:page ri:content-title=""#) {
+                rebuilt.push_str(&rest[..at]);
+                let after = &rest[at + r#"<ri:page ri:content-title=""#.len()..];
+                let title = after.split('"').next().unwrap_or_default();
+                if others.iter().any(|t| t == title) {
+                    rebuilt.push_str(r#"<ri:page ri:content-title=""#);
+                } else {
+                    rebuilt.push_str(&format!(
+                        r#"<ri:page ri:space-key="{old_space}" ri:content-title=""#
+                    ));
+                }
+                rest = after;
+            }
+            rebuilt.push_str(rest);
+            body = rebuilt;
+        }
+        if body != page.body {
+            page.summary.version += 1;
+            page.body = body.clone();
+            page.bodies.insert(page.summary.version, body);
+            page.history.push(VersionInfo {
+                number: page.summary.version,
+                author: Some("Confluence".into()),
+                when: Some("2026-08-16T00:00:00Z".into()),
+                message: Some("links updated after a move".into()),
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl ConfluenceClient for MockClient {
     fn capabilities(&self) -> &Capabilities {
@@ -484,13 +647,35 @@ impl ConfluenceClient for MockClient {
     }
 
     async fn list_spaces(&self, _limit: Option<usize>) -> ApiResult<Vec<Space>> {
-        Ok(self.state.lock().expect("mock poisoned").spaces.values().cloned().collect())
+        let state = self.state.lock().expect("mock poisoned");
+        let mut spaces: Vec<Space> = state
+            .spaces
+            .values()
+            .filter(|s| s.status.as_deref() != Some("archived"))
+            .cloned()
+            .collect();
+        spaces.sort_by(|a, b| a.id.key.cmp(&b.id.key));
+        Ok(spaces)
     }
 
-    async fn list_pages(&self, _space: &SpaceId) -> ApiResult<Vec<PageSummary>> {
+    async fn list_archived_spaces(&self) -> ApiResult<Vec<Space>> {
         let state = self.state.lock().expect("mock poisoned");
-        let mut pages: Vec<_> =
-            state.pages.values().filter(|p| !p.deleted).map(|p| p.summary.clone()).collect();
+        Ok(state
+            .spaces
+            .values()
+            .filter(|s| s.status.as_deref() == Some("archived"))
+            .cloned()
+            .collect())
+    }
+
+    async fn list_pages(&self, space: &SpaceId) -> ApiResult<Vec<PageSummary>> {
+        let state = self.state.lock().expect("mock poisoned");
+        let mut pages: Vec<_> = state
+            .pages
+            .values()
+            .filter(|p| !p.deleted && p.summary.space_key == space.key)
+            .map(|p| p.summary.clone())
+            .collect();
         pages.sort_by(|a, b| a.id.0.cmp(&b.id.0));
         Ok(pages)
     }
@@ -601,6 +786,100 @@ impl ConfluenceClient for MockClient {
             .ok_or_else(|| ApiError::NotFound(format!("page {id}")))?;
         page.summary.parent_id = Some(new_parent.clone());
         Ok(())
+    }
+
+    async fn move_page_to(
+        &self,
+        id: &PageId,
+        position: MovePosition,
+        target: &PageId,
+    ) -> ApiResult<()> {
+        let mut state = self.state.lock().expect("mock poisoned");
+        if state.move_unsupported {
+            return Err(ApiError::unsupported(self.capabilities.flavor, "move a page"));
+        }
+        if let Some(status) = state.move_refusal {
+            let body = format!(r#"{{"statusCode":{status},"message":"refused"}}"#);
+            return Err(ApiError::from_status(status, body, &format!("PUT move {id}")));
+        }
+        let live = |state: &MockState, id: &str| state.pages.get(id).is_some_and(|p| !p.deleted);
+        if !live(&state, id.as_str()) {
+            return Err(ApiError::NotFound(format!("page {id}")));
+        }
+        if !live(&state, target.as_str()) {
+            return Err(ApiError::NotFound(format!("page {target}")));
+        }
+        let parent_of = |state: &MockState, id: &str| {
+            state.pages.get(id).and_then(|p| p.summary.parent_id.as_ref().map(|p| p.0.clone()))
+        };
+        // A page cannot go under itself.
+        let mut cursor = Some(target.0.clone());
+        while let Some(at) = cursor {
+            if at == id.0 {
+                return Err(ApiError::Server {
+                    status: 400,
+                    body: "a page cannot be moved under itself".into(),
+                });
+            }
+            cursor = parent_of(&state, &at);
+        }
+        let new_parent = match position {
+            MovePosition::Append => Some(target.0.clone()),
+            MovePosition::Before | MovePosition::After => parent_of(&state, target.as_str()),
+        };
+        let new_space = state.pages[target.as_str()].summary.space_key.clone();
+        let old_space = state.pages[id.as_str()].summary.space_key.clone();
+
+        // The page and everything under it.
+        let mut moved = vec![id.0.clone()];
+        let mut index = 0;
+        while index < moved.len() {
+            let parent = moved[index].clone();
+            let children: Vec<String> = state
+                .pages
+                .values()
+                .filter(|p| p.summary.parent_id.as_ref().map(|p| p.0.as_str()) == Some(&parent))
+                .map(|p| p.summary.id.0.clone())
+                .collect();
+            moved.extend(children);
+            index += 1;
+        }
+        let titles: Vec<String> =
+            moved.iter().map(|m| state.pages[m.as_str()].summary.title.clone()).collect();
+        for page_id in &moved {
+            let page = state.pages.get_mut(page_id.as_str()).expect("listed above");
+            page.summary.space_key = new_space.clone();
+        }
+        state.pages.get_mut(id.as_str()).expect("checked").summary.parent_id =
+            new_parent.map(PageId::new);
+        state.calls.push(format!("move_page_to:{id}:{}:{target}", position.as_str()));
+
+        if state.refactor_links_on_move && old_space != new_space {
+            refactor_links(&mut state, &moved, &titles, &old_space, &new_space);
+        }
+        Ok(())
+    }
+
+    async fn probe_move(&self) -> ApiResult<Probe> {
+        let state = self.state.lock().expect("mock poisoned");
+        Ok(if state.move_unsupported { Probe::Unavailable } else { Probe::Available })
+    }
+
+    async fn page_restrictions(&self, id: &PageId) -> ApiResult<Vec<String>> {
+        let state = self.state.lock().expect("mock poisoned");
+        Ok(state.restrictions.get(id.as_str()).cloned().unwrap_or_default())
+    }
+
+    async fn page_operations(&self, id: &PageId) -> ApiResult<Option<Vec<String>>> {
+        let state = self.state.lock().expect("mock poisoned");
+        let denied = state.denied.get(id.as_str()).cloned().unwrap_or_default();
+        Ok(Some(
+            ["create", "delete", "read", "update"]
+                .iter()
+                .filter(|op| !denied.iter().any(|d| d == *op))
+                .map(|op| op.to_string())
+                .collect(),
+        ))
     }
 
     async fn get_labels(&self, id: &PageId) -> ApiResult<Vec<String>> {

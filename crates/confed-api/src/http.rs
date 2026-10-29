@@ -169,6 +169,18 @@ impl Http {
         })
     }
 
+    /// Draw request permits from `limit` instead of a semaphore of its own, so
+    /// that several clients — one per credential — share one ceiling.
+    pub fn with_limit(mut self, limit: Arc<Semaphore>) -> Self {
+        self.sem = limit;
+        self
+    }
+
+    /// The semaphore that caps this client's requests in flight.
+    pub fn limit(&self) -> Arc<Semaphore> {
+        self.sem.clone()
+    }
+
     pub fn with_policy(mut self, policy: RetryPolicy) -> Self {
         self.policy = policy;
         self

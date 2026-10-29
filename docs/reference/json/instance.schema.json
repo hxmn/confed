@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/instance.schema.json",
+  "title": "confed instance result",
+  "description": "The `result` of every `confed instance … --json` command. `action` names the subcommand. Commands that run in several spaces (status, fetch, pull, push, doctor, clone) put one entry per space in `spaces`; `mv` and `resume` describe the move.",
+  "type": "object",
+  "required": ["action"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["init", "adopt", "spaces", "clone", "add", "remove", "status", "fetch", "pull", "push", "doctor", "mv", "search", "resume", "abort"]
+    },
+    "spaces": {
+      "type": "array",
+      "description": "One entry per space, ordered by key. For status, fetch, pull, push and doctor, `result` is exactly that command's own result in that workspace, as described by its schema. `instance spaces` lists rows of its table here instead.",
+      "items": { "$ref": "#/$defs/space" }
+    },
+    "instance": {
+      "type": "object",
+      "description": "`doctor`: the checks that span spaces (registration, pages tracked twice, unfinished moves, pages in another space on the server), as doctor.schema.json describes checks."
+    },
+    "journal_id": {
+      "type": ["string", "null"],
+      "description": "`mv`, `resume`: the journal entry of the move; what `confed instance resume` and `abort` take."
+    },
+    "moved": {
+      "type": "array",
+      "description": "`mv`, `resume`: every page of the moved subtree, parent first. Before the move (a dry run) `version` is null.",
+      "items": {
+        "type": "object",
+        "required": ["page_id", "from", "to"],
+        "properties": {
+          "page_id": { "type": ["string", "null"], "description": "Unchanged by the move. Null for a file that was never pushed, moved as a file." },
+          "title": { "type": "string" },
+          "from": { "$ref": "#/$defs/location" },
+          "to": { "$ref": "#/$defs/location" },
+          "version": { "type": ["integer", "null"], "minimum": 1 }
+        }
+      }
+    },
+    "links_rewritten": {
+      "type": "array",
+      "description": "`mv`, `resume`: pages whose links confed rewrote on the server, each as one new version.",
+      "items": {
+        "type": "object",
+        "required": ["page_id", "space", "count"],
+        "properties": {
+          "page_id": { "type": "string" },
+          "space": { "type": "string" },
+          "count": { "type": "integer", "minimum": 1 },
+          "version": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "links_by_server": {
+      "type": "array",
+      "description": "`mv`, `resume`: pages whose links the server had already fixed itself.",
+      "items": { "type": "string" }
+    },
+    "warnings": {
+      "type": "array",
+      "description": "`mv`, `resume`: restrictions that move with the pages, a rules page in the subtree, links the server updated. Also in the envelope's `warnings`.",
+      "items": { "type": "string" }
+    },
+    "dry_run": { "type": "boolean" }
+  },
+  "$defs": {
+    "location": {
+      "type": "object",
+      "required": ["space", "path"],
+      "properties": {
+        "space": { "type": "string" },
+        "path": { "type": "string", "description": "Relative to that space's workspace." }
+      }
+    },
+    "space": {
+      "type": "object",
+      "required": ["space_key", "dir"],
+      "properties": {
+        "space_key": { "type": "string" },
+        "dir": { "type": "string", "description": "The workspace, relative to the instance root." },
+        "ok": { "type": "boolean", "description": "True for exit codes 0 and 10." },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "status": {
+          "type": "string",
+          "description": "`clone` only: what became of the space.",
+          "enum": ["cloned", "skipped", "failed", "would_clone", "would_reinit"]
+        },
+        "result": { "type": "object", "description": "The single-space command's own result." },
+        "errors": {
+          "type": "array",
+          "description": "Why the space failed; also in the envelope's `errors`, prefixed with the key.",
+          "items": {
+            "type": "object",
+            "required": ["code", "message"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "hint": { "type": "string" }
+            }
+          }
+        },
+        "warnings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

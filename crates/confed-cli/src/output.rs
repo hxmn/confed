@@ -20,11 +20,25 @@ pub struct Output {
     pub human: String,
     pub exit: ExitCode,
     pub warnings: Vec<String>,
+    /// Failures that did not stop the command: the spaces an instance
+    /// command could not do, each one entry, alongside what it did do.
+    pub errors: Vec<ErrorEntry>,
 }
 
 impl Output {
     pub fn new(result: Value, human: impl Into<String>) -> Self {
-        Self { result, human: human.into(), exit: ExitCode::Ok, warnings: Vec::new() }
+        Self {
+            result,
+            human: human.into(),
+            exit: ExitCode::Ok,
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn with_errors(mut self, errors: Vec<ErrorEntry>) -> Self {
+        self.errors = errors;
+        self
     }
 
     #[allow(dead_code)]
@@ -54,12 +68,28 @@ impl Output {
     }
 }
 
-#[derive(Serialize)]
-struct ErrorEntry {
-    code: &'static str,
-    message: String,
+#[derive(Clone, Debug, Serialize)]
+pub struct ErrorEntry {
+    pub code: &'static str,
+    pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    hint: Option<String>,
+    pub hint: Option<String>,
+}
+
+impl ErrorEntry {
+    pub fn from_error(error: &ConfedError) -> Self {
+        Self {
+            code: error.code(),
+            message: error.to_string(),
+            hint: error.hint().map(str::to_string),
+        }
+    }
+
+    /// The same failure, said of one space.
+    pub fn in_space(mut self, space: &str) -> Self {
+        self.message = format!("{space}: {}", self.message);
+        self
+    }
 }
 
 /// Print a successful command's output in the requested format.
@@ -75,7 +105,7 @@ pub fn emit(command: &str, output: &Output, json_mode: bool, duration_ms: u128) 
                 "duration_ms": duration_ms,
             },
             "result": output.result,
-            "errors": Vec::<ErrorEntry>::new(),
+            "errors": output.errors,
             "warnings": output.warnings,
         });
         println!("{}", serde_json::to_string_pretty(&envelope).unwrap_or_default());
@@ -89,15 +119,17 @@ pub fn emit(command: &str, output: &Output, json_mode: bool, duration_ms: u128) 
     for warning in &output.warnings {
         let _ = writeln!(stderr, "warning: {warning}");
     }
+    for error in &output.errors {
+        let _ = writeln!(stderr, "error: {}", error.message);
+        if let Some(hint) = &error.hint {
+            let _ = writeln!(stderr, "hint: {hint}");
+        }
+    }
 }
 
 /// Print a failed command in the requested format.
 pub fn emit_error(command: &str, error: &ConfedError, json_mode: bool, duration_ms: u128) {
-    let entry = ErrorEntry {
-        code: error.code(),
-        message: error.to_string(),
-        hint: error.hint().map(str::to_string),
-    };
+    let entry = ErrorEntry::from_error(error);
 
     if json_mode {
         let envelope = json!({

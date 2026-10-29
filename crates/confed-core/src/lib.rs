@@ -9,8 +9,10 @@
 pub mod attachments;
 pub mod comments;
 pub mod config;
+pub mod crossmove;
 pub mod error;
 pub mod frontmatter;
+pub mod instance;
 pub mod lock;
 pub mod merge;
 pub mod pagestore;

@@ -61,6 +61,7 @@
             "mkdocs",
             "version",
             "completion",
+            "instance",
             "tui"
           ]
         },
@@ -89,7 +90,7 @@
     },
     "errors": {
       "type": "array",
-      "description": "Empty on success. At most one entry today: confed stops at the first fatal error.",
+      "description": "Empty on success. A single-space command stops at its first fatal error, so it has at most one entry. A `confed instance` command that runs in several spaces has one entry per space that failed, its message prefixed with the space key, alongside a `result` describing every space.",
       "items": {
         "$ref": "#/$defs/error"
       }

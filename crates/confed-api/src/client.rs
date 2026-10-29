@@ -39,6 +39,11 @@ pub trait ConfluenceClient: Send + Sync {
     async fn get_space(&self, key: &str) -> ApiResult<Space>;
     async fn list_spaces(&self, limit: Option<usize>) -> ApiResult<Vec<Space>>;
 
+    /// The archived spaces, which [`Self::list_spaces`] leaves out.
+    async fn list_archived_spaces(&self) -> ApiResult<Vec<Space>> {
+        Ok(Vec::new())
+    }
+
     /// Every page in the space, bodies excluded.
     async fn list_pages(&self, space: &SpaceId) -> ApiResult<Vec<PageSummary>>;
 
@@ -54,6 +59,41 @@ pub trait ConfluenceClient: Send + Sync {
         new_parent: &PageId,
         position: Position,
     ) -> ApiResult<()>;
+
+    /// Move a page, and with it every page under it, relative to `target`,
+    /// which may be in another space: the page then belongs to the target's
+    /// space. Ids, versions, history, comments, attachments and labels stay
+    /// with the pages. This is the dedicated move endpoint
+    /// (`PUT rest/api/content/{id}/move/{position}/{target}`), never a copy.
+    async fn move_page_to(
+        &self,
+        id: &PageId,
+        position: MovePosition,
+        target: &PageId,
+    ) -> ApiResult<()> {
+        let _ = (id, position, target);
+        Err(crate::error::ApiError::unsupported(self.flavor(), "move a page to another space"))
+    }
+
+    /// Whether the server has the move endpoint [`Self::move_page_to`] uses,
+    /// asked without moving anything.
+    async fn probe_move(&self) -> ApiResult<Probe> {
+        Ok(Probe::Unknown)
+    }
+
+    /// The operations (`read`, `update`) a page restricts to named people or
+    /// groups. Empty when it has no restrictions of its own.
+    async fn page_restrictions(&self, id: &PageId) -> ApiResult<Vec<String>> {
+        let _ = id;
+        Ok(Vec::new())
+    }
+
+    /// What the signed-in user may do with a page (`read`, `update`, `delete`,
+    /// `create`…), or `None` when the server does not say.
+    async fn page_operations(&self, id: &PageId) -> ApiResult<Option<Vec<String>>> {
+        let _ = id;
+        Ok(None)
+    }
 
     async fn get_labels(&self, id: &PageId) -> ApiResult<Vec<String>>;
     async fn add_label(&self, id: &PageId, label: &str) -> ApiResult<()>;

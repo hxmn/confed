@@ -1366,3 +1366,120 @@ async fn an_attachment_search_that_fails_is_an_error_not_an_empty_answer() {
         .unwrap_err();
     assert!(matches!(err, ApiError::Server { status: 400, .. }), "got {err:?}");
 }
+
+// ------------------------------------------------- moves between spaces ---
+
+#[tokio::test]
+async fn a_move_to_another_space_uses_the_move_endpoint_for_every_position() {
+    use confed_api::MovePosition;
+    let server = MockServer::start().await;
+    for position in ["append", "before", "after"] {
+        Mock::given(method("PUT"))
+            .and(path(format!("/confluence/rest/api/content/1002/move/{position}/2002")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "pageId": "1002" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let c = client(&server);
+    for position in [MovePosition::Append, MovePosition::Before, MovePosition::After] {
+        c.move_page_to(&PageId::new("1002"), position, &PageId::new("2002")).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_refused_move_keeps_its_meaning() {
+    use confed_api::{ApiError, MovePosition};
+    for (status, check) in [
+        (
+            403,
+            (|e: &ApiError| matches!(e, ApiError::Auth(m) if m.contains("403")))
+                as fn(&ApiError) -> bool,
+        ),
+        (404, |e: &ApiError| matches!(e, ApiError::NotFound(_))),
+        (405, |e: &ApiError| matches!(e, ApiError::Unsupported { .. })),
+        (409, |e: &ApiError| matches!(e, ApiError::Conflict(_))),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/confluence/rest/api/content/1002/move/append/2002"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({
+                "statusCode": status, "message": "refused"
+            })))
+            .mount(&server)
+            .await;
+        let err = client(&server)
+            .move_page_to(&PageId::new("1002"), MovePosition::Append, &PageId::new("2002"))
+            .await
+            .unwrap_err();
+        assert!(check(&err), "{status}: {err:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_move_probe_tells_a_server_with_the_endpoint_from_one_without() {
+    use confed_api::Probe;
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/confluence/rest/api/content/0/move/append/0"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "statusCode": 404, "message": "No content found with id: ContentId{id=0}"
+        })))
+        .mount(&server)
+        .await;
+    assert_eq!(client(&server).probe_move().await.unwrap(), Probe::Available);
+
+    let without = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("<html>Not Found</html>"))
+        .mount(&without)
+        .await;
+    assert_eq!(client(&without).probe_move().await.unwrap(), Probe::Unavailable);
+
+    let refusing = MockServer::start().await;
+    Mock::given(method("PUT")).respond_with(ResponseTemplate::new(405)).mount(&refusing).await;
+    assert_eq!(client(&refusing).probe_move().await.unwrap(), Probe::Unavailable);
+}
+
+#[tokio::test]
+async fn restrictions_operations_and_archived_spaces_are_read() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/1002/restriction/byOperation"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "read": { "operation": "read", "restrictions": {
+                "user": { "results": [{ "type": "known", "username": "alice" }], "size": 1 },
+                "group": { "results": [], "size": 0 } } },
+            "update": { "operation": "update", "restrictions": {
+                "user": { "results": [], "size": 0 }, "group": { "results": [], "size": 0 } } }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/1002"))
+        .and(query_param("expand", "operations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1002", "operations": [
+                { "operation": "read", "targetType": "page" },
+                { "operation": "update", "targetType": "page" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/space"))
+        .and(query_param("status", "archived"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{ "id": 9, "key": "OLD", "name": "Old Projects", "type": "global" }],
+            "start": 0, "limit": 100, "size": 1, "_links": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    assert_eq!(c.page_restrictions(&PageId::new("1002")).await.unwrap(), ["read"]);
+    assert_eq!(c.page_operations(&PageId::new("1002")).await.unwrap().unwrap(), ["read", "update"]);
+    let archived = c.list_archived_spaces().await.unwrap();
+    assert_eq!(archived[0].id.key, "OLD");
+    assert_eq!(archived[0].status.as_deref(), Some("archived"));
+}

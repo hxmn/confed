@@ -135,6 +135,9 @@ pub struct Space {
     pub name: String,
     pub kind: Option<String>,
     pub homepage_id: Option<PageId>,
+    /// `current` or `archived`, when the server says.
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// How a page's markup identifies a person. Which one appears depends on the
@@ -264,6 +267,49 @@ pub enum Position {
     Append,
     Before(u64),
     After(u64),
+}
+
+/// Where [`crate::ConfluenceClient::move_page_to`] puts a page, relative to its
+/// target: as the target's last child, or as its sibling before or after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MovePosition {
+    Append,
+    Before,
+    After,
+}
+
+impl MovePosition {
+    /// The path segment the move endpoint takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MovePosition::Append => "append",
+            MovePosition::Before => "before",
+            MovePosition::After => "after",
+        }
+    }
+}
+
+/// What a capability probe found out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Probe {
+    /// The server answered the way a server with the API does.
+    Available,
+    /// The server answered the way a server without the API does.
+    Unavailable,
+    /// The answer said neither: a proxy, an outage, or an unfamiliar server.
+    Unknown,
+}
+
+impl Probe {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Probe::Available => "available",
+            Probe::Unavailable => "unavailable",
+            Probe::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

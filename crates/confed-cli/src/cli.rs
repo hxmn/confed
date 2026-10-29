@@ -45,9 +45,11 @@ pub struct GlobalArgs {
     #[arg(long = "user", global = true, env = "CONFED_USERNAME")]
     pub username: Option<String>,
 
-    /// Space key bound to this directory.
-    #[arg(long, global = true, env = "CONFED_SPACE")]
-    pub space: Option<String>,
+    /// Space key bound to this directory. `confed instance` commands take
+    /// several (repeat it, or separate keys with commas) to limit themselves
+    /// to those spaces.
+    #[arg(long, global = true, env = "CONFED_SPACE", value_name = "KEY", value_delimiter = ',')]
+    pub space: Vec<String>,
 
     /// Skip flavor auto-detection.
     #[arg(long, global = true, env = "CONFED_FLAVOR", value_parser = ["cloud", "dc", "datacenter"])]
@@ -83,6 +85,11 @@ pub struct GlobalArgs {
 }
 
 impl GlobalArgs {
+    /// The `--space` a single-space command takes: the last one given.
+    pub fn space_flag(&self) -> Option<&str> {
+        self.space.last().map(String::as_str)
+    }
+
     /// Prompting is possible only on a terminal, and never in machine modes.
     pub fn interactive(&self) -> bool {
         use std::io::IsTerminal;
@@ -169,6 +176,12 @@ pub enum Command {
     /// Generate a shell completion script.
     Completion(CompletionArgs),
 
+    /// Manage an instance root: one workspace per space of one Confluence,
+    /// with a shared credential, commands that run across every space, and
+    /// moves between spaces.
+    #[command(subcommand, visible_alias = "i")]
+    Instance(InstanceCommand),
+
     /// Browse the space, diff, resolve conflicts and sync, interactively.
     Tui,
 }
@@ -202,6 +215,7 @@ impl Command {
             Command::Mkdocs(_) => "mkdocs",
             Command::Version(_) => "version",
             Command::Completion(_) => "completion",
+            Command::Instance(_) => "instance",
             Command::Tui => "tui",
         }
     }
@@ -714,6 +728,346 @@ pub struct VersionArgs {
     pub since: Option<String>,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum InstanceCommand {
+    /// Create an instance root and authenticate once, for every space in it.
+    Init(InstanceInitArgs),
+
+    /// Make the folder holding your workspaces an instance root: register
+    /// them, and optionally share one credential between them.
+    Adopt(InstanceAdoptArgs),
+
+    /// The registered workspaces, and with --remote the server's spaces
+    /// beside them.
+    Spaces(InstanceSpacesArgs),
+
+    /// Clone the spaces that are not cloned yet, in parallel, into ROOT/KEY.
+    Clone(InstanceCloneArgs),
+
+    /// Register one space's workspace.
+    Add(InstanceAddArgs),
+
+    /// Unregister one space. Its files stay unless --delete-files.
+    Remove(InstanceRemoveArgs),
+
+    /// `status` in every registered space.
+    Status(InstanceStatusArgs),
+
+    /// `fetch` in every registered space.
+    Fetch(InstanceFetchArgs),
+
+    /// `pull` in every registered space.
+    Pull(InstancePullArgs),
+
+    /// `push` in every registered space, after showing all of it.
+    Push(InstancePushArgs),
+
+    /// `doctor` in every registered space, and the checks that span them.
+    Doctor(InstanceDoctorArgs),
+
+    /// Move a page, with the pages under it, to another space.
+    Mv(InstanceMvArgs),
+
+    /// Search every registered space with CQL or plain text.
+    Search(InstanceSearchArgs),
+
+    /// Finish a move between spaces that was interrupted.
+    Resume(InstanceJournalArgs),
+
+    /// Roll back a move between spaces that stopped before the server moved
+    /// anything.
+    Abort(InstanceJournalArgs),
+}
+
+impl InstanceCommand {
+    pub fn name(&self) -> &'static str {
+        match self {
+            InstanceCommand::Init(_) => "init",
+            InstanceCommand::Adopt(_) => "adopt",
+            InstanceCommand::Spaces(_) => "spaces",
+            InstanceCommand::Clone(_) => "clone",
+            InstanceCommand::Add(_) => "add",
+            InstanceCommand::Remove(_) => "remove",
+            InstanceCommand::Status(_) => "status",
+            InstanceCommand::Fetch(_) => "fetch",
+            InstanceCommand::Pull(_) => "pull",
+            InstanceCommand::Push(_) => "push",
+            InstanceCommand::Doctor(_) => "doctor",
+            InstanceCommand::Mv(_) => "mv",
+            InstanceCommand::Search(_) => "search",
+            InstanceCommand::Resume(_) => "resume",
+            InstanceCommand::Abort(_) => "abort",
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceInitArgs {
+    /// The root to create (defaults to the current directory).
+    #[arg(value_name = "DIR")]
+    pub root: Option<PathBuf>,
+
+    /// Where to store the shared credential.
+    #[arg(long, value_parser = ["keyring", "sqlite"])]
+    pub credential_store: Option<String>,
+
+    /// Do not generate CLAUDE.md and AGENTS.md.
+    #[arg(long)]
+    pub no_agent_docs: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceAdoptArgs {
+    /// Workspaces to register, below the current directory (default: every
+    /// workspace directly inside it).
+    #[arg(value_name = "DIR")]
+    pub dirs: Vec<PathBuf>,
+
+    /// Keep one credential in the root for every workspace, after checking it
+    /// works, and remove each workspace's own.
+    #[arg(long)]
+    pub move_credentials: bool,
+
+    /// Where to store the shared credential [default: where the first
+    /// workspace keeps its own].
+    #[arg(long, value_parser = ["keyring", "sqlite"])]
+    pub credential_store: Option<String>,
+
+    /// Report what would be registered and moved, changing nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Do not generate CLAUDE.md and AGENTS.md.
+    #[arg(long)]
+    pub no_agent_docs: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceSpacesArgs {
+    /// Also list the server's spaces, marking those not cloned.
+    #[arg(long)]
+    pub remote: bool,
+
+    /// With --remote: only spaces of this type.
+    #[arg(long = "type", value_name = "TYPE", value_parser = ["global", "personal"])]
+    pub space_type: Option<String>,
+
+    /// With --remote: only spaces with this status [default: current].
+    #[arg(long, value_parser = ["current", "archived"])]
+    pub status: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceCloneArgs {
+    /// Spaces to clone. Without any, --all is needed.
+    #[arg(value_name = "KEY", required_unless_present = "all")]
+    pub keys: Vec<String>,
+
+    /// Every space you can see, of --type.
+    #[arg(long, conflicts_with = "keys")]
+    pub all: bool,
+
+    /// Leave this space out. Repeatable.
+    #[arg(long, value_name = "KEY")]
+    pub exclude: Vec<String>,
+
+    /// With --all: which kind of space [default: global]. Personal spaces
+    /// (`~user`) are cloned into `@user`.
+    #[arg(long = "type", value_name = "TYPE", value_parser = ["global", "personal"])]
+    pub space_type: Option<String>,
+
+    /// With --all: archived spaces too.
+    #[arg(long)]
+    pub include_archived: bool,
+
+    /// Initialize a space again even when it is already cloned.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Report what would be cloned, changing nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Do not generate CLAUDE.md and AGENTS.md in the new workspaces.
+    #[arg(long)]
+    pub no_agent_docs: bool,
+
+    /// Skip downloading attachments.
+    #[arg(long)]
+    pub no_attachments: bool,
+
+    /// Skip writing comment sidecars.
+    #[arg(long)]
+    pub no_comments: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceAddArgs {
+    /// The space key.
+    pub key: String,
+
+    /// Its workspace, relative to the root [default: the key, or @user for
+    /// a personal space].
+    #[arg(value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceRemoveArgs {
+    pub key: String,
+
+    /// Delete the workspace's files too. Refused while it has local changes.
+    #[arg(long)]
+    pub delete_files: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceStatusArgs {
+    /// Refresh remote state first.
+    #[arg(long)]
+    pub fetch: bool,
+
+    /// Exit 10 when anything differs in any space.
+    #[arg(long)]
+    pub exit_code: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceFetchArgs {
+    /// Only pages modified at or after this RFC 3339 timestamp.
+    #[arg(long)]
+    pub since: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct InstancePullArgs {
+    /// Use the state already fetched.
+    #[arg(long)]
+    pub no_fetch: bool,
+
+    /// Do not merge diverged pages; stop instead.
+    #[arg(long)]
+    pub no_merge: bool,
+
+    /// Report what would be written without writing it.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Skip downloading attachments.
+    #[arg(long)]
+    pub no_attachments: bool,
+
+    /// Skip writing comment sidecars.
+    #[arg(long)]
+    pub no_comments: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstancePushArgs {
+    /// Version comment recorded on the server. Required.
+    #[arg(long, short = 'm')]
+    pub message: Option<String>,
+
+    /// Show what every space would send, without sending it.
+    #[arg(long, visible_alias = "preview")]
+    pub dry_run: bool,
+
+    /// Delete pages on the server that were deleted locally.
+    #[arg(long)]
+    pub allow_delete: bool,
+
+    /// Do not upload attachments.
+    #[arg(long)]
+    pub no_attachments: bool,
+
+    /// Do not post comment drafts.
+    #[arg(long)]
+    pub no_comments: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceDoctorArgs {
+    /// Apply the safe fixes (.gitignore, agent docs) in the root and every space.
+    #[arg(long)]
+    pub fix: bool,
+
+    /// Skip the checks that ask the server where each page is.
+    #[arg(long)]
+    pub offline: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceMvArgs {
+    /// The page to move: a path from here, KEY:path, or a page id.
+    pub source: String,
+
+    /// Where to: an existing page (it becomes the parent), `KEY:` for the top
+    /// of that space (under its home page), or a new path, which also
+    /// renames the page.
+    pub destination: String,
+
+    /// Place it before this page of the destination.
+    #[arg(long, conflicts_with_all = ["after", "position", "root"])]
+    pub before: Option<String>,
+
+    /// Place it after this page of the destination.
+    #[arg(long, conflicts_with_all = ["position", "root"])]
+    pub after: Option<String>,
+
+    /// Its position among its new siblings, from 0.
+    #[arg(long, conflicts_with = "root")]
+    pub position: Option<usize>,
+
+    /// With `KEY:`: a top-level page beside the home page, not under it.
+    #[arg(long)]
+    pub root: bool,
+
+    /// Check everything and print the plan, changing nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// A title the destination already has: `fail`, or `suffix` to append
+    /// " (KEY)", the source space's key.
+    #[arg(long, value_parser = ["fail", "suffix"], default_value = "fail")]
+    pub on_conflict: String,
+
+    /// New titles, as a JSON object keyed by page id or current title.
+    #[arg(long, value_name = "FILE", conflicts_with = "on_conflict")]
+    pub title_map: Option<PathBuf>,
+
+    /// Push the moved pages' local changes first (needs -m).
+    #[arg(long)]
+    pub push_first: bool,
+
+    /// Version comment for the pages the move edits on the server.
+    #[arg(long, short = 'm')]
+    pub message: Option<String>,
+
+    /// Leave links to the moved pages as they are on the server.
+    #[arg(long)]
+    pub no_rewrite_links: bool,
+
+    /// Drop the space key from a rewritten link that ends up in its own
+    /// space, so the next pull writes it as a file link.
+    #[arg(long)]
+    pub relativize: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceSearchArgs {
+    /// CQL query, or plain text.
+    pub query: Vec<String>,
+
+    #[arg(long, default_value = "25")]
+    pub limit: usize,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceJournalArgs {
+    /// The journal entry [default: the only unfinished one].
+    pub id: Option<String>,
+}
+
 #[derive(Args, Debug)]
 pub struct CompletionArgs {
     #[arg(value_parser = ["bash", "zsh", "fish", "powershell", "elvish"])]
@@ -734,7 +1088,7 @@ mod tests {
     fn global_flags_work_after_the_subcommand() {
         let cli = Cli::try_parse_from(["confed", "status", "--json", "--space", "DOCS"]).unwrap();
         assert!(cli.global.json);
-        assert_eq!(cli.global.space.as_deref(), Some("DOCS"));
+        assert_eq!(cli.global.space_flag(), Some("DOCS"));
         assert_eq!(cli.command.name(), "status");
     }
 
@@ -782,6 +1136,25 @@ mod tests {
         let cli = Cli::try_parse_from(["confed", "version", "--changelog", "--since", "0.1.0"]);
         assert!(cli.is_ok());
         assert!(Cli::try_parse_from(["confed", "version", "--since", "0.1.0"]).is_err());
+    }
+
+    #[test]
+    fn instance_commands_take_several_spaces_and_an_alias() {
+        let cli =
+            Cli::try_parse_from(["confed", "i", "status", "--space", "DOCS,ENG", "--space", "OPS"])
+                .unwrap();
+        assert_eq!(cli.global.space, ["DOCS", "ENG", "OPS"]);
+        assert_eq!(cli.command.name(), "instance");
+        let cli = Cli::try_parse_from(["confed", "instance", "mv", "DOCS:a.md", "ENG:", "--root"])
+            .unwrap();
+        match cli.command {
+            Command::Instance(InstanceCommand::Mv(args)) => {
+                assert_eq!(args.destination, "ENG:");
+                assert!(args.root);
+            }
+            other => panic!("expected instance mv, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["confed", "instance", "clone"]).is_err(), "keys or --all");
     }
 
     #[test]
