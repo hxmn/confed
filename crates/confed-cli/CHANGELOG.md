@@ -20,6 +20,32 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-30
+
+Verified against a live Data Center 9.5.4, in both directions, with resume after a
+`kill -9`:
+- moves keep page ids, the parent chain, versions, comments and inline markers,
+  attachments, labels and macro ids
+- the server fixes the links itself, in place and without new versions, and confed
+  reports them as `links_by_server`
+
+### Fixed
+
+- **A background move task is read the way Data Center's own dialog reads it.** Failed
+  as soon as `successful` is false, with the last message's text as the reason; done
+  when successful at `percentageComplete` 100. Nothing depends on a `finished` field,
+  which the server does not send. Polled at the dialog's pace.
+- **The dry run's warning about the Data Center web move** still said a page not where
+  it should be is exit 9. It now says what happens: confed follows the task, waits up
+  to `--wait`, and stops with exit 7 for `instance resume`.
+- **"The server changed N page(s) without a new version" named a page twice** when the
+  page was both moved and linked.
+
+### Added
+
+- `--log confed::http=debug` prints each web form confed sends, field by field, with
+  `atl_token` redacted, and each poll of a background task.
+
 ## [0.14.0] - 2026-10-29
 
 ### Fixed
@@ -989,7 +1015,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/hxmn/confed/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/hxmn/confed/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/hxmn/confed/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/hxmn/confed/compare/v0.11.0...v0.12.0

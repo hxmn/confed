@@ -1010,6 +1010,9 @@ every problem is listed together (exit 7, or 2 for bad arguments):
 and the pages whose links will change. A real run asks first, or takes `--yes`. Without
 a terminal it is exit 2.
 
+Placement: `append` under a parent whose children have never been reordered lands in
+title order, not last, because that is how Confluence orders siblings with no position.
+
 Links are judged by what exists. A link whose page does not exist is left alone and
 listed in `links_broken`, and a link that already reaches its page is not touched.
 Pages the server changed itself, which Data Center does without saving a new version,

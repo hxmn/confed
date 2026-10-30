@@ -619,8 +619,9 @@ pub async fn plan(
             plan.warnings.push(
                 "this Data Center has no REST move endpoint, so confed will move the pages \
                  through the web UI's move action (pages/movepage.action), which is not a \
-                 documented API; it reads the pages back afterwards and stops (exit 9) if they \
-                 are not where they should be"
+                 documented API; it follows the server's background task, then waits up to \
+                 --wait seconds for every page to show in the new space, and stops (exit 7, \
+                 for `confed instance resume`) if they have not"
                     .to_string(),
             );
             None
@@ -1515,7 +1516,10 @@ async fn settle(
         let space = if fix.moved { plan.dest.key.clone() } else { fix.space.clone() };
         scopes.entry(space).or_default().push(fix.page_id.clone());
     }
-    for (key, scope) in scopes {
+    for (key, mut scope) in scopes {
+        // A moved page that links to others is in the scope twice.
+        scope.sort();
+        scope.dedup();
         let Some(ws) = spaces.get_mut(&key) else { continue };
         let changed = take_in_silent_changes(client, ws, &scope).await?;
         if !changed.is_empty() {

@@ -557,8 +557,8 @@ async fn a_fetch_of_the_source_between_the_move_and_the_resume_strands_nothing()
 #[tokio::test]
 async fn there_and_back_every_link_still_reaches_its_page() {
     let mut h = Harness::new().await;
-    // As a 9.5 Data Center was seen to: only links naming the old space are
-    // fixed, in place, with no new version — and the move finishes late.
+    // As Data Center 9.5.4 does: the move finishes late, and fixes the links
+    // around it in place, with no new version.
     h.mock.refactor_links_silently(true);
     h.mock.lag_moves(3);
     // The moved page links to a page left behind both ways: plainly, by an
@@ -577,7 +577,22 @@ async fn there_and_back_every_link_still_reaches_its_page() {
     h.pull("DOCS").await;
 
     let there = h.request("1002", "2002");
-    h.run(&there).await;
+    let (_, plan) = h.run(&there).await;
+    // Each page named once, however many reasons it had to be checked.
+    for warning in plan.warnings.iter().filter(|w| w.contains("without a new version")) {
+        let list = warning.rsplit_once('(').map(|(_, l)| l).unwrap_or_default();
+        let list = list.split(')').next().unwrap_or_default();
+        let ids: Vec<&str> = list.split(", ").collect();
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(ids.len(), unique.len(), "{warning}");
+    }
+    assert!(
+        plan.warnings.iter().any(|w| w.contains("without a new version")),
+        "{:?}",
+        plan.warnings
+    );
     for page in ["1002", "1004", "2002"] {
         for (space, title, found) in links_of(&h.mock, page).await {
             assert!(

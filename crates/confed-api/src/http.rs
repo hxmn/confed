@@ -429,6 +429,15 @@ impl Http {
         cookie: Option<&str>,
     ) -> ApiResult<WebAnswer> {
         let url = self.url(path)?;
+        // What was sent, for `--log confed::http=debug`; never the token.
+        let fields: Vec<String> = form
+            .iter()
+            .map(|(name, value)| match *name {
+                "atl_token" => format!("{name}=<redacted>"),
+                _ => format!("{name}={value}"),
+            })
+            .collect();
+        debug!(target: "confed::http", path, form = %fields.join("&"), session = cookie.is_some(), "web form");
         self.send_web(|| {
             // As the browser sends it: an XHR, which the action answers in JSON.
             let rb = self

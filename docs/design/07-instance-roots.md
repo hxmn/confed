@@ -144,13 +144,36 @@ confed sends the browser's form:
 
 A 403 "Session Expired" page from the XSRF check is exit 9.
 
+**The browser's placement forms**, from the dialog's own source in 9.5.4
+(`page-move-resources.js`):
+
+| Placement | Fields |
+|---|---|
+| under a parent | `targetTitle` = the parent's title, `position=append` |
+| beside a sibling | `targetId` = the sibling, `position=above` or `below` |
+| top level | `position=topLevel`, no target |
+
+All three carry `pageId`, `spaceKey` and `mode=ASYNC`. confed sends the first exactly.
+For a sibling and for the top level it sends the target's title with `above`/`below`:
+the top level is `below` the space's home page. On a 9.5.4 server that placed pages
+exactly as asked, checked by sibling position over REST, so it is kept until a server
+is found that disagrees. `--log confed::http=debug` prints every field confed sends,
+with `atl_token` redacted.
+
 The server answers **before it has moved anything**: `200` with
-`{"complete": false, "status": "Starting…", "longTaskId": …}`, the page still in its
-old space. It moves the pages in a background task. confed follows that task through
-`GET rest/api/longtask/{id}` until it reports finished (or 100%). A task that finishes
-unsuccessfully is an error carrying its messages. 0.13.0 read the page back at once,
-saw it still in the old space, and wrongly reported exit 9 for a move that was
-happening.
+`{"complete": false, "longTaskId": …, "successful", "percentageComplete", …}`, the page
+still in its old space. It moves the pages in a background task. confed follows that
+task through `GET rest/api/longtask/{id}` the way the dialog does: five polls 100 ms
+apart, then every 500 ms. The task has **failed** as soon as `successful` is false, and
+the reason is the last message's `translation`. It is **done** when it is successful
+and `percentageComplete` reaches 100. Nothing else in the answer is read; there is no
+`finished` field. 0.13.0 read the page back at once, saw it still in its old space, and
+reported a move that was happening as exit 9.
+
+**Order among siblings.** Confluence orders siblings without an explicit position by
+title. A page appended to such a parent lands in title order, not last, until some
+move among those siblings gives them positions. This is Confluence's behaviour, not
+confed's.
 
 **Read-back, on every move.** confed then waits, polling with a growing interval for up
 to `--wait` seconds (120 by default), until the root and every page under it are in the
@@ -309,24 +332,34 @@ key.
 
 ### 6.1 Judged by what exists (0.14.0)
 
-Reading links by how they are written alone went wrong on a real server:
+**What Data Center 9.5.4 does**, checked over REST around real moves in both
+directions: it rewrites every link the move affects, **in place, without a new
+version, inside the move's background task**.
 
-- **Partial, silent refactoring.** Data Center 9.5.4's own link refactoring fixed only
-  links that named the old space explicitly. It did not fix plain links to or from the
-  moved pages, and it changed the storage it did fix in place, without a new version.
-- **A plain link that was already broken.** On the way back, such a link was read as
-  meaning "this space", and rewritten to point there, where the page was not.
+- In a moved page, plain links to pages left behind gain the old space's key, and
+  links within the moved tree stay plain.
+- In pages left behind, plain links to a moved page gain the new space's key.
+- A link elsewhere that names the old space explicitly is changed to plain when it
+  ends up in its own page's space.
 
-So every link the move concerns is now judged by what exists. Existence comes from the
-registered workspaces' records, with the moved pages where the move put them. For
-other spaces, confed asks the server with an exact title lookup
-(`GET rest/api/content?spaceKey=&title=`, from the database, not the search index).
+A move back undoes this, except that an explicit key to the page's own space may come
+back plain, which is equivalent. *An earlier reading, that it fixed only explicit links,
+came from reading the pages while the task was still running.*
+
+confed does not rely on any of that. Every link the move concerns is judged by what
+exists. Existence comes from the registered workspaces' records, with the moved pages
+where the move put them. For other spaces, confed asks the server with an exact title
+lookup (`GET rest/api/content?spaceKey=&title=`, from the database, not the search
+index).
 
 - If the page a link meant does not exist, the link is left as it is, and reported in
   `links_broken`. If the move happens to make it resolve, as a plain link carried back
   to its page's space does, it is not reported.
-- A link that already reaches the page it meant is left as it is.
-- Otherwise, `ri:space-key` and `ri:content-title` are set so that it does.
+- A link that already reaches the page it meant is left as it is. After a Data Center
+  move, every link does, so `links_rewritten` is empty and `links_by_server` lists the
+  pages.
+- Otherwise, `ri:space-key` and `ri:content-title` are set so that it does. That is what
+  happens on a server that does not refactor links.
 
 A page counts as fixed by the server (`links_by_server`) only when the server's storage
 really differs from confed's. Such silent changes, with no new version, are invisible

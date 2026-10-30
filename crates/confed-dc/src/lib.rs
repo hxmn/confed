@@ -145,10 +145,18 @@ impl DcClient {
     /// keeps checking where the pages are for as long as it was told to.
     async fn follow_long_task(&self, task: &str) -> ApiResult<()> {
         let started = std::time::Instant::now();
-        let mut interval = std::time::Duration::from_millis(250);
+        let mut polls = 0u32;
         loop {
             let status: serde_json::Value =
                 self.http.get_json(&format!("rest/api/longtask/{task}"), &[]).await?;
+            tracing::debug!(
+                target: "confed::http",
+                task,
+                percent = status["percentageComplete"].as_u64(),
+                successful = status["successful"].as_bool(),
+                elapsed_ms = status["elapsedTime"].as_u64(),
+                "move task"
+            );
             match long_task_state(&status) {
                 LongTask::Running => {}
                 LongTask::Succeeded => return Ok(()),
@@ -165,8 +173,10 @@ impl DcClient {
             if started.elapsed() >= LONG_TASK_WAIT {
                 return Ok(());
             }
-            tokio::time::sleep(interval).await;
-            interval = (interval * 2).min(std::time::Duration::from_secs(5));
+            // The dialog's pace: five quick looks, then every half second.
+            polls += 1;
+            let pause = if polls <= 5 { 100 } else { 500 };
+            tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
         }
     }
 
@@ -433,28 +443,25 @@ enum LongTask {
     Failed(String),
 }
 
-/// Read `rest/api/longtask/{id}`: finished when it says so, or at 100%;
-/// failed when it finished and says it was not successful.
+/// Read `rest/api/longtask/{id}` the way Data Center's own move dialog does
+/// (9.5.4, `page-move-resources.js`): failed as soon as `successful` is
+/// false, with the last message's `translation` as the reason; done when it
+/// is successful and `percentageComplete` reaches 100. Nothing else in the
+/// answer is relied on.
 fn long_task_state(status: &serde_json::Value) -> LongTask {
-    let finished = status["finished"].as_bool() == Some(true)
-        || status["complete"].as_bool() == Some(true)
-        || status["percentageComplete"].as_u64().is_some_and(|p| p >= 100);
-    if !finished {
-        return LongTask::Running;
-    }
     if status["successful"].as_bool() == Some(false) {
-        let messages = status["messages"]
+        let reason = status["messages"]
             .as_array()
-            .map(|m| {
-                m.iter()
-                    .filter_map(|m| m["translation"].as_str().or(m.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            })
-            .unwrap_or_default();
-        return LongTask::Failed(messages);
+            .and_then(|m| m.last())
+            .and_then(|m| m["translation"].as_str().or(m.as_str()))
+            .unwrap_or_default()
+            .to_string();
+        return LongTask::Failed(reason);
     }
-    LongTask::Succeeded
+    if status["percentageComplete"].as_u64().is_some_and(|p| p >= 100) {
+        return LongTask::Succeeded;
+    }
+    LongTask::Running
 }
 
 /// A web UI session: its cookie, and the token its forms carry.
@@ -1155,15 +1162,24 @@ mod tests {
         );
         assert_eq!(long_task_id("<html>Moved</html>"), None);
         let state = |v: serde_json::Value| long_task_state(&v);
-        assert_eq!(state(serde_json::json!({ "percentageComplete": 40 })), LongTask::Running);
+        assert_eq!(
+            state(serde_json::json!({ "percentageComplete": 40, "successful": true })),
+            LongTask::Running
+        );
         assert_eq!(
             state(serde_json::json!({ "percentageComplete": 100, "successful": true })),
             LongTask::Succeeded
         );
-        assert_eq!(state(serde_json::json!({ "finished": true })), LongTask::Succeeded);
+        // `finished` is not something the dialog reads, and neither does confed.
         assert_eq!(
-            state(serde_json::json!({ "finished": true, "successful": false,
-                "messages": [{ "translation": "A page with this title already exists" }] })),
+            state(serde_json::json!({ "finished": true, "successful": true })),
+            LongTask::Running
+        );
+        // Failed as soon as it says so, with the last message.
+        assert_eq!(
+            state(serde_json::json!({ "percentageComplete": 30, "successful": false,
+                "messages": [{ "translation": "Moving" },
+                             { "translation": "A page with this title already exists" }] })),
             LongTask::Failed("A page with this title already exists".into())
         );
     }

@@ -63,8 +63,8 @@ struct MockState {
     /// Whether a cross-space move fixes the page links that point at the
     /// moved pages, the way Confluence's link refactoring would.
     refactor_links_on_move: bool,
-    /// …only the links that name the old space explicitly, and in place,
-    /// without a new version: what a 9.5 Data Center was seen to do.
+    /// …in place, without a new version, as part of the move: what a 9.5.4
+    /// Data Center does.
     refactor_silently: bool,
     /// Reads a move takes to show: Data Center's web move runs as a
     /// background task and returns before the pages have moved.
@@ -223,8 +223,8 @@ impl MockClient {
 
     /// Make a cross-space move fix the links to the pages it moves, as a
     /// new version of each page it changes.
-    /// Make a cross-space move fix only the links that name the old space,
-    /// in place, with no new version — as Data Center was seen to.
+    /// Make a cross-space move fix the links around it in place, with no new
+    /// version — as Data Center 9.5.4 does, inside its background task.
     pub fn refactor_links_silently(&self, refactor: bool) {
         let mut state = self.state.lock().expect("mock poisoned");
         state.refactor_links_on_move = refactor;
@@ -574,12 +574,12 @@ fn refactor_links(
             let in_new =
                 format!(r#"<ri:page ri:space-key="{new_space}" ri:content-title="{title}""#);
             // Links without a key from pages left behind meant the old space.
-            if !was_moved && own == old_space && !silently {
+            if !was_moved && own == old_space {
                 body = body.replace(&bare, &in_new);
             }
             body = body.replace(&in_old, &in_new);
         }
-        if was_moved && !silently {
+        if was_moved {
             // Links without a key from a moved page to a page left behind.
             let others: Vec<String> = titles.to_vec();
             let mut rebuilt = String::new();
