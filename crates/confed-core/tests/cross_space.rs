@@ -105,7 +105,7 @@ impl Harness {
 
     fn request(&self, root: &str, target: &str) -> MoveRequest {
         MoveRequest {
-            root_id: root.into(),
+            roots: vec![root.into()],
             source: SpaceRef {
                 key: "DOCS".into(),
                 dir: "DOCS".into(),

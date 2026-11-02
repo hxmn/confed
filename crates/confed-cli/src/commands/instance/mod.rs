@@ -8,6 +8,7 @@
 //! client: one credential, and one request ceiling for all of them.
 
 mod fanout;
+mod locate;
 mod mv;
 mod setup;
 
@@ -122,6 +123,8 @@ pub fn prepare(ctx: &mut Context, command: &InstanceCommand) -> Result<Prepared>
         I::Adopt(args) => Prepared::Adopt(setup::prepare_adopt(ctx, args)?),
         I::Spaces(args) if !args.remote => Prepared::Offline,
         I::Status(args) if !args.fetch => Prepared::Offline,
+        I::Locate(args) if !args.remote => Prepared::Offline,
+        I::Tree(args) if !args.remote => Prepared::Offline,
         I::Add(_) | I::Remove(_) => Prepared::Offline,
         I::Doctor(args) if args.offline => Prepared::Offline,
         _ => Prepared::Connection(connection(ctx, &ctx.instance()?)?),
@@ -160,6 +163,8 @@ pub async fn run(
         I::Doctor(args) => fanout::doctor(ctx, args, connection).await?,
         I::Search(args) => fanout::search(ctx, args, need(connection)?).await?,
         I::Mv(args) => mv::run(ctx, args, need(connection)?).await?,
+        I::Locate(args) => locate::run(ctx, args, connection).await?,
+        I::Tree(args) => locate::tree(ctx, args, connection).await?,
         I::Resume(args) => mv::resume(ctx, args, need(connection)?).await?,
         I::Abort(args) => mv::abort(ctx, args, need(connection)?).await?,
     };

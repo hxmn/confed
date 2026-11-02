@@ -32,7 +32,12 @@ pub async fn status(
     let instance = ctx.instance()?;
     let members = selected(ctx, &instance)?;
     let clients = connection.map(|c| c.clients(ctx)).transpose()?;
-    let single = StatusArgs { fetch: args.fetch, short: args.short, exit_code: args.exit_code };
+    let single = StatusArgs {
+        fetch: args.fetch,
+        short: args.short,
+        exit_code: args.exit_code,
+        summary: args.summary,
+    };
     let single = &single;
     let runs = each_space(ctx, &instance, &members, clients.as_ref(), |mut child| async move {
         if single.fetch {

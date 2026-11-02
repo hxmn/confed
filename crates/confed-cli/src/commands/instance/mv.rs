@@ -2,9 +2,10 @@
 //! The work is [`confed_core::crossmove`]'s; this is the part that reads
 //! arguments, takes the locks, asks, and reports.
 
+use super::locate::{locate, Found};
 use super::Connection;
 use crate::cli::{InstanceJournalArgs, InstanceMvArgs};
-use crate::context::{split_space_ref, Context};
+use crate::context::Context;
 use crate::output::{plural, Output};
 use confed_api::{ConfluenceClient, MovePosition, SpaceId};
 use confed_core::crossmove::{self, MovePlan, MoveRequest, OnConflict, SpaceRef};
@@ -12,157 +13,13 @@ use confed_core::error::{ConfedError, Result};
 use confed_core::instance::{Instance, JournalEntry, Member, Step};
 use confed_core::lock::WorkspaceLock;
 use confed_core::paths;
-use confed_core::sync::{FetchOptions, PushOptions, SyncEngine};
+use confed_core::sync::{FetchOptions, PullOptions, PushOptions, SyncEngine};
 use confed_core::workspace::Workspace;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-
-/// A page argument, found in one of the instance's workspaces.
-enum Found {
-    /// A page the workspace tracks.
-    Page { member: Member, page_id: String },
-    /// A file that names no page on the server yet.
-    LocalOnly { member: Member, path: String },
-    /// `KEY:` alone: the top of that space.
-    SpaceTop { member: Member },
-    /// A path that is no page yet: where a page would go, and what it would be called.
-    NewPath { member: Member, parent: Option<String>, title: String, path: String },
-}
-
-impl Found {
-    fn member(&self) -> &Member {
-        match self {
-            Found::Page { member, .. }
-            | Found::LocalOnly { member, .. }
-            | Found::SpaceTop { member }
-            | Found::NewPath { member, .. } => member,
-        }
-    }
-}
-
-/// Where in the instance an argument points: `KEY:path`, a path from the
-/// current directory, or a page id looked up in every registered space.
-fn locate(
-    ctx: &Context,
-    instance: &Instance,
-    reference: &str,
-    as_destination: bool,
-) -> Result<Found> {
-    let members = instance.enabled_members()?;
-    let (member, path) = if let Some((key, path)) = split_space_ref(reference) {
-        let member = instance.member(key)?.ok_or_else(|| unregistered(key, &members))?;
-        (member, path.trim_start_matches('/').to_string())
-    } else if !reference.is_empty() && reference.chars().all(|c| c.is_ascii_digit()) {
-        for member in &members {
-            let Ok(ws) = instance.open_workspace(member) else { continue };
-            if ws.state().get_page(reference)?.is_some() {
-                return Ok(Found::Page { member: member.clone(), page_id: reference.to_string() });
-            }
-        }
-        return Err(ConfedError::NotFound(format!(
-            "page {reference} is not tracked in any registered space"
-        )));
-    } else {
-        let absolute = normalize(&ctx.cwd.join(reference));
-        let member = instance.member_for_path(&absolute)?.ok_or_else(|| {
-            ConfedError::usage_with_hint(
-                format!("`{reference}` is not inside a registered workspace"),
-                "name it as KEY:path, a path into a space's directory, or a page id",
-            )
-        })?;
-        let dir = normalize(&instance.member_dir(&member));
-        let dir = dir.canonicalize().unwrap_or(dir);
-        let absolute = absolute.canonicalize().unwrap_or(absolute);
-        let rel = absolute
-            .strip_prefix(&dir)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        (member, rel)
-    };
-
-    if path.is_empty() {
-        if as_destination {
-            return Ok(Found::SpaceTop { member });
-        }
-        return Err(ConfedError::usage(format!(
-            "`{reference}` names space {}, not a page in it",
-            member.space_key
-        )));
-    }
-
-    let ws = instance.open_workspace(&member)?;
-    let with_md = if path.ends_with(".md") { path.clone() } else { format!("{path}.md") };
-    for candidate in [path.clone(), with_md.clone()] {
-        if let Some(record) = ws.state().get_page_by_path(&candidate)? {
-            return Ok(Found::Page { member, page_id: record.page_id });
-        }
-    }
-    let file = ws.absolute(&with_md);
-    if file.exists() {
-        let text = std::fs::read_to_string(&file)
-            .map_err(|e| ConfedError::io(format!("reading {with_md}"), e))?;
-        let parsed = confed_core::frontmatter::parse(&text, &with_md)?;
-        return Ok(match parsed.frontmatter.page_id() {
-            Some(id) => Found::Page { member, page_id: id.to_string() },
-            None => Found::LocalOnly { member, path: with_md },
-        });
-    }
-    if !as_destination {
-        return Err(ConfedError::NotFound(format!(
-            "no page `{with_md}` in {} ({})",
-            member.space_key, member.dir
-        )));
-    }
-    // A new path: its directory names the parent, its file name the title.
-    let stem = with_md.trim_end_matches(".md");
-    let (dir, name) = match stem.rsplit_once('/') {
-        Some((dir, name)) => (Some(dir), name),
-        None => (None, stem),
-    };
-    let parent = match dir {
-        Some(dir) => Some(
-            ws.state()
-                .get_page_by_path(&format!("{dir}.md"))?
-                .ok_or_else(|| {
-                    ConfedError::NotFound(format!(
-                        "no page `{dir}.md` in {} to put it under",
-                        member.space_key
-                    ))
-                })?
-                .page_id,
-        ),
-        None => None,
-    };
-    Ok(Found::NewPath { member, parent, title: name.to_string(), path: with_md })
-}
-
-fn unregistered(key: &str, members: &[Member]) -> ConfedError {
-    ConfedError::usage_with_hint(
-        format!("space {key} is not registered in this instance"),
-        format!(
-            "registered: {}; `confed instance clone {key}` adds it",
-            members.iter().map(|m| m.space_key.as_str()).collect::<Vec<_>>().join(", ")
-        ),
-    )
-}
-
-/// `a/./b/../c` without touching the filesystem.
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for part in path.components() {
-        match part {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other),
-        }
-    }
-    out
-}
 
 fn space_ref(member: &Member, ws: &Workspace) -> Result<SpaceRef> {
     Ok(SpaceRef {
@@ -203,15 +60,18 @@ fn open_all(instance: &Instance) -> Result<BTreeMap<String, Workspace>> {
 }
 
 fn engine_for(
+    ctx: &Context,
     client: &Arc<dyn ConfluenceClient>,
     ws: &Workspace,
     concurrency: usize,
 ) -> Result<SyncEngine> {
+    let key = ws.space_key()?;
     Ok(SyncEngine::new(
         client.clone(),
-        SpaceId { key: ws.space_key()?, numeric: ws.space_numeric_id()? },
+        SpaceId { key: key.clone(), numeric: ws.space_numeric_id()? },
         concurrency,
-    ))
+    )
+    .with_progress(ctx.progress_for(Some(key))))
 }
 
 pub async fn run(
@@ -220,51 +80,132 @@ pub async fn run(
     connection: Connection,
 ) -> Result<Output> {
     let instance = ctx.instance()?;
-    let source = locate(ctx, &instance, &args.source, false)?;
-    let dest = locate(ctx, &instance, &args.destination, true)?;
-    if source.member().space_key == dest.member().space_key {
+    let client = connection.client(ctx)?;
+    let named = args.sources();
+    match (&args.children_of, named.is_empty()) {
+        (None, true) => {
+            return Err(ConfedError::usage_with_hint(
+                "name the pages to move, then where to",
+                "`confed instance mv SOURCE… DEST`, or `--children-of PAGE DEST`",
+            ))
+        }
+        (Some(_), false) => {
+            return Err(ConfedError::usage(
+                "with --children-of, give only the destination; the pages are its children",
+            ))
+        }
+        _ => {}
+    }
+    let dest = locate(ctx, &instance, Some(&client), args.destination(), true).await?;
+    let mut sources = Vec::new();
+    for reference in named {
+        sources.push(locate(ctx, &instance, Some(&client), reference, false).await?);
+    }
+    // The parent whose children move: a page, or a space's home page.
+    let children_of = match &args.children_of {
+        Some(reference) => {
+            Some(match locate(ctx, &instance, Some(&client), reference, true).await? {
+                Found::Page { member, page_id } => (member, page_id),
+                Found::SpaceTop { member } => {
+                    let home = client.get_space(&member.space_key).await?.homepage_id.ok_or_else(
+                        || {
+                            ConfedError::NotFound(format!(
+                                "space {} has no home page",
+                                member.space_key
+                            ))
+                        },
+                    )?;
+                    (member, home.0)
+                }
+                Found::LocalOnly { path, .. } | Found::NewPath { path, .. } => {
+                    return Err(ConfedError::NotFound(format!(
+                        "{path} is no page on the server yet"
+                    )))
+                }
+            })
+        }
+        None => None,
+    };
+    let src_member = match (&children_of, sources.first()) {
+        (Some((member, _)), _) => member.clone(),
+        (None, Some(first)) => first.member().clone(),
+        (None, None) => unreachable!("refused above"),
+    };
+    if let Some(other) = sources.iter().find(|s| s.member().space_key != src_member.space_key) {
         return Err(ConfedError::usage_with_hint(
-            format!("both are in space {}", source.member().space_key),
-            format!("within a space, use `confed -C {} mv`", source.member().dir),
+            format!(
+                "the pages are in spaces {} and {}; one move takes pages from one space",
+                src_member.space_key,
+                other.member().space_key
+            ),
+            "move each space's pages with a `confed instance mv` of its own",
         ));
     }
-    if let Found::LocalOnly { member, path } = &source {
+    if src_member.space_key == dest.member().space_key {
+        return Err(ConfedError::usage_with_hint(
+            format!("both are in space {}", src_member.space_key),
+            format!("within a space, use `confed -C {} mv`", src_member.dir),
+        ));
+    }
+    if let [Found::LocalOnly { member, path }] = sources.as_slice() {
         return move_local_file(&instance, member, path, &dest);
     }
-    let Found::Page { member: src_member, page_id: root_id } = &source else {
-        return Err(ConfedError::usage(format!("`{}` is not a page", args.source)));
-    };
+    let mut root_ids = Vec::new();
+    for (source, reference) in sources.iter().zip(named) {
+        match source {
+            Found::Page { page_id, .. } => root_ids.push(page_id.clone()),
+            Found::LocalOnly { path, .. } => {
+                return Err(ConfedError::usage_with_hint(
+                    format!("{path} has not been pushed, so it cannot move with the others"),
+                    "push it first, or move it on its own",
+                ))
+            }
+            _ => return Err(ConfedError::usage(format!("`{reference}` is not a page"))),
+        }
+    }
     if let Found::LocalOnly { path, .. } = &dest {
         return Err(ConfedError::state_with_hint(
             format!("{path} has not been pushed, so nothing can be put under it on the server"),
             "push it first",
         ));
     }
+    let several = root_ids.len() > 1 || children_of.is_some();
+    if several && matches!(dest, Found::NewPath { .. }) {
+        return Err(ConfedError::usage(
+            "a new path names one page; to move several, name the parent they go under",
+        ));
+    }
     if args.push_first && args.message.as_deref().is_none_or(str::is_empty) {
         return Err(ConfedError::usage("--push-first needs -m \"why\""));
     }
 
-    let client = connection.client(ctx)?;
     let concurrency = ctx.concurrency();
     let dest_member = dest.member().clone();
     let mut spaces = open_all(&instance)?;
-    let src_ref = space_ref(src_member, &spaces[&src_member.space_key])?;
+    let src_ref = space_ref(&src_member, &spaces[&src_member.space_key])?;
     let dst_ref = space_ref(&dest_member, &spaces[&dest_member.space_key])?;
 
     // Both sides locked and fetched before the plan.
     let mut locks = lock_all(&spaces, &[src_ref.key.clone(), dst_ref.key.clone()])?;
     if args.push_first {
         let ws = spaces.get_mut(&src_ref.key).expect("opened");
-        let root_path = ws.state().get_page(root_id)?.map(|p| p.local_path).unwrap_or_default();
-        let engine = engine_for(&client, ws, concurrency)?;
+        let roots = match &children_of {
+            Some((_, parent)) => children(ws, parent)?,
+            None => root_ids.clone(),
+        };
+        let mut scope = Vec::new();
+        for root in &roots {
+            if let Some(page) = ws.state().get_page(root)? {
+                scope.push(page.local_path.clone());
+                scope.push(format!("{}/**", paths::children_dir(&page.local_path)));
+            }
+        }
+        let engine = engine_for(ctx, &client, ws, concurrency)?;
         let pushed = engine
             .push(
                 ws,
                 &PushOptions {
-                    scope: vec![
-                        root_path.clone(),
-                        format!("{}/**", paths::children_dir(&root_path)),
-                    ],
+                    scope,
                     message: args.message.clone(),
                     with_attachments: true,
                     with_comments: true,
@@ -287,13 +228,56 @@ pub async fn run(
     }
     for key in [&src_ref.key, &dst_ref.key] {
         let ws = spaces.get_mut(key).expect("opened");
-        engine_for(&client, ws, concurrency)?.fetch(ws, &FetchOptions::default()).await?;
+        engine_for(ctx, &client, ws, concurrency)?.fetch(ws, &FetchOptions::default()).await?;
+    }
+    if let Some((_, parent)) = &children_of {
+        root_ids = children(&spaces[&src_ref.key], parent)?;
+        if root_ids.is_empty() {
+            return Err(ConfedError::NotFound(format!(
+                "page {parent} has no pages under it in space {}",
+                src_ref.key
+            )));
+        }
+    }
+
+    // What the move names but the workspaces do not have yet: the pages to
+    // move, the destination and the pages beside it. Pulled, and only them.
+    let mut pulled = Vec::new();
+    {
+        let ws = spaces.get_mut(&src_ref.key).expect("opened");
+        let wanted = with_subtrees(ws, &root_ids)?;
+        pulled.extend(pull_missing(ctx, &client, ws, wanted, concurrency).await?);
+    }
+    {
+        let mut named_there = Vec::new();
+        if let Found::Page { page_id, .. } = &dest {
+            named_there.push(page_id.clone());
+        }
+        if let Found::NewPath { parent: Some(parent), .. } = &dest {
+            named_there.push(parent.clone());
+        }
+        for sibling in [&args.before, &args.after].into_iter().flatten() {
+            if let Found::Page { member, page_id } =
+                locate(ctx, &instance, Some(&client), sibling, false).await?
+            {
+                if member.space_key != dst_ref.key {
+                    return Err(ConfedError::usage(format!(
+                        "`{sibling}` is in space {}, not in {}",
+                        member.space_key, dst_ref.key
+                    )));
+                }
+                named_there.push(page_id);
+            }
+        }
+        let ws = spaces.get_mut(&dst_ref.key).expect("opened");
+        let wanted = with_ancestors(ws, &named_there)?;
+        pulled.extend(pull_missing(ctx, &client, ws, wanted, concurrency).await?);
     }
 
     let (position, target_id, new_parent_id) =
-        placement(&client, &spaces[&dst_ref.key], &dest, args).await?;
+        placement(ctx, &instance, &client, &spaces[&dst_ref.key], &dest, args).await?;
     let request = MoveRequest {
-        root_id: root_id.clone(),
+        roots: root_ids,
         source: src_ref,
         dest: dst_ref,
         position,
@@ -309,14 +293,45 @@ pub async fn run(
         message: args.message.clone().or_else(|| Some("Moved by confed instance mv".into())),
         wait_secs: args.wait,
     };
-    let mut plan = crossmove::plan(&client, &spaces, &request).await?;
+    let mut plan = crossmove::draft(&client, &spaces, &request).await?;
+    let with_pulled = |mut output: Output| {
+        output.result["pulled"] = json!(pulled);
+        if !pulled.is_empty() {
+            output.human = format!(
+                "{}\n{}",
+                ctx.style.dim(&format!(
+                    "Pulled {} the move needs: {}",
+                    plural(pulled.len(), "page", "pages"),
+                    pulled
+                        .iter()
+                        .map(|p| format!(
+                            "{}:{}",
+                            p["space"].as_str().unwrap_or_default(),
+                            p["path"].as_str().unwrap_or_default()
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                output.human
+            );
+        }
+        output
+    };
 
+    if let Some(refusal) = plan.refusal() {
+        // Everything is in the plan to read; what stops it, too.
+        let mut output = describe(ctx, &plan, None, true);
+        output.exit = refusal.exit_code();
+        return Ok(with_pulled(
+            output.with_errors(vec![crate::output::ErrorEntry::from_error(&refusal)]),
+        ));
+    }
     if let Some(reason) = plan.blocked.clone() {
         // Everything else checked out: show the plan, and why it cannot run.
         let mut output = describe(ctx, &plan, None, true);
         output.result["blocked"] = json!(reason);
         output.exit = confed_core::ExitCode::Unsupported;
-        return Ok(output.with_errors(vec![crate::output::ErrorEntry {
+        return Ok(with_pulled(output.with_errors(vec![crate::output::ErrorEntry {
             code: confed_core::ExitCode::Unsupported.name(),
             message: reason,
             hint: Some(
@@ -324,10 +339,10 @@ pub async fn run(
                  workspaces up to date (the source drops them, the destination downloads them)"
                     .into(),
             ),
-        }]));
+        }])));
     }
     if args.dry_run {
-        return Ok(describe(ctx, &plan, None, true));
+        return Ok(with_pulled(describe(ctx, &plan, None, true)));
     }
     if plan.rules_page.is_some() && !ctx.global.yes {
         return Err(ConfedError::usage_with_hint(
@@ -366,7 +381,98 @@ pub async fn run(
         .map_err(|e| with_resume_hint(e, &id))?;
     after_move(&mut spaces, &plan)?;
     drop(locks);
-    Ok(describe(ctx, &plan, Some(&id), false))
+    Ok(with_pulled(describe(ctx, &plan, Some(&id), false)))
+}
+
+/// The pages directly under `parent`, in their order, as the last fetch listed them.
+fn children(ws: &Workspace, parent: &str) -> Result<Vec<String>> {
+    let mut kids: Vec<_> = ws
+        .state()
+        .all_remote()?
+        .into_iter()
+        .filter(|r| !r.deleted && r.parent_id.as_deref() == Some(parent))
+        .collect();
+    kids.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.title.cmp(&b.title)));
+    Ok(kids.into_iter().map(|r| r.page_id).collect())
+}
+
+/// These pages, every page under them, and the pages above them, as listed.
+fn with_subtrees(ws: &Workspace, roots: &[String]) -> Result<Vec<String>> {
+    let remote = ws.state().all_remote()?;
+    let mut out = with_ancestors(ws, roots)?;
+    let mut index = 0;
+    let mut queue: Vec<String> = roots.to_vec();
+    while index < queue.len() {
+        let id = queue[index].clone();
+        queue.extend(
+            remote
+                .iter()
+                .filter(|r| !r.deleted && r.parent_id.as_deref() == Some(id.as_str()))
+                .map(|r| r.page_id.clone()),
+        );
+        index += 1;
+    }
+    out.extend(queue);
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
+/// These pages and every page above them, as listed.
+fn with_ancestors(ws: &Workspace, ids: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for id in ids {
+        let mut at = Some(id.clone());
+        while let Some(page) = at {
+            if out.contains(&page) {
+                break;
+            }
+            at = ws.state().get_remote(&page)?.and_then(|r| r.parent_id);
+            out.push(page);
+        }
+    }
+    Ok(out)
+}
+
+/// Pull the pages of `wanted` the workspace does not track yet — and nothing
+/// else — from what its fetch just listed. Returns what it pulled.
+async fn pull_missing(
+    ctx: &Context,
+    client: &Arc<dyn ConfluenceClient>,
+    ws: &mut Workspace,
+    wanted: Vec<String>,
+    concurrency: usize,
+) -> Result<Vec<serde_json::Value>> {
+    let mut missing = Vec::new();
+    for id in wanted {
+        let listed = ws.state().get_remote(&id)?.is_some_and(|r| !r.deleted);
+        if listed && ws.state().get_page(&id)?.is_none() {
+            missing.push(id);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+    let key = ws.space_key()?;
+    engine_for(ctx, client, ws, concurrency)?
+        .pull(
+            ws,
+            &PullOptions {
+                scope: missing.clone(),
+                no_fetch: true,
+                with_attachments: true,
+                with_comments: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+    let mut pulled = Vec::new();
+    for id in missing {
+        if let Some(page) = ws.state().get_page(&id)? {
+            pulled.push(json!({ "space": key, "page_id": id, "path": page.local_path }));
+        }
+    }
+    Ok(pulled)
 }
 
 /// The source loses its rules page with the move: unset it there, and take
@@ -439,8 +545,10 @@ fn on_conflict(args: &InstanceMvArgs) -> Result<OnConflict> {
     })
 }
 
-/// How the server should place the subtree's root, and its parent afterwards.
+/// How the server should place the roots, and their parent afterwards.
 async fn placement(
+    ctx: &Context,
+    instance: &Instance,
     client: &Arc<dyn ConfluenceClient>,
     dst: &Workspace,
     dest: &Found,
@@ -449,24 +557,19 @@ async fn placement(
     let parent_of = |id: &str| -> Result<Option<String>> {
         Ok(dst.state().get_remote(id)?.and_then(|r| r.parent_id))
     };
-    let sibling = |reference: &str| -> Result<String> {
-        let path = split_space_ref(reference).map(|(_, p)| p).unwrap_or(reference);
-        if path.chars().all(|c| c.is_ascii_digit()) {
-            return Ok(path.to_string());
-        }
-        let with_md = if path.ends_with(".md") { path.to_string() } else { format!("{path}.md") };
-        dst.state()
-            .get_page_by_path(&with_md)?
-            .map(|p| p.page_id)
-            .ok_or_else(|| ConfedError::NotFound(format!("no page `{with_md}` in the destination")))
-    };
-    if let Some(before) = &args.before {
-        let id = sibling(before)?;
-        return Ok((MovePosition::Before, id.clone(), parent_of(&id)?));
-    }
-    if let Some(after) = &args.after {
-        let id = sibling(after)?;
-        return Ok((MovePosition::After, id.clone(), parent_of(&id)?));
+    for (sibling, position) in
+        [(&args.before, MovePosition::Before), (&args.after, MovePosition::After)]
+    {
+        let Some(reference) = sibling else { continue };
+        let id = match locate(ctx, instance, Some(client), reference, false).await? {
+            Found::Page { page_id, .. } => page_id,
+            _ => {
+                return Err(ConfedError::NotFound(format!(
+                    "`{reference}` is no page of the destination"
+                )))
+            }
+        };
+        return Ok((position, id.clone(), parent_of(&id)?));
     }
 
     // The parent the page goes under, or `None` for the top of the space.
@@ -602,6 +705,9 @@ fn move_local_file(
     ))
 }
 
+/// Plans with more pages than this are shown by their roots, unless -v.
+const LISTED_PAGES: usize = 30;
+
 /// The plan, or what the move did: before and after, as trees.
 fn describe(ctx: &Context, plan: &MovePlan, journal_id: Option<&str>, dry_run: bool) -> Output {
     let style = &ctx.style;
@@ -609,33 +715,83 @@ fn describe(ctx: &Context, plan: &MovePlan, journal_id: Option<&str>, dry_run: b
     if dry_run {
         let _ = writeln!(human, "{}", style.dim("Dry run — nothing was changed."));
     }
+    let roots: Vec<_> = plan.pages.iter().filter(|p| p.depth == 0).collect();
+    let trees =
+        if roots.len() > 1 { format!(" ({} page trees)", roots.len()) } else { String::new() };
     let _ = writeln!(
         human,
-        "{} {} from {} to {}:",
-        if dry_run { "Would move" } else { "Moved" },
+        "{} {}{trees} from {} to {}:",
+        if dry_run && plan.blocking.is_empty() {
+            "Would move"
+        } else if dry_run {
+            "Would have moved"
+        } else {
+            "Moved"
+        },
         plural(plan.pages.len(), "page", "pages"),
         style.bold(&plan.source.key),
         style.bold(&plan.dest.key)
     );
-    for page in &plan.pages {
-        let indent = "  ".repeat(page.depth);
-        let _ =
-            writeln!(human, "  {} {indent}{}:{}", style.red("-"), plan.source.key, page.from_path);
-    }
-    for page in &plan.pages {
-        let indent = "  ".repeat(page.depth);
-        let to = plan
-            .moved
+    let to_path = |page: &crossmove::PlannedPage| {
+        plan.moved
             .iter()
             .find(|m| m.page_id == page.page_id)
             .map(|m| m.to.path.clone())
-            .unwrap_or_else(|| page.to_path.clone());
-        let renamed = page
-            .new_title
-            .as_ref()
-            .map(|t| style.dim(&format!("  (now \"{t}\")")))
-            .unwrap_or_default();
-        let _ = writeln!(human, "  {} {indent}{}:{to}{renamed}", style.green("+"), plan.dest.key);
+            .unwrap_or_else(|| page.to_path.clone())
+    };
+    if plan.pages.len() > LISTED_PAGES && ctx.global.verbose == 0 {
+        // Each root, and how many pages go with it.
+        for root in &roots {
+            let under = plan.subtree_of(&root.page_id).len() - 1;
+            let with = if under > 0 {
+                style.dim(&format!("  (+{} under it)", plural(under, "page", "pages")))
+            } else {
+                String::new()
+            };
+            let _ = writeln!(
+                human,
+                "  {}:{} → {}:{}{with}",
+                plan.source.key,
+                root.from_path,
+                plan.dest.key,
+                to_path(root)
+            );
+        }
+        let _ = writeln!(human, "  {}", style.dim("(-v lists every page)"));
+    } else {
+        for page in &plan.pages {
+            let indent = "  ".repeat(page.depth);
+            let _ = writeln!(
+                human,
+                "  {} {indent}{}:{}",
+                style.red("-"),
+                plan.source.key,
+                page.from_path
+            );
+        }
+        for page in &plan.pages {
+            let indent = "  ".repeat(page.depth);
+            let _ = writeln!(
+                human,
+                "  {} {indent}{}:{}",
+                style.green("+"),
+                plan.dest.key,
+                to_path(page)
+            );
+        }
+    }
+    let renames = plan.renames();
+    if !renames.is_empty() {
+        let _ = writeln!(human, "\n{}:", if dry_run { "Titles that change" } else { "Renamed" });
+        for (page, to) in &renames {
+            let why = match page.rename_reason.as_deref() {
+                Some("conflict_suffix") => "taken in the destination",
+                Some("title_map") => "--title-map",
+                Some("destination_path") => "the destination path",
+                _ => "",
+            };
+            let _ = writeln!(human, "  \"{}\" → \"{to}\"  {}", page.title, style.dim(why));
+        }
     }
     if !plan.links.is_empty() {
         let verb = match (dry_run, plan.rewrite_links) {
@@ -666,6 +822,35 @@ fn describe(ctx: &Context, plan: &MovePlan, journal_id: Option<&str>, dry_run: b
             );
         }
     }
+    if !plan.blocking.is_empty() {
+        let _ = writeln!(human, "\n{}", style.red("What stops it:"));
+        for blocker in &plan.blocking {
+            let suggestion = blocker
+                .suggested_title
+                .as_ref()
+                .map(|t| style.dim(&format!("  (--on-conflict suffix: \"{t}\")")))
+                .unwrap_or_default();
+            let _ = writeln!(human, "  - {}{suggestion}", blocker.message);
+        }
+    }
+    if let Some(verified) = &plan.verified {
+        let left = match verified.source_remaining_count {
+            0 => format!("nothing is left in {}", plan.source.key),
+            n => format!("{} left in {}", plural(n, "page", "pages"), plan.source.key),
+        };
+        let clean = if verified.workspaces_clean {
+            "both workspaces clean".to_string()
+        } else {
+            style.yellow("not every page in the two workspaces is clean; `confed instance status`")
+        };
+        let _ = writeln!(
+            human,
+            "\nVerified: {} of {} tracked in {} only; {left}; {clean}.",
+            verified.at_destination,
+            plural(verified.pages, "page", "pages"),
+            plan.dest.key
+        );
+    }
     if let Some(id) = journal_id {
         let _ = writeln!(human, "\n{}", style.dim(&format!("journal: {id}")));
     }
@@ -691,21 +876,45 @@ fn describe(ctx: &Context, plan: &MovePlan, journal_id: Option<&str>, dry_run: b
         .iter()
         .map(|r| json!({ "page_id": r.page_id, "space": r.space, "count": r.count, "version": r.version }))
         .collect();
+    let renamed: Vec<_> = renames
+        .iter()
+        .map(|(page, to)| {
+            json!({
+                "page_id": page.page_id,
+                "from_title": page.title,
+                "to_title": to,
+                "reason": page.rename_reason,
+            })
+        })
+        .collect();
     Output::new(
         json!({
             "dry_run": dry_run,
             "journal_id": journal_id,
             "source": plan.source.key,
             "dest": plan.dest.key,
+            "roots": plan.root_ids(),
             "position": plan.position,
             "target_id": plan.target_id,
             "new_parent_id": plan.new_parent_id,
+            "summary": {
+                "pages": plan.pages.len(),
+                "roots": roots.len(),
+                "attachments": plan.pages.iter().map(|p| p.attachments).sum::<usize>(),
+                "comments": plan.pages.iter().map(|p| p.comments).sum::<usize>(),
+                "renamed": renames.len(),
+                "links": plan.links.len(),
+                "blocking": plan.blocking.len(),
+            },
             "pages": plan.pages,
+            "renamed": renamed,
+            "blocking": plan.blocking,
             "links": plan.links,
             "moved": moved,
             "links_rewritten": rewritten,
             "links_by_server": plan.links_by_server,
             "links_broken": plan.links_broken,
+            "verified": plan.verified,
             "warnings": plan.warnings,
         }),
         human,

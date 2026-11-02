@@ -9,7 +9,8 @@ same list from the binary itself.
 - [Exit codes](#exit-codes)
 - Setting up: [`init`](#confed-init), [`clone`](#confed-clone)
 - Syncing: [`fetch`](#confed-fetch), [`pull`](#confed-pull), [`push`](#confed-push)
-- Inspecting: [`status`](#confed-status), [`diff`](#confed-diff), [`log`](#confed-log)
+- Inspecting: [`status`](#confed-status), [`tree`](#confed-tree), [`diff`](#confed-diff),
+  [`log`](#confed-log)
 - Resolving: [`resolve`](#confed-resolve)
 - Authoring: [`new`](#confed-new), [`mv`](#confed-mv), [`rm`](#confed-rm),
   [`attach`](#confed-attach), [`comment`](#confed-comment)
@@ -20,7 +21,7 @@ same list from the binary itself.
   [`version`](#confed-version), [`completion`](#confed-completion)
 - Interactive: [`tui`](#confed-tui)
 - Several spaces: [`instance`](#confed-instance) — init, adopt, spaces, clone, add,
-  remove, status, fetch, pull, push, doctor, mv, search, resume, abort
+  remove, status, fetch, pull, push, doctor, mv, locate, tree, search, resume, abort
 
 ## Global flags
 
@@ -43,12 +44,15 @@ These work before or after the subcommand: `confed --json status` and
 | `-q`, `--quiet` | — | Errors only, and no progress. Conflicts with `-v`. |
 | `--silent` | `CONFED_SILENT` | Hide the progress display; everything else is unchanged. |
 | `--log <FILTER>` | `CONFED_LOG` | Tracing filter, e.g. `confed_api=debug`. Overrides `-v`/`-q`. |
+| `--progress <auto\|jsonl\|none>` | `CONFED_PROGRESS` | How progress is shown; see [Progress](#progress). |
+| `--select <PATH>` | — | Print only part of the JSON result; implies `--json`. See [Output and JSON](#output-and-json). |
 
 Resolution order for every parameter is flag → environment → stored config → prompt; see
 [auth.md](auth.md#precedence).
 
-Pages are addressed by workspace-relative path *or* by page id almost everywhere, and
-where a command takes several it also takes globs: `Handbook/**` matches a subtree, `*.md`
+Pages are addressed by workspace-relative path, by page id *or* by the page's URL
+almost everywhere (`…/spaces/KEY/pages/ID/…`, `…/pages/viewpage.action?pageId=ID`,
+`…/display/KEY/Title`), and where a command takes several it also takes globs: `Handbook/**` matches a subtree, `*.md`
 matches the top level, and a plain prefix such as `Handbook` selects everything under it.
 
 ## Output and JSON
@@ -81,6 +85,21 @@ additive and does not bump it, so parse defensively and ignore what you do not k
 
 The schemas live in [`reference/json/`](reference/json/) — `envelope.schema.json` plus one
 per command — and the end-to-end tests validate real output against them.
+
+`--select PATH` prints only part of the envelope instead of all of it, for scripts and
+agents that would otherwise pipe it through `jq`. A path is dot-separated keys into
+`result` (or into the envelope, when it starts with `confed`, `result`, `errors` or
+`warnings`); a number indexes an array; `*` takes every element and applies the rest of
+the path to each; `a,b` gives an object of several paths. What is not there is `null`.
+The exit code is the command's own.
+
+```bash
+confed instance status --summary --select spaces.*.result.clean      # [true, true]
+confed instance mv … --dry-run --select summary,blocking,renamed
+```
+
+stdout may be closed early (`confed status --json | head`): confed stops writing
+quietly rather than failing.
 
 ## Exit codes
 
@@ -352,6 +371,7 @@ A git-style summary, computed from local state only.
 | `--fetch` | Refresh remote state from the server first. |
 | `--short` | One line per changed page: a status letter and the path. |
 | `--exit-code` | Exit 10 when anything differs. |
+| `--summary` | Counts instead of every page: `counts_by_state`, `pages_total`, and `changed`, the first 20 pages that differ. |
 
 Status letters, in the spirit of `git status --short`: `M` modified, `B` behind, `V`
 diverged, `A` new locally, `R` new on the server, `D` deleted locally, `X` deleted on the
@@ -368,6 +388,19 @@ sidecar `confed:new` entries, posted by the next push) and `orphaned_comments` (
 inline comments whose text is gone). Both are omitted from the JSON when zero, and the
 human output lists pages with drafts under *Comment drafts* — with `c` as the short
 code when the page is otherwise unchanged.
+
+## confed tree
+
+```bash
+confed tree                                   # the whole space
+confed tree "Team Handbook.md" --depth 1      # a page's children
+confed tree 1001 --remote --json              # as the server lists it now
+```
+
+The space's pages as the server nests them, in sibling order, each with its id and
+title, and its path when it has been pulled. Only pages: other files in the workspace
+never show. From the last fetch, or, with `--remote`, the server now. `--json`:
+[`tree.schema.json`](reference/json/tree.schema.json).
 
 ## confed diff
 
@@ -832,6 +865,19 @@ output stay clean without anyone having to pass a flag.
 
 Use `--silent` (or `CONFED_SILENT=1`) to turn it off while keeping ordinary output.
 
+`--progress jsonl` (or `CONFED_PROGRESS=jsonl`) is for scripts: one JSON object per
+line on stderr, under `--json` too, and in every space of an instance command. Each
+stage is announced when it starts and when it ends, with in between at most one line
+a second:
+
+```
+{"event":"stage","stage":"Fetching","total":40,"space":"ENG","elapsed_ms":1520}
+{"event":"progress","stage":"Fetching","done":12,"total":40,"item":"Runbooks","space":"ENG","elapsed_ms":2530}
+{"event":"stage_done","stage":"Fetching","done":40,"total":40,"stage_ms":5100,"space":"ENG","elapsed_ms":6620}
+```
+
+`stage_ms` says where a slow run spends its time. `--progress none` shows nothing.
+
 ## Known gaps
 
 Places where the accepted command line is ahead of the behaviour, or where
@@ -881,8 +927,15 @@ Only when that can't be a directory name either is it `@` and the id. Personal
 spaces are cloned only when asked for (`--type personal`, or by key).
 
 **Naming pages.** From the root, a page is a path from the current directory
-(`DOCS/Team Handbook.md`), `KEY:path` (`DOCS:Team Handbook.md`), or a page id, looked up
-in every registered space.
+(`DOCS/Team Handbook.md`), `KEY:path` (`DOCS:Team Handbook.md`), a page id, looked up in
+every registered space and then on the server, or its URL: `…/spaces/KEY/pages/ID/…`,
+`…/pages/viewpage.action?pageId=ID`, `…/display/KEY/Title`. A space's URL
+(`…/spaces/KEY`, `…/display/KEY`) names the space: as a destination, its top. A URL of
+another server is exit 2.
+
+**Stale agent docs.** Every instance command warns when the root's agent docs, or any
+registered space's, were written by another confed than the one running, naming each;
+`confed instance doctor --fix` rewrites them.
 
 **Which spaces.** The global `--space KEY` restricts a command to those spaces. Repeat
 it, or separate keys with commas: `--space DOCS,ENG`. `CONFED_SPACE` does the same.
@@ -959,7 +1012,7 @@ refuses (exit 7) while the workspace has local changes, conflicts or unsent comm
 Run the single-space command in every registered space (or `--space …`) and report the
 results side by side.
 
-- `status [--fetch] [--short] [--exit-code]`
+- `status [--fetch] [--short] [--summary] [--exit-code]`
 - `fetch [--since …]`
 - `pull [--no-fetch] [--no-merge] [--dry-run] [--no-attachments] [--no-comments]`
 - `push -m "why" [--dry-run] [--allow-delete] [--no-attachments] [--no-comments]`:
@@ -973,6 +1026,24 @@ results side by side.
   that sends a move request for one registered page under a target that cannot exist,
   so nothing moves, but it is a write request against a real page.
 
+### confed instance locate / tree
+
+```bash
+confed instance locate 1002 "https://wiki.example.test/display/DOCS/Onboarding" --json
+confed instance locate 1002 --remote --json
+confed instance tree 1001 --depth 1 --json
+confed instance tree ENG: --remote
+```
+
+`locate PAGE…` says where each page is: `space`, `dir`, `path` and `file` (from the
+root), whether its workspace has it (`local`), its `state`, and `local_version` and
+`remote_version`. Offline, it knows what the workspaces have pulled or fetched; with
+`--remote` it also asks the server, for pages no workspace has yet and for current
+versions. A page not found is `found: false`, with its error in `errors`.
+
+`tree PAGE` (or `KEY:` for a whole space) is [`confed tree`](#confed-tree) for any
+space of the instance.
+
 ### confed instance search
 
 `confed instance search <cql|text> [--limit N]` searches every registered space. Each
@@ -985,13 +1056,31 @@ confed instance mv "DOCS:Team Handbook/Onboarding.md" "ENG:Runbooks.md" --dry-ru
 confed instance mv "DOCS:Team Handbook/Onboarding.md" "ENG:Runbooks.md" -m "ENG owns it" -y
 confed instance mv 1002 ENG:                 # to the top of ENG, under its home page
 confed instance mv 1002 ENG: --root          # a top-level page beside the home page
+confed instance mv 1002 1004 ENG:Runbooks.md # several pages, one move
+confed instance mv --children-of DOCS: https://wiki.example.test/spaces/ENG/pages/2002/Runbooks
 ```
 
-Moves a page, and every page under it, to another space. The server moves the pages,
-so page ids, versions, history, comments, inline markers, attachments and labels stay
-as they are. `DEST` is an existing page (the new parent), `KEY:` (the top of that space),
-or a new path, which also renames the page. `--before`, `--after` and `--position` work
-as in `confed mv`.
+Moves pages, each with every page under it, to another space. The server moves the
+pages, so page ids, versions, history, comments, inline markers, attachments and labels
+stay as they are. `SOURCE… DEST`: every argument but the last is a page to move; the
+last is where to: an existing page (the new parent), `KEY:` (the top of that space), or
+a new path, which also renames the one page moved there. `--before`, `--after` and
+`--position` work as in `confed mv`.
+
+**Several pages.** Name them one by one, or give `--children-of PAGE` and only the
+destination: every page directly under `PAGE` moves, in its order; `KEY:` (or a space
+URL) means every page under that space's home page. They must all be in one space. They
+are one plan, checked together, one journal entry, one `resume` or `abort`, and they end
+up side by side under the destination in the order given: each is moved by a request of
+its own, one after the other, every one placed next to the same target. A page under
+another one being moved is refused (`nested_source`): name only the one above.
+
+**Pages not pulled yet.** The destination, a page given to `--before`/`--after`, or a
+page to move may be one that no workspace has yet: given by id or URL, confed finds its
+space on the server. After fetching both spaces it pulls those pages, the pages above
+them and, for pages to move, the pages under them, and nothing else. They are listed in
+`result.pulled`, in a dry run too: a dry run changes nothing on the server, but may add
+those files.
 
 Everything is checked before anything is written. Both spaces are fetched first, and
 every problem is listed together (exit 7, or 2 for bad arguments):
@@ -1006,9 +1095,20 @@ every problem is listed together (exit 7, or 2 for bad arguments):
 - nothing is in the way on disk in the destination
 - the pages, in every registered space, whose links the move would break
 
-`--dry-run` stops there and prints the plan: the subtree before and after, collisions,
-and the pages whose links will change. A real run asks first, or takes `--yes`. Without
-a terminal it is exit 2.
+`--dry-run` stops there and prints the plan: the subtrees before and after, the titles
+that change, and the pages whose links will change. A plan with more than 30 pages is
+listed by its roots; `-v` lists every page. A real run asks first, or takes `--yes`.
+Without a terminal it is exit 2.
+
+A move that cannot run still returns the whole plan, dry run or not, with exit 7: the
+problems are in `result.blocking`, one object each — `kind` (`home_page`,
+`nested_source`, `not_pulled`, `local_changes`, `comment_drafts`, `unpushed_page`,
+`attachment_changes`, `destination_parent_not_tracked`, `destination_parent_changed`,
+`title_taken`, `no_permission`, `path_taken`, `linking_page_changed`), `message`, and the
+page's `page_id`, `space` and `path` where there is one. A `title_taken` also has
+`existing_page_id` and, when that title is free, `suggested_title`: what
+`--on-conflict suffix` would call the page. Nothing is written to the server or the
+journal.
 
 Placement: `append` under a parent whose children have never been reordered lands in
 title order, not last, because that is how Confluence orders siblings with no position.
@@ -1026,9 +1126,22 @@ each page is saved once, with the `-m` message. Links the server already fixed a
 to it and listed in `links_by_server`. `--no-rewrite-links` changes none.
 `--relativize` drops the space key from a link that ends up in its own space.
 
-`--json` result: `moved[]` (`page_id`, `title`, `from`/`to` `{space, path}`, `version`),
+`--json` result: `roots[]`, `summary` (counts of pages, roots, attachments, comments,
+renames, links and blockers), `pages[]` (the plan), `moved[]` (`page_id`, `title`,
+`from`/`to` `{space, path}`, `version`), `renamed[]` (`page_id`, `from_title`,
+`to_title`, `reason`: `conflict_suffix`, `title_map` or `destination_path` — only the
+pages renamed, never the pages under them), `blocking[]`, `pulled[]`,
 `links_rewritten[]` (`page_id`, `space`, `count`), `links_by_server[]`, `warnings[]`,
-`journal_id`.
+`journal_id`, and after a move `verified`:
+
+```json
+{ "pages": 58, "at_destination": 58, "source_remaining": ["Home.md"],
+  "source_remaining_count": 1, "workspaces_clean": true }
+```
+
+read back once the move is done: pages tracked in the destination and in no other
+workspace, what the source still tracks, and whether every page in both workspaces is
+unchanged. No `instance status` or `doctor` is needed afterwards to check it.
 
 `--wait SECONDS` (default 120) is how long confed waits for the server to finish a
 move it has accepted. Data Center moves the pages in a background task after it has

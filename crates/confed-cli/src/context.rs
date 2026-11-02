@@ -359,6 +359,18 @@ impl Context {
 
     /// A progress reporter, or a silent one when nobody is watching.
     pub fn progress(&self) -> confed_core::progress::ProgressRef {
+        self.progress_for(self.workspace().ok().and_then(|ws| ws.space_key().ok()))
+    }
+
+    /// [`Self::progress`] for work in `space`. `--progress jsonl` is asked
+    /// for by name, so it is shown even where a terminal line would not be:
+    /// under `--json`, and in each space of an instance command.
+    pub fn progress_for(&self, space: Option<String>) -> confed_core::progress::ProgressRef {
+        match self.global.progress.as_str() {
+            "none" => return confed_core::progress::none(),
+            "jsonl" => return Arc::new(crate::progress::JsonlProgress::new(space)),
+            _ => {}
+        }
         if crate::progress::TerminalProgress::should_show(
             self.global.silent,
             self.global.quiet,
@@ -435,6 +447,13 @@ impl Context {
             Err(_) if !reference.is_empty() && reference.chars().all(|c| c.is_ascii_digit()) => {
                 Ok(reference.to_string())
             }
+            Err(ConfedError::NotFound(message)) => match crate::pageref::parse(reference) {
+                Some(crate::pageref::ParsedUrl {
+                    target: crate::pageref::UrlRef::Page { id, .. },
+                    ..
+                }) => Ok(id),
+                _ => Err(ConfedError::NotFound(message)),
+            },
             Err(e) => Err(e),
         }
     }
@@ -444,6 +463,9 @@ impl Context {
         // `KEY:path` names a page of this space, or of another member of this
         // instance; anything else with a colon is just a path.
         let own = ws.space_key().unwrap_or_default();
+        if crate::pageref::is_url(reference) {
+            return self.resolve_url(ws, &own, reference);
+        }
         let reference = match split_space_ref(reference) {
             Some((key, path)) if key.eq_ignore_ascii_case(&own) => path,
             Some((key, _)) if self.is_member(key) => {
@@ -497,6 +519,66 @@ impl Context {
             });
         Err(ConfedError::NotFound(format!(
             "no page matching `{reference}`: looked for {looked}; {hint}"
+        )))
+    }
+}
+
+impl Context {
+    /// A Confluence URL, as a page of this workspace's space.
+    fn resolve_url(&self, ws: &Workspace, own: &str, reference: &str) -> Result<String> {
+        use crate::pageref::UrlRef;
+        let parsed = crate::pageref::parse(reference).ok_or_else(|| {
+            ConfedError::usage_with_hint(
+                format!("`{reference}` is not a Confluence page URL"),
+                "confed reads /spaces/KEY/pages/ID/…, /pages/viewpage.action?pageId=ID and \
+                 /display/KEY/Title",
+            )
+        })?;
+        let elsewhere = |key: &str| {
+            ConfedError::usage_with_hint(
+                format!("`{reference}` is a page of space {key}, not of {own}"),
+                "run the command in that space's workspace, or use `confed instance` from the root",
+            )
+        };
+        let id = match parsed.target {
+            UrlRef::Page { space: Some(key), .. } if !key.eq_ignore_ascii_case(own) => {
+                return Err(elsewhere(&key))
+            }
+            UrlRef::Page { id, .. } => id,
+            UrlRef::Titled { space, .. } if !space.eq_ignore_ascii_case(own) => {
+                return Err(elsewhere(&space))
+            }
+            UrlRef::Titled { title, .. } => {
+                let tracked = ws.state().all_pages()?.into_iter().find(|p| p.title == title);
+                let listed = || -> Result<Option<String>> {
+                    Ok(ws
+                        .state()
+                        .all_remote()?
+                        .into_iter()
+                        .find(|r| !r.deleted && r.title == title)
+                        .map(|r| r.page_id))
+                };
+                match tracked.map(|p| p.page_id) {
+                    Some(id) => id,
+                    None => listed()?.ok_or_else(|| {
+                        ConfedError::NotFound(format!(
+                            "no page titled \"{title}\" in {own}; `confed fetch` if it is new"
+                        ))
+                    })?,
+                }
+            }
+            UrlRef::Space { space } => {
+                return Err(ConfedError::usage(format!(
+                    "`{reference}` names space {space}, not a page in it"
+                )))
+            }
+        };
+        if ws.state().get_page(&id)?.is_some() || ws.state().get_remote(&id)?.is_some() {
+            return Ok(id);
+        }
+        Err(ConfedError::NotFound(format!(
+            "page {id} is not in this workspace's space ({own}), as last fetched; `confed fetch` \
+             if it is new"
         )))
     }
 }

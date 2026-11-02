@@ -82,6 +82,19 @@ pub struct GlobalArgs {
     /// Tracing filter, e.g. `confed::http=debug`.
     #[arg(long, global = true, env = "CONFED_LOG")]
     pub log: Option<String>,
+
+    /// How progress is shown while long operations run: `auto` (a line on a
+    /// terminal), `jsonl` (one JSON object per line on stderr, also under
+    /// --json, for scripts that want to see a long pull move), or `none`.
+    #[arg(long, global = true, env = "CONFED_PROGRESS", value_name = "MODE",
+          value_parser = ["auto", "jsonl", "none"], default_value = "auto")]
+    pub progress: String,
+
+    /// Print only part of the JSON result: a dot path into `result`, `*` for
+    /// every element (`spaces.*.result.clean`), and `a,b` for several
+    /// fields. Implies --json.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub select: Option<String>,
 }
 
 impl GlobalArgs {
@@ -170,6 +183,9 @@ pub enum Command {
     /// Generate an MkDocs site over the pulled Markdown.
     Mkdocs(MkdocsArgs),
 
+    /// The space's pages as the server nests them, with ids and titles.
+    Tree(TreeArgs),
+
     /// Report this build's versions, and what changed in it.
     Version(VersionArgs),
 
@@ -213,6 +229,7 @@ impl Command {
             Command::Doctor(_) => "doctor",
             Command::Export(_) => "export",
             Command::Mkdocs(_) => "mkdocs",
+            Command::Tree(_) => "tree",
             Command::Version(_) => "version",
             Command::Completion(_) => "completion",
             Command::Instance(_) => "instance",
@@ -383,6 +400,26 @@ pub struct StatusArgs {
     /// Exit 10 when anything differs.
     #[arg(long)]
     pub exit_code: bool,
+
+    /// Counts by state instead of every page; `changed` lists the first
+    /// pages that differ.
+    #[arg(long, conflicts_with = "short")]
+    pub summary: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct TreeArgs {
+    /// The page whose subtree to show: a path, a page id or its URL
+    /// [default: the whole space].
+    pub page: Option<String>,
+
+    /// How many levels below it; 1 lists its children only.
+    #[arg(long, value_name = "N")]
+    pub depth: Option<usize>,
+
+    /// List the space on the server now, rather than as last fetched.
+    #[arg(long)]
+    pub remote: bool,
 }
 
 #[derive(Args, Debug)]
@@ -787,6 +824,12 @@ pub enum InstanceCommand {
     /// Move a page, with the pages under it, to another space.
     Mv(InstanceMvArgs),
 
+    /// Where pages are: their space, workspace, file, state and versions.
+    Locate(InstanceLocateArgs),
+
+    /// The pages under a page, or a whole space, with ids and titles.
+    Tree(InstanceTreeArgs),
+
     /// Search every registered space with CQL or plain text.
     Search(InstanceSearchArgs),
 
@@ -813,6 +856,8 @@ impl InstanceCommand {
             InstanceCommand::Push(_) => "push",
             InstanceCommand::Doctor(_) => "doctor",
             InstanceCommand::Mv(_) => "mv",
+            InstanceCommand::Locate(_) => "locate",
+            InstanceCommand::Tree(_) => "tree",
             InstanceCommand::Search(_) => "search",
             InstanceCommand::Resume(_) => "resume",
             InstanceCommand::Abort(_) => "abort",
@@ -953,6 +998,35 @@ pub struct InstanceStatusArgs {
     /// Exit 10 when anything differs in any space.
     #[arg(long)]
     pub exit_code: bool,
+
+    /// Counts by state per space instead of every page.
+    #[arg(long, conflicts_with = "short")]
+    pub summary: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceLocateArgs {
+    /// Pages to find: paths from here, KEY:path, page ids or Confluence URLs.
+    #[arg(required = true, value_name = "PAGE")]
+    pub pages: Vec<String>,
+
+    /// Also ask the server: pages not pulled anywhere yet, and current versions.
+    #[arg(long)]
+    pub remote: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceTreeArgs {
+    /// The page whose subtree to show, or `KEY:` (or a space URL) for a whole space.
+    pub page: String,
+
+    /// How many levels below it; 1 lists its children only.
+    #[arg(long, value_name = "N")]
+    pub depth: Option<usize>,
+
+    /// List the space on the server now, rather than as last fetched.
+    #[arg(long)]
+    pub remote: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1026,13 +1100,20 @@ pub struct InstanceDoctorArgs {
 
 #[derive(Args, Debug)]
 pub struct InstanceMvArgs {
-    /// The page to move: a path from here, KEY:path, or a page id.
-    pub source: String,
+    /// The pages to move, then where to: `SOURCE… DEST`. A page is a path
+    /// from here, KEY:path, a page id or its Confluence URL. The destination
+    /// is an existing page (it becomes the parent), `KEY:` (or a space URL)
+    /// for the top of that space, under its home page, or a new path, which
+    /// also renames the one page moved there. Every source moves with the
+    /// pages under it, in one plan.
+    #[arg(required = true, value_name = "PAGE")]
+    pub pages: Vec<String>,
 
-    /// Where to: an existing page (it becomes the parent), `KEY:` for the top
-    /// of that space (under its home page), or a new path, which also
-    /// renames the page.
-    pub destination: String,
+    /// Move every page directly under this one, each with its subtree, in
+    /// their order: a page, or `KEY:` (or a space URL) for every page under
+    /// that space's home page. Then only the destination is given.
+    #[arg(long, value_name = "PAGE")]
+    pub children_of: Option<String>,
 
     /// Place it before this page of the destination.
     #[arg(long, conflicts_with_all = ["after", "position", "root"])]
@@ -1084,6 +1165,18 @@ pub struct InstanceMvArgs {
     /// Data Center moves pages in the background, after it has answered.
     #[arg(long, value_name = "SECONDS", default_value_t = confed_core::crossmove::DEFAULT_WAIT_SECS)]
     pub wait: u64,
+}
+
+impl InstanceMvArgs {
+    /// Every argument but the last: the pages to move.
+    pub fn sources(&self) -> &[String] {
+        &self.pages[..self.pages.len().saturating_sub(1)]
+    }
+
+    /// The last argument: where to.
+    pub fn destination(&self) -> &str {
+        self.pages.last().map(String::as_str).unwrap_or_default()
+    }
 }
 
 #[derive(Args, Debug)]
@@ -1182,7 +1275,8 @@ mod tests {
             .unwrap();
         match cli.command {
             Command::Instance(InstanceCommand::Mv(args)) => {
-                assert_eq!(args.destination, "ENG:");
+                assert_eq!(args.destination(), "ENG:");
+                assert_eq!(args.sources(), ["DOCS:a.md"]);
                 assert!(args.root);
             }
             other => panic!("expected instance mv, got {other:?}"),

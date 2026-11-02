@@ -132,6 +132,93 @@ impl Progress for TerminalProgress {
     }
 }
 
+/// Progress for scripts: one JSON object per line on stderr, so a `--json`
+/// run that takes minutes can be watched, and its time read stage by stage.
+///
+/// Each stage is announced when it starts (`"event": "stage"`) and when it
+/// ends (`"stage_done"`, with how long it took and how many items it did);
+/// in between, `"progress"` at most once a second.
+pub struct JsonlProgress {
+    space: Option<String>,
+    started: Instant,
+    current: Mutex<Option<StageClock>>,
+}
+
+struct StageClock {
+    name: String,
+    total: Option<usize>,
+    done: usize,
+    started: Instant,
+    last_line: Instant,
+}
+
+/// How often a stage reports in between its start and its end.
+const JSONL_INTERVAL: Duration = Duration::from_secs(1);
+
+impl JsonlProgress {
+    pub fn new(space: Option<String>) -> Self {
+        Self { space, started: Instant::now(), current: Mutex::new(None) }
+    }
+
+    fn line(&self, mut event: serde_json::Value) {
+        event["space"] = serde_json::json!(self.space);
+        event["elapsed_ms"] = serde_json::json!(self.started.elapsed().as_millis() as u64);
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "{event}");
+    }
+
+    fn close(&self, stage: &StageClock) {
+        self.line(serde_json::json!({
+            "event": "stage_done",
+            "stage": stage.name,
+            "done": stage.done,
+            "total": stage.total,
+            "stage_ms": stage.started.elapsed().as_millis() as u64,
+        }));
+    }
+}
+
+impl Progress for JsonlProgress {
+    fn stage(&self, name: &str, total: Option<usize>) {
+        let mut current = self.current.lock().expect("progress poisoned");
+        if let Some(previous) = current.take() {
+            self.close(&previous);
+        }
+        self.line(serde_json::json!({ "event": "stage", "stage": name, "total": total }));
+        let now = Instant::now();
+        *current = Some(StageClock {
+            name: name.to_string(),
+            total,
+            done: 0,
+            started: now,
+            last_line: now,
+        });
+    }
+
+    fn item(&self, detail: &str) {
+        let mut current = self.current.lock().expect("progress poisoned");
+        let Some(stage) = current.as_mut() else { return };
+        stage.done += 1;
+        if stage.last_line.elapsed() < JSONL_INTERVAL {
+            return;
+        }
+        stage.last_line = Instant::now();
+        self.line(serde_json::json!({
+            "event": "progress",
+            "stage": stage.name,
+            "done": stage.done,
+            "total": stage.total,
+            "item": detail,
+        }));
+    }
+
+    fn finish(&self) {
+        if let Some(stage) = self.current.lock().expect("progress poisoned").take() {
+            self.close(&stage);
+        }
+    }
+}
+
 impl Default for TerminalProgress {
     fn default() -> Self {
         Self::new()
@@ -150,6 +237,17 @@ mod tests {
         assert!(!TerminalProgress::should_show(false, true, false), "--quiet");
         assert!(!TerminalProgress::should_show(false, false, true), "--json");
         assert!(!TerminalProgress::should_show(false, false, false), "redirected stderr");
+    }
+
+    #[test]
+    fn jsonl_progress_counts_each_stage_to_its_end() {
+        let progress = JsonlProgress::new(Some("DOCS".into()));
+        progress.stage("Writing", Some(2));
+        progress.item("One.md");
+        progress.item("Two.md");
+        assert_eq!(progress.current.lock().unwrap().as_ref().map(|s| s.done), Some(2));
+        progress.finish();
+        assert!(progress.current.lock().unwrap().is_none());
     }
 
     #[test]

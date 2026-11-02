@@ -356,6 +356,16 @@ impl Instance {
         Ok(())
     }
 
+    /// Save the plan as it now stands, leaving its step as it was: progress
+    /// inside a step that a resume must not repeat.
+    pub fn journal_save(&self, id: &str, plan: &serde_json::Value) -> Result<()> {
+        self.conn.execute(
+            "UPDATE journal SET plan = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, plan.to_string(), crate::state::now()],
+        )?;
+        Ok(())
+    }
+
     /// Note why the operation stopped, leaving its step as it was.
     pub fn journal_fail(&self, id: &str, error: &str) -> Result<()> {
         self.conn.execute(

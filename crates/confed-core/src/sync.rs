@@ -1195,10 +1195,17 @@ impl SyncEngine {
             }
         }
 
+        let mut unknown = Vec::new();
         for (attr, id) in wanted {
-            if ws.state().get_user(&id)?.is_some() {
-                continue;
+            if ws.state().get_user(&id)?.is_none() {
+                unknown.push((attr, id));
             }
+        }
+        if !unknown.is_empty() {
+            self.progress.stage("Looking up mentioned people", Some(unknown.len()));
+        }
+        for (attr, id) in unknown {
+            self.progress.item(&id);
             let reference = match attr.as_str() {
                 "account-id" => confed_api::UserReference::AccountId(id.clone()),
                 "username" => confed_api::UserReference::Username(id.clone()),

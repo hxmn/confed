@@ -23,6 +23,7 @@ pub mod search;
 pub mod spaces;
 pub mod status;
 pub mod sync_cmds;
+pub mod tree;
 pub mod user;
 pub mod version;
 pub mod whoami;

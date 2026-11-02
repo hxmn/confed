@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/instance.schema.json",
   "title": "confed instance result",
-  "description": "The `result` of every `confed instance … --json` command. `action` names the subcommand. Commands that run in several spaces (status, fetch, pull, push, doctor, clone) put one entry per space in `spaces`; `mv` and `resume` describe the move.",
+  "description": "The `result` of every `confed instance … --json` command. `action` names the subcommand. Commands that run in several spaces (status, fetch, pull, push, doctor, clone) put one entry per space in `spaces`; `mv` and `resume` describe the move; `locate` and `tree` list pages in `pages`.",
   "type": "object",
   "required": ["action"],
   "properties": {
     "action": {
       "type": "string",
-      "enum": ["init", "adopt", "spaces", "clone", "add", "remove", "status", "fetch", "pull", "push", "doctor", "mv", "search", "resume", "abort"]
+      "enum": ["init", "adopt", "spaces", "clone", "add", "remove", "status", "fetch", "pull", "push", "doctor", "mv", "locate", "tree", "search", "resume", "abort"]
     },
     "spaces": {
       "type": "array",
@@ -75,6 +75,92 @@
       "type": "array",
       "description": "`mv`, `resume`: restrictions that move with the pages, a rules page in the subtree, links the server updated. Also in the envelope's `warnings`.",
       "items": { "type": "string" }
+    },
+    "roots": {
+      "type": "array",
+      "description": "`mv`, `resume`: the pages moved, each with the pages under it, in the order they end up side by side under the destination. One plan, one journal entry.",
+      "items": { "type": "string" }
+    },
+    "summary": {
+      "type": "object",
+      "description": "`mv`, `resume`: counts over the plan, for a move too large to read page by page.",
+      "required": ["pages", "roots"],
+      "properties": {
+        "pages": { "type": "integer", "minimum": 0 },
+        "roots": { "type": "integer", "minimum": 0 },
+        "attachments": { "type": "integer", "minimum": 0 },
+        "comments": { "type": "integer", "minimum": 0 },
+        "renamed": { "type": "integer", "minimum": 0 },
+        "links": { "type": "integer", "minimum": 0 },
+        "blocking": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "renamed": {
+      "type": "array",
+      "description": "`mv`, `resume`: every page whose title the move changes (or changed), and why. Pages under a renamed page are not in it: their paths change, their titles do not.",
+      "items": {
+        "type": "object",
+        "required": ["page_id", "from_title", "to_title"],
+        "properties": {
+          "page_id": { "type": "string" },
+          "from_title": { "type": "string" },
+          "to_title": { "type": "string" },
+          "reason": {
+            "type": ["string", "null"],
+            "enum": ["conflict_suffix", "title_map", "destination_path", null]
+          }
+        }
+      }
+    },
+    "blocking": {
+      "type": "array",
+      "description": "`mv`: what stops the move, each problem once. The rest of the result is the whole plan all the same; the exit code is 7 and nothing was written, on the server or in the journal.",
+      "items": {
+        "type": "object",
+        "required": ["kind", "message"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": ["home_page", "nested_source", "not_pulled", "local_changes", "comment_drafts", "unpushed_page", "attachment_changes", "destination_parent_not_tracked", "destination_parent_changed", "title_taken", "no_permission", "path_taken", "linking_page_changed"]
+          },
+          "message": { "type": "string" },
+          "page_id": { "type": "string" },
+          "space": { "type": "string" },
+          "path": { "type": "string" },
+          "title": { "type": "string" },
+          "existing_page_id": { "type": "string", "description": "`title_taken`: the destination's page with that title." },
+          "suggested_title": { "type": "string", "description": "`title_taken`: what `--on-conflict suffix` would call the page, when that title is free." }
+        }
+      }
+    },
+    "pulled": {
+      "type": "array",
+      "description": "`mv`: pages the move named (the destination, pages beside it, the pages moved) that no workspace had yet, pulled before planning, and only those.",
+      "items": {
+        "type": "object",
+        "required": ["space", "page_id", "path"],
+        "properties": {
+          "space": { "type": "string" },
+          "page_id": { "type": "string" },
+          "path": { "type": "string" }
+        }
+      }
+    },
+    "verified": {
+      "type": ["object", "null"],
+      "description": "`mv`, `resume`: what the move left, read back at its end. Null in a dry run.",
+      "required": ["pages", "at_destination", "source_remaining", "source_remaining_count", "workspaces_clean"],
+      "properties": {
+        "pages": { "type": "integer", "minimum": 0 },
+        "at_destination": { "type": "integer", "minimum": 0, "description": "Moved pages tracked in the destination and in no other workspace." },
+        "source_remaining": { "type": "array", "items": { "type": "string" }, "description": "Pages still tracked in the source, by path: the first 20." },
+        "source_remaining_count": { "type": "integer", "minimum": 0 },
+        "workspaces_clean": { "type": "boolean", "description": "Every page in both workspaces is unchanged." }
+      }
+    },
+    "pages": {
+      "type": "array",
+      "description": "`locate`: one entry per page named, in order; `found` is false for one that was not, and its error is in the envelope's `errors`. `tree`: the pages under the page named (or the whole space), parent first, `depth` 0 for its children. `mv`: the plan's pages."
     },
     "dry_run": { "type": "boolean" },
     "blocked": {

@@ -4,7 +4,34 @@
   "title": "confed status result",
   "description": "The `result` of `confed status --json`. Computed entirely from local state: the working files, the base recorded in .state.db, and the last fetched remote versions.",
   "type": "object",
-  "required": ["space", "clean", "pages", "untracked_files", "unreadable"],
+  "anyOf": [
+    { "required": ["space", "clean", "pages", "untracked_files", "unreadable"] },
+    {
+      "description": "`--summary`: counts instead of every page.",
+      "required": ["space", "clean", "summary", "pages_total", "counts_by_state", "changed", "changed_count"],
+      "properties": {
+        "summary": { "const": true },
+        "pages_total": { "type": "integer", "minimum": 0 },
+        "counts_by_state": {
+          "type": "object",
+          "description": "How many pages are in each state (the states of `pages[].state`); states with none are left out."
+        },
+        "comment_drafts": { "type": "integer", "minimum": 0 },
+        "untracked_files_count": { "type": "integer", "minimum": 0 },
+        "unreadable_count": { "type": "integer", "minimum": 0 },
+        "changed": {
+          "type": "array",
+          "description": "The first 20 pages that differ, or have comment drafts.",
+          "items": {
+            "type": "object",
+            "required": ["path", "state"],
+            "properties": { "path": { "type": "string" }, "state": { "type": "string" } }
+          }
+        },
+        "changed_count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  ],
   "properties": {
     "space": { "type": "string", "description": "The space key this directory is bound to." },
     "last_fetch_at": {

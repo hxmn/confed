@@ -343,12 +343,25 @@ From the root, a page is any of:
 
 - a path from the current directory: `DOCS/Team Handbook/Onboarding.md`
 - `KEY:path`, the path inside that space's workspace: `DOCS:Team Handbook/Onboarding.md`
-- its page id: `1001`, looked up in every registered space
+- its page id: `1001`, looked up in every registered space, then on the server
+- its URL, as the browser shows it: `…/spaces/KEY/pages/ID/…`,
+  `…/pages/viewpage.action?pageId=ID` or `…/display/KEY/Title`; `…/spaces/KEY` and
+  `…/display/KEY` name the space (as a destination, its top)
+
+Never grep frontmatter or `find` files to locate a page:
+
+```bash
+confed instance locate 1001 "<url>" --json     # space, dir, path, state, versions
+confed instance locate 1001 --remote --json    # also pages no workspace has pulled
+confed instance tree 1001 --depth 1 --json    # a page's children: real pages only
+confed instance tree DOCS: --remote --json     # a whole space, as the server has it
+```
 
 ## Commands across spaces
 
 ```bash
 confed instance status --json            # every space; --space KEY (repeatable) narrows it
+confed instance status --summary --json  # counts by state per space, not every page
 confed instance fetch --json
 confed instance pull --json
 confed instance push --dry-run --json    # everything every space would send
@@ -370,6 +383,11 @@ failed has `"ok": false`, its `exit_code` and `errors`, and its errors are also 
 the envelope's `errors`. The exit code is 0 when every space succeeded, the shared
 code when every space failed the same way, and 8 otherwise.
 
+`--select PATH` prints only part of the result, with no script around it:
+`--select spaces.*.result.clean`, `--select moved.*.to.path,renamed`. A long command
+shows its progress as JSON lines on stderr with `--progress jsonl`, each with
+`elapsed_ms`. `| head` and the like are safe: confed stops quietly when the pipe closes.
+
 ## Moving pages between spaces
 
 **Only `confed instance mv` moves a page to another space.** Never move a file from
@@ -381,14 +399,31 @@ server keeps the page's id, history, comments and attachments only through a rea
 confed instance mv DOCS:Handbook/Onboarding.md ENG:Runbooks.md --dry-run --json
 confed instance mv DOCS:Handbook/Onboarding.md ENG:Runbooks.md -m "reason"
 confed instance mv 1002 ENG:              # to the top of ENG, under its home page
+confed instance mv 1002 1004 ENG:Runbooks.md       # several pages, one plan
+confed instance mv --children-of DOCS: "<page url>" -m "reason"  # all but the home page
 ```
 
-The page moves with every page under it. Before anything is written, confed checks
-that every page involved is in sync (exit 7 lists each one that is not — push or pull
-first, or `--push-first -m …`), that no title is already used in the destination
-(`--on-conflict suffix` appends ` (KEY)`), that the page is not a home page, and what
-you may do there. `--dry-run` prints the whole plan: pages, collisions, restrictions,
-and every page whose links will be rewritten.
+Each page moves with every page under it. Several pages — named one by one, or every
+child of a page with `--children-of PAGE` (`KEY:` for every page under the home page)
+— are one plan, one journal entry and one `resume`, and keep their order side by side
+under the destination. Never loop over `confed instance mv` for them.
+
+The destination (and a page moved) need not have been pulled: confed fetches both
+spaces, then pulls only the pages the move names that a workspace does not have yet,
+and lists them in `result.pulled`. A full `confed instance pull` first is not needed.
+
+Before anything is written, confed checks that every page involved is in sync, that no
+title is already used in the destination (`--on-conflict suffix` appends ` (KEY)`), that
+no page is a home page, and what you may do there. `--dry-run` prints the whole plan —
+pages, renames, restrictions, every page whose links will be rewritten — even when the
+move cannot run: then `result.blocking` lists each problem (`kind`, `message`, and for a
+taken title `existing_page_id` and `suggested_title`) and the exit code is 7. Read
+`result.renamed` for the titles that change, never the paths. `result.summary` counts it
+all; the text output lists a large move by its roots (`-v` for every page).
+
+After the move, `result.verified` says what was read back: pages tracked in the
+destination only, what is left in the source, and whether both workspaces are clean.
+There is no need to run `instance status` or `doctor` afterwards to check it.
 
 Links between spaces are written `[Title](<base url>/display/KEY/Title)`. A link by
 title names its space only when it is another one, so a move changes which links need
@@ -548,6 +583,8 @@ confed:                    # TOOL-MANAGED — DO NOT EDIT ANY OF THIS
 
 ```bash
 confed status --json                  # what changed, locally and on the server
+confed status --summary --json        # …as counts by state, and the pages that differ
+confed tree <page> --depth 1 --json   # a page's children, with ids: never `find` for it
 confed diff "Handbook/**"             # base vs local
 confed diff --remote --exit-code      # exit 10 if the server has moved
 confed fetch --json                   # refresh remote state, touch no files
@@ -562,8 +599,10 @@ confed log --json                     # what changed lately anywhere in the spac
 confed version --json                 # this build, its schemas, its changelog
 ```
 
-Page arguments are paths relative to the current directory, like git's, or page
-ids; a path that names nothing there is read from the workspace root.
+Page arguments are paths relative to the current directory, like git's, page ids,
+or the page's URL as the browser shows it; a path that names nothing there is read
+from the workspace root. `--select PATH` prints only part of a `--json` result
+(`--select pages.*.path`), so no script is needed to read it.
 
 `--json` implies `--non-interactive`: confed never prompts and never hangs. Missing
 values fail immediately with exit code 2 and a message naming the flag and the

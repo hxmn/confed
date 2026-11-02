@@ -117,7 +117,15 @@ fn render(ctx: &Context, args: &StatusArgs, scan: Scan) -> Result<Output> {
         "unreadable": scan.unreadable.iter().map(|(p, e)| json!({"path": p, "error": e})).collect::<Vec<_>>(),
     });
 
-    let human = if args.short {
+    let clean = result["clean"].as_bool().unwrap_or(false);
+    let result = if args.summary {
+        summarize(&space, last_fetch.as_deref(), clean, &scan, &counts)
+    } else {
+        result
+    };
+    let human = if args.summary {
+        render_summary(&result)
+    } else if args.short {
         render_short(&scan, &counts)
     } else {
         render_long(ctx, &scan, &counts, &space, last_fetch.as_deref())
@@ -140,6 +148,57 @@ fn render(ctx: &Context, args: &StatusArgs, scan: Scan) -> Result<Output> {
     }
     let _ = style;
     Ok(output)
+}
+
+/// `--summary`: how many pages are in each state, and which differ — what a
+/// script checks, without every page of the space.
+fn summarize(
+    space: &str,
+    last_fetch: Option<&str>,
+    clean: bool,
+    scan: &Scan,
+    counts: &[(usize, usize)],
+) -> serde_json::Value {
+    let mut by_state = std::collections::BTreeMap::new();
+    for page in &scan.pages {
+        *by_state.entry(page.state.as_str()).or_insert(0usize) += 1;
+    }
+    let changed: Vec<_> = scan
+        .pages
+        .iter()
+        .zip(counts)
+        .filter(|(p, (drafts, _))| p.state != PageState::Unchanged || *drafts > 0)
+        .map(|(p, _)| json!({ "path": display_path(p), "state": p.state.as_str() }))
+        .collect();
+    let drafts: usize = counts.iter().map(|(d, _)| d).sum();
+    json!({
+        "space": space,
+        "last_fetch_at": last_fetch,
+        "clean": clean,
+        "summary": true,
+        "pages_total": scan.pages.len(),
+        "counts_by_state": by_state,
+        "comment_drafts": drafts,
+        "untracked_files_count": scan.untracked_files.len(),
+        "unreadable_count": scan.unreadable.len(),
+        "changed": changed.iter().take(20).collect::<Vec<_>>(),
+        "changed_count": changed.len(),
+    })
+}
+
+/// One line: the space, whether it is clean, and its pages by state.
+fn render_summary(result: &serde_json::Value) -> String {
+    let states = result["counts_by_state"]
+        .as_object()
+        .map(|m| m.iter().map(|(k, v)| format!("{v} {k}")).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
+    format!(
+        "{}: {} — {}{}\n",
+        result["space"].as_str().unwrap_or_default(),
+        if result["clean"].as_bool() == Some(true) { "clean" } else { "differs" },
+        if states.is_empty() { "no pages".to_string() } else { states },
+        result["last_fetch_at"].as_str().map(|t| format!(" (fetched {t})")).unwrap_or_default()
+    )
 }
 
 fn render_short(scan: &Scan, counts: &[(usize, usize)]) -> String {

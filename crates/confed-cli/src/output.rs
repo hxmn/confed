@@ -92,8 +92,22 @@ impl ErrorEntry {
     }
 }
 
-/// Print a successful command's output in the requested format.
-pub fn emit(command: &str, output: &Output, json_mode: bool, duration_ms: u128) {
+/// Write to stdout, and stop quietly when nobody reads any more: a closed
+/// pipe (`confed … | head`) ends the output, not the process with a panic.
+fn print(text: &str) {
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{text}").and_then(|_| out.flush());
+}
+
+/// Print a successful command's output in the requested format; with
+/// `select`, only that part of the envelope (see [`select`]).
+pub fn emit(
+    command: &str,
+    output: &Output,
+    json_mode: bool,
+    select: Option<&str>,
+    duration_ms: u128,
+) {
     if json_mode {
         let envelope = json!({
             "confed": {
@@ -108,12 +122,16 @@ pub fn emit(command: &str, output: &Output, json_mode: bool, duration_ms: u128) 
             "errors": output.errors,
             "warnings": output.warnings,
         });
-        println!("{}", serde_json::to_string_pretty(&envelope).unwrap_or_default());
+        let shown = match select {
+            Some(path) => self::select(&envelope, path),
+            None => envelope,
+        };
+        print(&serde_json::to_string_pretty(&shown).unwrap_or_default());
         return;
     }
 
     if !output.human.is_empty() {
-        println!("{}", output.human.trim_end());
+        print(output.human.trim_end());
     }
     let mut stderr = std::io::stderr();
     for warning in &output.warnings {
@@ -145,7 +163,7 @@ pub fn emit_error(command: &str, error: &ConfedError, json_mode: bool, duration_
             "errors": [entry],
             "warnings": Vec::<String>::new(),
         });
-        println!("{}", serde_json::to_string_pretty(&envelope).unwrap_or_default());
+        print(&serde_json::to_string_pretty(&envelope).unwrap_or_default());
         return;
     }
 
@@ -153,6 +171,50 @@ pub fn emit_error(command: &str, error: &ConfedError, json_mode: bool, duration_
     let _ = writeln!(stderr, "error: {}", entry.message);
     if let Some(hint) = entry.hint {
         let _ = writeln!(stderr, "hint: {hint}");
+    }
+}
+
+/// The part of an envelope `--select` names.
+///
+/// A path is dot-separated keys into `result` — or into the envelope when
+/// it starts with `confed`, `result`, `errors` or `warnings`. A number
+/// indexes an array; `*` takes every element of an array (or value of an
+/// object) and applies the rest of the path to each. Several paths separated
+/// by commas give an object keyed by path. What is not there is `null`.
+pub fn select(envelope: &Value, path: &str) -> Value {
+    let one = |path: &str| {
+        let path = path.trim();
+        let top = path.split('.').next().unwrap_or_default();
+        let (root, rest) = if ["confed", "result", "errors", "warnings"].contains(&top) {
+            (envelope, path)
+        } else {
+            (&envelope["result"], path)
+        };
+        let segments: Vec<&str> = rest.split('.').filter(|s| !s.is_empty()).collect();
+        walk(root, &segments)
+    };
+    if path.contains(',') {
+        let mut out = serde_json::Map::new();
+        for part in path.split(',').filter(|p| !p.trim().is_empty()) {
+            out.insert(part.trim().to_string(), one(part));
+        }
+        Value::Object(out)
+    } else {
+        one(path)
+    }
+}
+
+fn walk(value: &Value, segments: &[&str]) -> Value {
+    let Some((first, rest)) = segments.split_first() else { return value.clone() };
+    match (*first, value) {
+        ("*", Value::Array(items)) => Value::Array(items.iter().map(|v| walk(v, rest)).collect()),
+        ("*", Value::Object(map)) => Value::Array(map.values().map(|v| walk(v, rest)).collect()),
+        (key, Value::Array(items)) => match key.parse::<usize>() {
+            Ok(index) => items.get(index).map_or(Value::Null, |v| walk(v, rest)),
+            Err(_) => Value::Null,
+        },
+        (key, Value::Object(map)) => map.get(key).map_or(Value::Null, |v| walk(v, rest)),
+        _ => Value::Null,
     }
 }
 
@@ -229,6 +291,28 @@ mod tests {
         assert_eq!(plural(1, "page", "pages"), "1 page");
         assert_eq!(plural(0, "page", "pages"), "0 pages");
         assert_eq!(plural(3, "page", "pages"), "3 pages");
+    }
+
+    #[test]
+    fn select_picks_parts_of_the_result_or_the_envelope() {
+        let envelope = json!({
+            "confed": { "exit_code": 0 },
+            "result": { "spaces": [
+                { "space_key": "DOCS", "result": { "clean": true } },
+                { "space_key": "ENG", "result": { "clean": false } },
+            ] },
+            "warnings": ["careful"],
+        });
+        assert_eq!(select(&envelope, "spaces.*.space_key"), json!(["DOCS", "ENG"]));
+        assert_eq!(select(&envelope, "spaces.1.result.clean"), json!(false));
+        assert_eq!(select(&envelope, "result.spaces.0.space_key"), json!("DOCS"));
+        assert_eq!(select(&envelope, "confed.exit_code"), json!(0));
+        assert_eq!(
+            select(&envelope, "spaces.*.space_key,warnings"),
+            json!({ "spaces.*.space_key": ["DOCS", "ENG"], "warnings": ["careful"] })
+        );
+        assert_eq!(select(&envelope, "nothing.here"), Value::Null);
+        assert_eq!(select(&envelope, "spaces.9"), Value::Null);
     }
 
     #[test]

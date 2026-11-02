@@ -99,10 +99,18 @@ failed space. `confed.schema` stays 1.
 ## 4. Addressing
 
 From the root a page is a path from the current directory (`DOCS/Team Handbook.md`),
-`KEY:path` (`DOCS:Team Handbook.md`), or a page id, looked up in every registered
-`.state.db`. A key is capitals and digits, or `~user`, so `C:\…`, URLs and file names
-with a colon in them are never taken for one. A single-space command only reads
-`KEY:path` when `KEY` is its own space or a registered member.
+`KEY:path` (`DOCS:Team Handbook.md`), a page id, or a Confluence URL. A key is capitals
+and digits, or `~user`, so `C:\…`, URLs and file names with a colon in them are never
+taken for one. A single-space command only reads `KEY:path` when `KEY` is its own space
+or a registered member.
+
+*Since 0.15.0.* A page id is looked up in every registered `.state.db` — tracked pages,
+then pages the last fetch listed — and, where the command has a connection, on the
+server, which says the page's space. A URL is read for what it names, never fetched:
+`/spaces/KEY/pages/ID/…` and `/pages/viewpage.action?pageId=ID` an id, `/display/KEY/Title`
+a title (the workspace's, then the server's exact-title lookup), `/spaces/KEY` and
+`/display/KEY` the space. A URL on another host than the instance's base URL is refused,
+since its ids belong to another Confluence.
 
 As a move destination, an existing page becomes the new parent. `KEY:` alone means the
 top of that space: under its home page, or beside it with `--root`. A path that is not a
@@ -110,6 +118,29 @@ page yet names the parent (its directory) and the new title (its file name), as
 `confed mv` does. `--before`, `--after` and `--position` work as in `confed mv`.
 
 ## 5. Moving pages between spaces
+
+### 5.0 Several pages in one move
+
+*Since 0.15.0.* A plan has `roots`, not one root: the pages named, or the children of
+`--children-of PAGE`, all from one space, all going to one place. They are planned
+together — one set of checks, one list of blockers, one link analysis, since a link
+between two moved pages must be judged with both moved — and journaled as one entry.
+On the server each root is its own move request, asked for, followed and read back
+before the next: Data Center runs each as a background task, and nothing is gained by
+having several run at once against the same target. The order puts them side by side
+in the order given: `append` and `before` in order, `after` in reverse, each placed
+relative to the same target, so no request depends on another root having arrived.
+Which roots have been asked for is saved to the journal as each is (`requested`), so a
+resume never asks twice. A journal from 0.14 has no `roots` and means `[root_id]`.
+
+A plan that cannot run is still a plan: `crossmove::draft` returns it with `blocking`,
+the problems as data (`kind`, the page, and for a taken title the page that has it and
+a free alternative). `crossmove::plan` is the same, as an error. A move is never begun
+with blockers; `execute` refuses such a plan.
+
+A destination, or a page to move, that no workspace has is pulled for the move, after
+the fetch of both spaces: the page, the pages above it and, for a page to move, the
+pages under it — through the ordinary pull, scoped to those ids, with no second fetch.
 
 ### 5.1 Which server API moves a page to another space
 

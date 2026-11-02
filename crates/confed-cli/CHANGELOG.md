@@ -20,6 +20,66 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-02
+
+Moving every page of a space but its home page under a page given as a URL used to
+take a dozen confed calls, a full pull and a script around them. It is now one dry run
+and one move.
+
+### Added
+
+- **Several pages in one move.** `confed instance mv SRC1 SRC2 … DEST` moves several
+  pages, and `--children-of PAGE DEST` moves every page directly under `PAGE` (`KEY:` for
+  every page under the home page). It is one plan, checked as a whole, with one journal
+  entry and one `resume` or `abort`. The pages keep their order, side by side under the
+  destination. Each tree is moved by a request of its own, asked for and read back before
+  the next, and the journal records each request as it is made, so a resume never asks
+  twice.
+- **Confluence URLs are page references** everywhere a page is accepted, in a workspace
+  and from an instance root: `…/spaces/KEY/pages/ID/…`,
+  `…/pages/viewpage.action?pageId=ID` and `…/display/KEY/Title`. `…/spaces/KEY` and
+  `…/display/KEY` name the space: as a destination, its top. A URL on another server is
+  exit 2.
+- **A destination nobody has pulled is found and pulled for the move.** A page given by
+  id or URL that no workspace knows is looked up on the server, which says its space.
+  After fetching both spaces, `instance mv` pulls the pages it names that a workspace
+  lacks, with the pages above them (and, for pages to move, the pages under them), and
+  nothing else. They are listed in `result.pulled`.
+- **A dry run shows the whole plan even when the move cannot run.** Problems are listed
+  in `result.blocking`, one object each, with `kind`, `message` and the page. A taken
+  title also has `existing_page_id` and, when that title is free, `suggested_title`.
+  The exit code is still 7. A real run that is refused returns the same.
+- **`result.renamed`** lists every page whose title the move changes, with `from_title`,
+  `to_title` and `reason` (`conflict_suffix`, `title_map`, `destination_path`). Pages
+  under a renamed page are not in it. The text output lists the renames too.
+- **`result.verified`**, after a move: how many pages are tracked in the destination
+  and in no other workspace, what the source still tracks, and whether both workspaces
+  are clean. `result.summary` counts pages, trees, attachments, comments, renames,
+  links and blockers. The text output lists a move of more than 30 pages by its trees;
+  `-v` lists every page.
+- **`confed instance locate PAGE…`** says where pages are: space, workspace, path, state
+  and versions. `--remote` also asks the server, for pages not pulled anywhere.
+- **`confed tree [PAGE]`** and **`confed instance tree PAGE|KEY:`** list the pages under
+  a page (`--depth 1` for its children), as the server nests them, with ids and titles.
+  Only pages are listed, never other files in the workspace. `--remote` lists the
+  server's pages now.
+- **`status --summary`** (and `instance status --summary`) gives counts by state, the
+  last fetch time, and the first pages that differ, not every page.
+- **`--select PATH`**, a global flag, prints only part of the JSON result, so no `jq`
+  or script is needed: `--select spaces.*.result.clean`, `--select summary,renamed`.
+- **`--progress jsonl`** (`CONFED_PROGRESS`) prints progress as JSON lines on stderr,
+  also under `--json` and in every space of an instance command. Each stage reports
+  when it starts and ends, with `stage_ms`, so a slow pull shows where its time goes.
+  The fetch now also reports looking up mentioned people, which was silent before.
+
+### Fixed
+
+- **`confed … --json | head` panicked** with "failed printing to stdout: Broken pipe".
+  confed now stops writing quietly when stdout is closed.
+- **Old agent docs went unnoticed from an instance root.** `instance` commands now warn,
+  naming the root's and every space's `CLAUDE.md`/`AGENTS.md` written by another
+  confed, and point at `confed instance doctor --fix`.
+
 ## [0.14.1] - 2026-10-30
 
 Verified against a live Data Center 9.5.4, in both directions, with resume after a
@@ -1015,7 +1075,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/hxmn/confed/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/hxmn/confed/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/hxmn/confed/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/hxmn/confed/compare/v0.12.0...v0.13.0

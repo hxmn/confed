@@ -67,8 +67,11 @@ pub struct PlannedPage {
     /// The title it gets in the destination, when it has to change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_title: Option<String>,
+    /// Why it changes: `destination_path`, `title_map` or `conflict_suffix`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename_reason: Option<String>,
     pub parent_id: Option<String>,
-    /// 0 for the subtree's root.
+    /// 0 for a root of the move.
     pub depth: usize,
     /// Where it is in the source workspace.
     pub from_path: String,
@@ -137,19 +140,89 @@ pub struct LinkRewrite {
     pub version: u32,
 }
 
+/// Something that stops a move, found before anything is written. The plan
+/// is complete beside it, so a dry run can show both.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Blocker {
+    /// What kind of problem: `home_page`, `nested_source`, `not_pulled`,
+    /// `local_changes`, `comment_drafts`, `unpushed_page`,
+    /// `attachment_changes`, `destination_parent_not_tracked`,
+    /// `destination_parent_changed`, `title_taken`, `no_permission`,
+    /// `path_taken` or `linking_page_changed`.
+    pub kind: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// `title_taken`: the destination's page with that title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_page_id: Option<String>,
+    /// `title_taken`: what `--on-conflict suffix` would call it, when that is free.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_title: Option<String>,
+}
+
+impl Blocker {
+    fn new(kind: &str, message: impl Into<String>) -> Self {
+        Self {
+            kind: kind.to_string(),
+            message: message.into(),
+            page_id: None,
+            space: None,
+            path: None,
+            title: None,
+            existing_page_id: None,
+            suggested_title: None,
+        }
+    }
+
+    fn page(mut self, page_id: &str, space: &str, path: &str) -> Self {
+        self.page_id = Some(page_id.to_string());
+        self.space = Some(space.to_string());
+        self.path = Some(path.to_string()).filter(|p| !p.is_empty());
+        self
+    }
+}
+
+/// What the move left, read back once it was done: every moved page tracked
+/// once, in the destination, and both workspaces clean.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Verified {
+    /// Pages the move planned.
+    pub pages: usize,
+    /// Of those, tracked in the destination and in no other workspace.
+    pub at_destination: usize,
+    /// Pages still tracked in the source, by path (the first 20).
+    pub source_remaining: Vec<String>,
+    pub source_remaining_count: usize,
+    /// Every page in both workspaces is unchanged.
+    pub workspaces_clean: bool,
+}
+
 /// Everything a move needs, from the checks to the last step. It is what the
 /// journal stores, so a move can be resumed by a later process.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MovePlan {
     pub source: SpaceRef,
     pub dest: SpaceRef,
+    /// The first of `roots`.
     pub root_id: String,
-    /// How the subtree's root is placed relative to `target_id` on the server.
+    /// Every page moved with the pages under it, in the order they end up
+    /// side by side under the destination. Empty in a journal written
+    /// before moves had several, where it means `[root_id]`.
+    #[serde(default)]
+    pub roots: Vec<String>,
+    /// How the roots are placed relative to `target_id` on the server.
     pub position: MovePosition,
     pub target_id: String,
-    /// The root's parent afterwards: `None` for a top-level page.
+    /// The roots' parent afterwards: `None` for top-level pages.
     pub new_parent_id: Option<String>,
-    /// Parent first.
+    /// Each root followed by the pages under it, parent first.
     pub pages: Vec<PlannedPage>,
     pub links: Vec<LinkFix>,
     pub rewrite_links: bool,
@@ -162,6 +235,9 @@ pub struct MovePlan {
     /// checked out, and the plan is there to read, but it will not run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<String>,
+    /// What stops the move, each problem once. A plan with any is shown, never run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocking: Vec<Blocker>,
     /// How long to wait for the server to finish a move it has accepted.
     #[serde(default = "default_wait")]
     pub wait_secs: u64,
@@ -172,9 +248,12 @@ pub struct MovePlan {
     /// Pages whose title change has been made on the server.
     #[serde(default)]
     pub renamed: Vec<String>,
-    /// The move has been asked of the server; it is never asked twice.
+    /// The move of every root has been asked of the server; never twice.
     #[serde(default)]
     pub move_requested: bool,
+    /// Roots whose move has been asked of the server, as they are.
+    #[serde(default)]
+    pub requested: Vec<String>,
     #[serde(default)]
     pub moved: Vec<MovedPage>,
     #[serde(default)]
@@ -185,11 +264,91 @@ pub struct MovePlan {
     /// Links the move concerns that reach no page, which confed left alone.
     #[serde(default)]
     pub links_broken: Vec<BrokenLink>,
+    /// What the move left, read back at its end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<Verified>,
 }
 
 impl MovePlan {
     pub fn page_ids(&self) -> Vec<String> {
         self.pages.iter().map(|p| p.page_id.clone()).collect()
+    }
+
+    /// Every root, in the order they end up under the destination.
+    pub fn root_ids(&self) -> Vec<String> {
+        if self.roots.is_empty() {
+            vec![self.root_id.clone()]
+        } else {
+            self.roots.clone()
+        }
+    }
+
+    /// The pages of one root's subtree: the root, then the pages under it.
+    pub fn subtree_of(&self, root: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        let mut inside = false;
+        for page in &self.pages {
+            if page.depth == 0 {
+                inside = page.page_id == root;
+            }
+            if inside {
+                ids.push(page.page_id.clone());
+            }
+        }
+        ids
+    }
+
+    /// The server's moves, in the order to ask for them, each `(root,
+    /// position, target)`. All go next to the same target: in order before
+    /// it or appended under it, and in reverse after it, so they end up in
+    /// `roots` order and none depends on another having moved.
+    pub fn server_moves(&self) -> Vec<(String, MovePosition, String)> {
+        let mut roots = self.root_ids();
+        if self.position == MovePosition::After {
+            roots.reverse();
+        }
+        roots.into_iter().map(|r| (r, self.position, self.target_id.clone())).collect()
+    }
+
+    /// Whether the server has been asked to move this root.
+    fn was_requested(&self, root: &str) -> bool {
+        // A journal from before `requested` asked for its only root.
+        self.requested.iter().any(|r| r == root) || (self.move_requested && self.roots.is_empty())
+    }
+
+    /// The pages whose title the move changes: `(page, old, new, why)`.
+    pub fn renames(&self) -> Vec<(&PlannedPage, &str)> {
+        self.pages
+            .iter()
+            .filter_map(|p| p.new_title.as_deref().map(|t| (p, t)))
+            .filter(|(p, t)| *t != p.title)
+            .collect()
+    }
+
+    /// The error a plan with blockers stands for.
+    pub fn refusal(&self) -> Option<ConfedError> {
+        if self.blocking.is_empty() {
+            return None;
+        }
+        let mut refusal =
+            Refusal { problems: self.blocking.iter().map(|b| b.message.clone()).collect() };
+        refusal.problems.extend(self.blocked.clone());
+        Some(refusal.into_error(&format!("cannot move {} to space {}", self.what(), self.dest.key)))
+    }
+
+    /// The roots, for a message: one path, or how many and the first.
+    pub fn what(&self) -> String {
+        let roots: Vec<&PlannedPage> = self.pages.iter().filter(|p| p.depth == 0).collect();
+        match roots.as_slice() {
+            [] => self.root_id.clone(),
+            [one] => one.from_path.clone(),
+            [first, rest @ ..] => format!(
+                "{} and {} other page tree{}",
+                first.from_path,
+                rest.len(),
+                if rest.len() == 1 { "" } else { "s" }
+            ),
+        }
     }
 
     /// Every space whose workspace the move writes to.
@@ -240,14 +399,16 @@ pub enum OnConflict {
 /// What the user asked for, already resolved to ids.
 #[derive(Clone, Debug)]
 pub struct MoveRequest {
-    pub root_id: String,
+    /// The pages to move, each with the pages under it, in the order they
+    /// should end up side by side. All in `source`.
+    pub roots: Vec<String>,
     pub source: SpaceRef,
     pub dest: SpaceRef,
     pub position: MovePosition,
     pub target_id: String,
-    /// The root's parent afterwards, as the position implies it.
+    /// The roots' parent afterwards, as the position implies it.
     pub new_parent_id: Option<String>,
-    /// A new title for the root (a destination given as a new path).
+    /// A new title for the only root (a destination given as a new path).
     pub new_title: Option<String>,
     pub on_conflict: OnConflict,
     pub rewrite_links: bool,
@@ -273,12 +434,27 @@ impl Refusal {
     }
 }
 
+/// Check everything and work out the move, writing nothing; a move that
+/// cannot be made is an error naming every problem.
+pub async fn plan(
+    client: &Arc<dyn ConfluenceClient>,
+    spaces: &BTreeMap<String, Workspace>,
+    req: &MoveRequest,
+) -> Result<MovePlan> {
+    let plan = draft(client, spaces, req).await?;
+    match plan.refusal() {
+        Some(error) => Err(error),
+        None => Ok(plan),
+    }
+}
+
 /// Check everything and work out the move, writing nothing.
 ///
 /// `spaces` holds every registered workspace that is open, keyed by space
 /// key; both sides of the move must be among them, freshly fetched. Every
-/// problem is collected before the answer, so the error names all of them.
-pub async fn plan(
+/// problem is collected in [`MovePlan::blocking`], beside the plan it
+/// stops, so a dry run shows the whole move and everything in its way.
+pub async fn draft(
     client: &Arc<dyn ConfluenceClient>,
     spaces: &BTreeMap<String, Workspace>,
     req: &MoveRequest,
@@ -291,26 +467,40 @@ pub async fn plan(
             "use `confed mv` to move a page within its space",
         ));
     }
+    let Some(first) = req.roots.first() else {
+        return Err(ConfedError::usage("there is nothing to move"));
+    };
 
-    let mut refusal = Refusal::default();
+    let mut blocking: Vec<Blocker> = Vec::new();
     let mut warnings = Vec::new();
+    let src_key = req.source.key.as_str();
 
-    let root = src.state().get_page(&req.root_id)?.ok_or_else(|| {
-        ConfedError::NotFound(format!(
-            "page {} is not tracked in {}; `confed -C {} pull` it first",
-            req.root_id, req.source.dir, req.source.dir
-        ))
-    })?;
+    let mut roots = Vec::new();
+    for id in &req.roots {
+        roots.push(src.state().get_page(id)?.ok_or_else(|| {
+            ConfedError::NotFound(format!(
+                "page {id} is not tracked in {}; `confed -C {} pull` it first",
+                req.source.dir, req.source.dir
+            ))
+        })?);
+    }
 
     // Home pages stay where they are: a space without one is broken.
     let source_space = client.get_space(&req.source.key).await?;
-    if source_space.homepage_id.as_ref().is_some_and(|h| h.0 == req.root_id) {
-        refusal
-            .problems
-            .push(format!("{} is the home page of space {}", root.local_path, req.source.key));
+    for root in &roots {
+        if source_space.homepage_id.as_ref().is_some_and(|h| h.0 == root.page_id) {
+            blocking.push(
+                Blocker::new(
+                    "home_page",
+                    format!("{} is the home page of space {}", root.local_path, req.source.key),
+                )
+                .page(&root.page_id, src_key, &root.local_path),
+            );
+        }
     }
 
-    // The subtree, as the server last listed it.
+    // The subtrees, as the server last listed them: each root, then the
+    // pages under it. A root under another one is already moved with it.
     let remote = src.state().all_remote()?;
     let mut children: HashMap<&str, Vec<&RemotePage>> = HashMap::new();
     for page in remote.iter().filter(|r| !r.deleted) {
@@ -318,16 +508,56 @@ pub async fn plan(
             children.entry(parent.as_str()).or_default().push(page);
         }
     }
-    let mut subtree: Vec<(String, usize)> = vec![(req.root_id.clone(), 0)];
-    let mut index = 0;
-    while index < subtree.len() {
-        let (id, depth) = subtree[index].clone();
-        let mut kids = children.get(id.as_str()).cloned().unwrap_or_default();
-        kids.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.title.cmp(&b.title)));
-        for kid in kids {
-            subtree.push((kid.page_id.clone(), depth + 1));
+    let mut subtree: Vec<(String, usize)> = Vec::new();
+    for root in &roots {
+        if subtree.iter().any(|(id, _)| id == &root.page_id) {
+            blocking.push(
+                Blocker::new(
+                    "nested_source",
+                    format!(
+                        "{} is named twice, or is under another page being moved; name only \
+                         the page above it",
+                        root.local_path
+                    ),
+                )
+                .page(&root.page_id, src_key, &root.local_path),
+            );
+            continue;
         }
-        index += 1;
+        let start = subtree.len();
+        subtree.push((root.page_id.clone(), 0));
+        let mut index = start;
+        while index < subtree.len() {
+            let (id, depth) = subtree[index].clone();
+            let mut kids = children.get(id.as_str()).cloned().unwrap_or_default();
+            kids.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.title.cmp(&b.title)));
+            for kid in kids {
+                if let Some(at) =
+                    subtree[..start].iter().position(|(k, d)| k == &kid.page_id && *d == 0)
+                {
+                    // An earlier root is under this one.
+                    let path = src
+                        .state()
+                        .get_page(&kid.page_id)?
+                        .map(|p| p.local_path)
+                        .unwrap_or_default();
+                    blocking.push(
+                        Blocker::new(
+                            "nested_source",
+                            format!(
+                                "{path} is under {}, which is moved too; name only the page \
+                                 above it",
+                                root.local_path
+                            ),
+                        )
+                        .page(&subtree[at].0, src_key, &path),
+                    );
+                    continue;
+                }
+                subtree.push((kid.page_id.clone(), depth + 1));
+            }
+            index += 1;
+        }
     }
     let ids: HashSet<String> = subtree.iter().map(|(id, _)| id.clone()).collect();
 
@@ -344,32 +574,54 @@ pub async fn plan(
             .or_else(|| remote_page.map(|r| r.title.clone()))
             .unwrap_or_default();
         let Some(base) = base else {
-            refusal.problems.push(format!(
-                "\"{title}\" ({id}) has not been pulled into {}; run `confed -C {} pull`",
-                req.source.dir, req.source.dir
-            ));
+            let mut blocker = Blocker::new(
+                "not_pulled",
+                format!(
+                    "\"{title}\" ({id}) has not been pulled into {}; run `confed -C {} pull`",
+                    req.source.dir, req.source.dir
+                ),
+            )
+            .page(id, src_key, "");
+            blocker.title = Some(title);
+            blocking.push(blocker);
             continue;
         };
         match status_of(id) {
             Some(status) if status.is_clean() => {}
-            Some(status) => refusal.problems.push(format!(
-                "{}: {}{}",
-                base.local_path,
-                describe_state(status.state),
-                if status.tampering.is_empty() { "" } else { " (frontmatter edited)" }
-            )),
-            None => refusal.problems.push(format!("{}: not on disk", base.local_path)),
+            Some(status) => blocking.push(
+                Blocker::new(
+                    "local_changes",
+                    format!(
+                        "{}: {}{}",
+                        base.local_path,
+                        describe_state(status.state),
+                        if status.tampering.is_empty() { "" } else { " (frontmatter edited)" }
+                    ),
+                )
+                .page(id, src_key, &base.local_path),
+            ),
+            None => {
+                blocking.push(
+                    Blocker::new("local_changes", format!("{}: not on disk", base.local_path))
+                        .page(id, src_key, &base.local_path),
+                )
+            }
         }
         let drafts = pending_comment_work(src, &base.local_path);
         if drafts > 0 {
-            refusal
-                .problems
-                .push(format!("{}: {drafts} comment draft(s) not pushed yet", base.local_path));
+            blocking.push(
+                Blocker::new(
+                    "comment_drafts",
+                    format!("{}: {drafts} comment draft(s) not pushed yet", base.local_path),
+                )
+                .page(id, src_key, &base.local_path),
+            );
         }
         pages.push(PlannedPage {
             page_id: id.clone(),
             title: base.title.clone(),
             new_title: None,
+            rename_reason: None,
             parent_id: base.parent_id.clone(),
             depth: *depth,
             from_path: base.local_path.clone(),
@@ -386,7 +638,13 @@ pub async fn plan(
         if status.state == PageState::LocalNew
             && dirs.iter().any(|d| status.path.starts_with(&format!("{d}/")))
         {
-            refusal.problems.push(format!("{}: a new page, not pushed yet", status.path));
+            let mut blocker = Blocker::new(
+                "unpushed_page",
+                format!("{}: a new page, not pushed yet", status.path),
+            );
+            blocker.space = Some(src_key.to_string());
+            blocker.path = Some(status.path.clone());
+            blocking.push(blocker);
         }
     }
 
@@ -403,16 +661,29 @@ pub async fn plan(
         },
     )?;
     for op in &attachment_work.attachment_ops {
-        refusal.problems.push(format!("{}: attachment change not pushed yet", op.file));
+        let mut blocker = Blocker::new(
+            "attachment_changes",
+            format!("{}: attachment change not pushed yet", op.file),
+        );
+        blocker.space = Some(src_key.to_string());
+        blocker.path = Some(op.file.clone());
+        blocking.push(blocker);
     }
 
     // The new parent is in sync too.
     if let Some(parent) = &req.new_parent_id {
         match dst.state().get_page(parent)? {
-            None => refusal.problems.push(format!(
-                "the destination parent ({parent}) is not tracked in {}; `confed -C {} pull` first",
-                req.dest.dir, req.dest.dir
-            )),
+            None => blocking.push(
+                Blocker::new(
+                    "destination_parent_not_tracked",
+                    format!(
+                        "the destination parent ({parent}) is not tracked in {}; `confed -C {} \
+                         pull` first",
+                        req.dest.dir, req.dest.dir
+                    ),
+                )
+                .page(parent, &req.dest.key, ""),
+            ),
             Some(record) => {
                 let dscan = worktree::scan(dst)?;
                 if let Some(status) = dscan
@@ -421,12 +692,18 @@ pub async fn plan(
                     .find(|s| s.page_id.as_deref() == Some(parent.as_str()))
                     .filter(|s| !s.is_clean())
                 {
-                    refusal.problems.push(format!(
-                        "{}:{}: {}",
-                        req.dest.key,
-                        record.local_path,
-                        describe_state(status.state)
-                    ));
+                    blocking.push(
+                        Blocker::new(
+                            "destination_parent_changed",
+                            format!(
+                                "{}:{}: {}",
+                                req.dest.key,
+                                record.local_path,
+                                describe_state(status.state)
+                            ),
+                        )
+                        .page(parent, &req.dest.key, &record.local_path),
+                    );
                 }
             }
         }
@@ -439,56 +716,95 @@ pub async fn plan(
         .into_iter()
         .map(|p| (p.title.to_lowercase(), p.id.0))
         .collect();
+    let single = req.roots.len() == 1;
     for page in &mut pages {
-        if page.depth == 0 {
+        if page.depth == 0 && single {
             page.new_title = req.new_title.clone().filter(|t| t != &page.title);
+            if page.new_title.is_some() {
+                page.rename_reason = Some("destination_path".into());
+            }
         }
         if let OnConflict::Map(map) = &req.on_conflict {
             if let Some(title) = map.get(&page.page_id).or_else(|| map.get(&page.title)) {
                 page.new_title = Some(title.clone()).filter(|t| t != &page.title);
+                page.rename_reason = page.new_title.as_ref().map(|_| "title_map".into());
             }
         }
         let wanted = page.final_title().to_string();
-        if taken.contains_key(&wanted.to_lowercase()) {
-            match req.on_conflict {
-                OnConflict::Suffix => {
-                    let suffixed = format!("{wanted} ({})", req.source.key);
-                    if taken.contains_key(&suffixed.to_lowercase()) {
-                        refusal.problems.push(format!(
+        let Some(existing) = taken.get(&wanted.to_lowercase()) else { continue };
+        let suffixed = format!("{wanted} ({})", req.source.key);
+        let suffix_free = !taken.contains_key(&suffixed.to_lowercase());
+        match req.on_conflict {
+            OnConflict::Suffix => {
+                if !suffix_free {
+                    let mut blocker = Blocker::new(
+                        "title_taken",
+                        format!(
                             "\"{wanted}\" and \"{suffixed}\" both exist in space {}",
                             req.dest.key
-                        ));
-                    }
-                    page.new_title = Some(suffixed);
+                        ),
+                    )
+                    .page(&page.page_id, src_key, &page.from_path);
+                    blocker.title = Some(wanted.clone());
+                    blocker.existing_page_id = Some(existing.clone());
+                    blocking.push(blocker);
                 }
-                _ => refusal.problems.push(format!(
-                    "title \"{wanted}\" ({}) is already used in space {}",
-                    page.from_path, req.dest.key
-                )),
+                page.new_title = Some(suffixed);
+                page.rename_reason = Some("conflict_suffix".into());
+            }
+            _ => {
+                let mut blocker = Blocker::new(
+                    "title_taken",
+                    format!(
+                        "title \"{wanted}\" ({}) is already used in space {}",
+                        page.from_path, req.dest.key
+                    ),
+                )
+                .page(&page.page_id, src_key, &page.from_path);
+                blocker.title = Some(wanted.clone());
+                blocker.existing_page_id = Some(existing.clone());
+                blocker.suggested_title = suffix_free.then_some(suffixed);
+                blocking.push(blocker);
             }
         }
     }
 
     // Permissions, where the server says.
     let mut unchecked = false;
-    match client.page_operations(&PageId::new(&req.root_id)).await {
-        Ok(Some(ops)) => {
-            for needed in ["update", "delete"] {
-                if !ops.iter().any(|o| o == needed) {
-                    refusal.problems.push(format!(
-                        "you may not {needed} {} in space {}",
-                        root.local_path, req.source.key
-                    ));
+    for root in &roots {
+        match client.page_operations(&PageId::new(&root.page_id)).await {
+            Ok(Some(ops)) => {
+                for needed in ["update", "delete"] {
+                    if !ops.iter().any(|o| o == needed) {
+                        blocking.push(
+                            Blocker::new(
+                                "no_permission",
+                                format!(
+                                    "you may not {needed} {} in space {}",
+                                    root.local_path, req.source.key
+                                ),
+                            )
+                            .page(
+                                &root.page_id,
+                                src_key,
+                                &root.local_path,
+                            ),
+                        );
+                    }
                 }
             }
+            Ok(None) | Err(_) => unchecked = true,
         }
-        Ok(None) | Err(_) => unchecked = true,
     }
     let landing = req.new_parent_id.clone().unwrap_or_else(|| req.target_id.clone());
     match client.page_operations(&PageId::new(&landing)).await {
-        Ok(Some(ops)) if !ops.iter().any(|o| o == "create") => {
-            refusal.problems.push(format!("you may not add pages in space {}", req.dest.key))
-        }
+        Ok(Some(ops)) if !ops.iter().any(|o| o == "create") => blocking.push(
+            Blocker::new(
+                "no_permission",
+                format!("you may not add pages in space {}", req.dest.key),
+            )
+            .page(&landing, &req.dest.key, ""),
+        ),
         Ok(Some(_)) => {}
         Ok(None) | Err(_) => unchecked = true,
     }
@@ -529,10 +845,17 @@ pub async fn plan(
         page.to_path = placement.path.clone();
         for path in [placement.path.clone(), placement.sidecar.clone()] {
             if dst.absolute(&path).exists() {
-                refusal.problems.push(format!(
-                    "{}:{path} already exists, and the move would put {} there",
-                    req.dest.key, page.from_path
-                ));
+                let mut blocker = Blocker::new(
+                    "path_taken",
+                    format!(
+                        "{}:{path} already exists, and the move would put {} there",
+                        req.dest.key, page.from_path
+                    ),
+                );
+                blocker.page_id = Some(page.page_id.clone());
+                blocker.space = Some(req.dest.key.clone());
+                blocker.path = Some(path);
+                blocking.push(blocker);
             }
         }
     }
@@ -541,7 +864,8 @@ pub async fn plan(
     let mut plan = MovePlan {
         source: req.source.clone(),
         dest: req.dest.clone(),
-        root_id: req.root_id.clone(),
+        root_id: first.clone(),
+        roots: pages.iter().filter(|p| p.depth == 0).map(|p| p.page_id.clone()).collect(),
         position: req.position,
         target_id: req.target_id.clone(),
         new_parent_id: req.new_parent_id.clone(),
@@ -552,14 +876,17 @@ pub async fn plan(
         message: req.message.clone(),
         rules_page,
         blocked: None,
+        blocking: Vec::new(),
         wait_secs: req.wait_secs,
         warnings,
         renamed: Vec::new(),
         move_requested: false,
+        requested: Vec::new(),
         moved: Vec::new(),
         links_rewritten: Vec::new(),
         links_by_server: Vec::new(),
         links_broken: Vec::new(),
+        verified: None,
     };
     let moves = plan.moves();
     let index = PageIndex::of(spaces, &plan)?;
@@ -592,11 +919,17 @@ pub async fn plan(
                     .find(|s| s.page_id.as_deref() == Some(page.page_id.as_str()))
                     .is_some_and(|s| !s.is_clean());
                 if dirty {
-                    refusal.problems.push(format!(
-                        "{key}:{} links to a moved page and has local changes; push them \
-                         first, or pass --no-rewrite-links",
-                        page.local_path
-                    ));
+                    blocking.push(
+                        Blocker::new(
+                            "linking_page_changed",
+                            format!(
+                                "{key}:{} links to a moved page and has local changes; push \
+                                 them first, or pass --no-rewrite-links",
+                                page.local_path
+                            ),
+                        )
+                        .page(&page.page_id, key, &page.local_path),
+                    );
                 }
             }
             plan.links.push(LinkFix {
@@ -612,8 +945,8 @@ pub async fn plan(
 
     // Last, so that a server that cannot move does not hide everything else
     // that is wrong with the move: can this server move a page between spaces
-    // at all? Asked about the subtree's root, without moving it.
-    let blocked = match client.probe_move(&PageId::new(&req.root_id)).await {
+    // at all? Asked about the first root, without moving it.
+    plan.blocked = match client.probe_move(&PageId::new(first)).await {
         Ok(confed_api::Probe::Available) => None,
         Ok(confed_api::Probe::WebAction) => {
             plan.warnings.push(
@@ -635,11 +968,10 @@ pub async fn plan(
                 .to_string(),
         ),
         Ok(confed_api::Probe::Unavailable) => Some(format!(
-            "this server cannot move pages between spaces: rest/api/content/{}/move does not \
-             answer, and on Data Center the web UI's move action is missing or does not accept \
-             this credential; confed will not copy and delete instead, which would lose ids \
-             and history",
-            req.root_id
+            "this server cannot move pages between spaces: rest/api/content/{first}/move does \
+             not answer, and on Data Center the web UI's move action is missing or does not \
+             accept this credential; confed will not copy and delete instead, which would lose \
+             ids and history"
         )),
         Ok(confed_api::Probe::Unknown) | Err(_) => {
             plan.warnings.push(
@@ -650,13 +982,8 @@ pub async fn plan(
             None
         }
     };
-
-    if !refusal.problems.is_empty() {
-        refusal.problems.extend(blocked);
-        return Err(refusal
-            .into_error(&format!("cannot move {} to space {}", root.local_path, req.dest.key)));
-    }
-    plan.blocked = blocked;
+    blocking.dedup();
+    plan.blocking = blocking;
     Ok(plan)
 }
 
@@ -743,6 +1070,9 @@ pub async fn execute(
     if let Some(reason) = &plan.blocked {
         return Err(ConfedError::Unsupported(reason.clone()));
     }
+    if let Some(refusal) = plan.refusal() {
+        return Err(refusal);
+    }
     let steps = [
         Step::ServerMoved,
         Step::LocalDstWritten,
@@ -752,7 +1082,14 @@ pub async fn execute(
     ];
     for step in steps.into_iter().filter(|s| *s > done) {
         let result = match step {
-            Step::ServerMoved => server_move(client, plan).await,
+            Step::ServerMoved => {
+                let save = |plan: &MovePlan| {
+                    if let Ok(value) = serde_json::to_value(plan) {
+                        let _ = instance.journal_save(journal_id, &value);
+                    }
+                };
+                server_move(client, plan, &save).await
+            }
             Step::LocalDstWritten => write_destination(client, spaces, plan).await,
             Step::LocalSrcRemoved => remove_from_source(spaces, plan),
             Step::LinksRewritten => fix_links(client, spaces, plan).await,
@@ -792,16 +1129,18 @@ pub async fn abort(
     }
     // The journal can lag the server: a process killed between the move and
     // recording it. Ask where the page is before undoing anything.
-    let root = client.get_page(&PageId::new(&plan.root_id), BodyFormat::Storage).await?;
-    if root.summary.space_key == plan.dest.key {
-        return Err(ConfedError::state_with_hint(
-            format!(
-                "page {} is already in space {} on the server, though the journal had not \
-                 recorded it",
-                plan.root_id, plan.dest.key
-            ),
-            format!("finish the move with `confed instance resume {journal_id}`"),
-        ));
+    for id in plan.root_ids() {
+        let root = client.get_page(&PageId::new(&id), BodyFormat::Storage).await?;
+        if root.summary.space_key == plan.dest.key {
+            return Err(ConfedError::state_with_hint(
+                format!(
+                    "page {id} is already in space {} on the server, though the journal had \
+                     not recorded it",
+                    plan.dest.key
+                ),
+                format!("finish the move with `confed instance resume {journal_id}`"),
+            ));
+        }
     }
     let renamed = std::mem::take(&mut plan.renamed);
     for id in &renamed {
@@ -828,15 +1167,23 @@ pub async fn abort(
     Ok(())
 }
 
-/// Rename what has to be renamed, then move the subtree's root.
-async fn server_move(client: &Arc<dyn ConfluenceClient>, plan: &mut MovePlan) -> Result<()> {
-    let root = PageId::new(&plan.root_id);
-    let current = client.get_page(&root, BodyFormat::Storage).await?;
-    let already = current.summary.space_key == plan.dest.key
-        && current.summary.parent_id.as_ref().map(|p| p.0.clone()) == plan.new_parent_id;
+/// Rename what has to be renamed, then move each root, one after the other.
+async fn server_move(
+    client: &Arc<dyn ConfluenceClient>,
+    plan: &mut MovePlan,
+    save: &dyn Fn(&MovePlan),
+) -> Result<()> {
+    let mut placed = Vec::new();
+    for root in plan.root_ids() {
+        let current = client.get_page(&PageId::new(&root), BodyFormat::Storage).await?;
+        placed.push(
+            current.summary.space_key == plan.dest.key
+                && current.summary.parent_id.as_ref().map(|p| p.0.clone()) == plan.new_parent_id,
+        );
+    }
 
     // Titles first: the destination would refuse a duplicate.
-    if !already {
+    if !placed.iter().all(|p| *p) {
         let renames: Vec<(String, String)> = plan
             .pages
             .iter()
@@ -861,94 +1208,109 @@ async fn server_move(client: &Arc<dyn ConfluenceClient>, plan: &mut MovePlan) ->
                     .await?;
             }
             plan.renamed.push(id);
+            save(plan);
         }
     }
 
-    // Asked once. A resume of a move the server is still working on waits for
-    // it rather than asking again.
-    if !already && !plan.move_requested {
-        let target = PageId::new(&plan.target_id);
-        if let Err(e) = client.move_page_to(&root, plan.position, &target).await {
-            return Err(move_error(client, plan, e).await);
-        }
-        plan.move_requested = true;
-    }
+    for (root, position, target) in plan.server_moves() {
+        let id = PageId::new(&root);
+        let current = client.get_page(&id, BodyFormat::Storage).await?;
+        let already = current.summary.space_key == plan.dest.key
+            && current.summary.parent_id.as_ref().map(|p| p.0.clone()) == plan.new_parent_id;
 
-    // Trust nothing but the pages themselves: the web action Data Center falls
-    // back to answers with a web page whatever it did, and finishes the move
-    // in the background, after it has answered.
-    let after = wait_for_move(client, plan).await?;
-    if after.summary.space_key != plan.dest.key {
-        return Err(ConfedError::state_with_hint(
-            format!(
-                "the server accepted the move, but after {}s page {} is still in space {}: it \
-                 may still be moving the pages, or it did not move them",
-                plan.wait_secs, plan.root_id, after.summary.space_key
-            ),
-            "check the page in the browser: once it is in the new space, \
-             `confed instance resume` finishes the move; confed will not ask the server to \
-             move it again, nor copy and delete",
-        ));
-    }
-    let parent = after.summary.parent_id.as_ref().map(|p| p.0.clone());
-    if parent != plan.new_parent_id {
-        match &plan.new_parent_id {
-            // In the right space under the wrong parent: an ordinary move
-            // within the space puts it right.
-            Some(wanted) => {
-                client.move_page(&root, &PageId::new(wanted), confed_api::Position::Append).await?;
-                let again = client.get_page(&root, BodyFormat::Storage).await?;
-                if again.summary.parent_id.as_ref().map(|p| p.0.as_str()) != Some(wanted.as_str()) {
+        // Asked once. A resume of a move the server is still working on waits
+        // for it rather than asking again.
+        if !already && !plan.was_requested(&root) {
+            if let Err(e) = client.move_page_to(&id, position, &PageId::new(&target)).await {
+                return Err(move_error(client, plan, &root, e).await);
+            }
+            plan.requested.push(root.clone());
+            save(plan);
+        }
+
+        // Trust nothing but the pages themselves: the web action Data Center
+        // falls back to answers with a web page whatever it did, and finishes
+        // the move in the background, after it has answered.
+        let after = wait_for_move(client, plan, &root).await?;
+        if after.summary.space_key != plan.dest.key {
+            return Err(ConfedError::state_with_hint(
+                format!(
+                    "the server accepted the move, but after {}s page {root} is still in space \
+                     {}: it may still be moving the pages, or it did not move them",
+                    plan.wait_secs, after.summary.space_key
+                ),
+                "check the page in the browser: once it is in the new space, \
+                 `confed instance resume` finishes the move; confed will not ask the server to \
+                 move it again, nor copy and delete",
+            ));
+        }
+        let parent = after.summary.parent_id.as_ref().map(|p| p.0.clone());
+        if parent != plan.new_parent_id {
+            match &plan.new_parent_id {
+                // In the right space under the wrong parent: an ordinary move
+                // within the space puts it right.
+                Some(wanted) => {
+                    client
+                        .move_page(&id, &PageId::new(wanted), confed_api::Position::Append)
+                        .await?;
+                    let again = client.get_page(&id, BodyFormat::Storage).await?;
+                    if again.summary.parent_id.as_ref().map(|p| p.0.as_str())
+                        != Some(wanted.as_str())
+                    {
+                        return Err(ConfedError::State {
+                            message: format!(
+                                "page {root} moved to space {} but not under page {wanted}",
+                                plan.dest.key
+                            ),
+                            hint: Some(
+                                "move it under the right parent in the browser, then resume".into(),
+                            ),
+                        });
+                    }
+                    if plan.position != MovePosition::Append {
+                        plan.warnings.push(format!(
+                            "page {root} is under the right parent, but not before or after \
+                             the page asked for"
+                        ));
+                    }
+                }
+                None => {
                     return Err(ConfedError::State {
                         message: format!(
-                            "page {} moved to space {} but not under page {wanted}",
-                            plan.root_id, plan.dest.key
+                            "page {root} moved to space {} but under page {}, not to the top \
+                             level",
+                            plan.dest.key,
+                            parent.unwrap_or_default()
                         ),
                         hint: Some(
-                            "move it under the right parent in the browser, then resume".into(),
+                            "make it a top-level page in the browser, then `confed instance \
+                             resume`"
+                                .into(),
                         ),
-                    });
+                    })
                 }
-                if plan.position != MovePosition::Append {
-                    plan.warnings.push(format!(
-                        "page {} is under the right parent, but not before or after the page asked for",
-                        plan.root_id
-                    ));
-                }
-            }
-            None => {
-                return Err(ConfedError::State {
-                    message: format!(
-                        "page {} moved to space {} but under page {}, not to the top level",
-                        plan.root_id,
-                        plan.dest.key,
-                        parent.unwrap_or_default()
-                    ),
-                    hint: Some(
-                        "make it a top-level page in the browser, then `confed instance resume`"
-                            .into(),
-                    ),
-                })
             }
         }
     }
+    plan.move_requested = true;
     Ok(())
 }
 
-/// Wait until the server shows the move done: the root and every page under
-/// it in the destination space. Polls with a growing interval, up to
+/// Wait until the server shows one root's move done: the root and every page
+/// under it in the destination space. Polls with a growing interval, up to
 /// `plan.wait_secs`, and returns the root as last read.
 async fn wait_for_move(
     client: &Arc<dyn ConfluenceClient>,
     plan: &MovePlan,
+    root: &str,
 ) -> Result<confed_api::Page> {
     let started = std::time::Instant::now();
     let limit = std::time::Duration::from_secs(plan.wait_secs);
     let mut interval = std::time::Duration::from_millis(250);
-    let mut waiting_on: Vec<String> = plan.page_ids();
+    let mut waiting_on: Vec<String> = plan.subtree_of(root);
     loop {
-        let root = client.get_page(&PageId::new(&plan.root_id), BodyFormat::Storage).await?;
-        if root.summary.space_key == plan.dest.key {
+        let page = client.get_page(&PageId::new(root), BodyFormat::Storage).await?;
+        if page.summary.space_key == plan.dest.key {
             let mut still = Vec::new();
             for id in &waiting_on {
                 let page = client.get_page(&PageId::new(id), BodyFormat::Storage).await?;
@@ -958,11 +1320,11 @@ async fn wait_for_move(
             }
             waiting_on = still;
             if waiting_on.is_empty() {
-                return Ok(root);
+                return Ok(page);
             }
         }
         if started.elapsed() >= limit {
-            return Ok(root);
+            return Ok(page);
         }
         tokio::time::sleep(interval.min(limit.saturating_sub(started.elapsed()))).await;
         interval = (interval * 2).min(std::time::Duration::from_secs(10));
@@ -973,17 +1335,18 @@ async fn wait_for_move(
 async fn move_error(
     client: &Arc<dyn ConfluenceClient>,
     plan: &MovePlan,
+    root: &str,
     e: ApiError,
 ) -> ConfedError {
     match e {
         ApiError::Auth(message) if message.contains("403") => ConfedError::Auth(format!(
-            "the server refused to move page {} to space {} (HTTP 403): you need permission \
+            "the server refused to move page {root} to space {} (HTTP 403): you need permission \
              to remove the pages from {} and to add pages in {}",
-            plan.root_id, plan.dest.key, plan.source.key, plan.dest.key
+            plan.dest.key, plan.source.key, plan.dest.key
         )),
         ApiError::NotFound(message) => {
             // Gone pages, or a server without the endpoint?
-            let root = client.get_page(&PageId::new(&plan.root_id), BodyFormat::Storage).await;
+            let root = client.get_page(&PageId::new(root), BodyFormat::Storage).await;
             let target = client.get_page(&PageId::new(&plan.target_id), BodyFormat::Storage).await;
             if root.is_ok() && target.is_ok() {
                 ConfedError::Unsupported(
@@ -1556,13 +1919,18 @@ async fn settle(
     let src = spaces.get(&plan.source.key).ok_or_else(|| missing_space(&plan.source.key))?;
     let dst = spaces.get(&plan.dest.key).ok_or_else(|| missing_space(&plan.dest.key))?;
     let dscan = worktree::scan(dst)?;
+    let mut at_destination = 0;
     for moved in &mut plan.moved {
-        if src.state().get_page(&moved.page_id)?.is_some() {
+        let in_source = src.state().get_page(&moved.page_id)?.is_some();
+        if in_source {
             plan.warnings
                 .push(format!("{} is still tracked in {}", moved.page_id, plan.source.key));
         }
         match dst.state().get_page(&moved.page_id)? {
             Some(record) => {
+                if !in_source {
+                    at_destination += 1;
+                }
                 moved.to.path = record.local_path.clone();
                 moved.version = record.version;
                 moved.title = record.title.clone();
@@ -1584,6 +1952,19 @@ async fn settle(
             )),
         }
     }
+
+    // What a person would check by hand afterwards, so no one has to.
+    let mut remaining: Vec<String> =
+        src.state().all_pages()?.into_iter().map(|p| p.local_path).collect();
+    remaining.sort();
+    let sscan = worktree::scan(src)?;
+    plan.verified = Some(Verified {
+        pages: plan.pages.len(),
+        at_destination,
+        source_remaining_count: remaining.len(),
+        source_remaining: remaining.into_iter().take(20).collect(),
+        workspaces_clean: sscan.is_clean() && dscan.is_clean(),
+    });
     Ok(())
 }
 
@@ -2114,6 +2495,68 @@ mod tests {
         let (twice, n) = rewrite_links(&once, &ctx);
         assert_eq!(n, 0);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_journal_from_before_several_roots_still_resumes() {
+        let plan: MovePlan = serde_json::from_value(serde_json::json!({
+            "source": { "key": "DOCS", "dir": "DOCS", "numeric": null },
+            "dest": { "key": "ENG", "dir": "ENG", "numeric": null },
+            "root_id": "1002",
+            "position": "append",
+            "target_id": "2002",
+            "new_parent_id": "2002",
+            "pages": [],
+            "links": [],
+            "rewrite_links": true,
+            "relativize": false,
+            "message": null,
+            "move_requested": true,
+        }))
+        .unwrap();
+        assert_eq!(plan.root_ids(), ["1002"]);
+        assert!(plan.was_requested("1002"), "asked already: never twice");
+        assert_eq!(
+            plan.server_moves(),
+            [("1002".to_string(), MovePosition::Append, "2002".to_string())]
+        );
+    }
+
+    #[test]
+    fn several_roots_after_a_page_are_asked_for_in_reverse() {
+        let page = |id: &str| PlannedPage {
+            page_id: id.into(),
+            title: id.into(),
+            new_title: None,
+            rename_reason: None,
+            parent_id: None,
+            depth: 0,
+            from_path: format!("{id}.md"),
+            to_path: String::new(),
+            comments: 0,
+            attachments: 0,
+            restricted: Vec::new(),
+        };
+        let mut plan: MovePlan = serde_json::from_value(serde_json::json!({
+            "source": { "key": "DOCS", "dir": "DOCS", "numeric": null },
+            "dest": { "key": "ENG", "dir": "ENG", "numeric": null },
+            "root_id": "1002",
+            "roots": ["1002", "1004"],
+            "position": "after",
+            "target_id": "2002",
+            "new_parent_id": "2001",
+            "pages": [],
+            "links": [],
+            "rewrite_links": true,
+            "relativize": false,
+            "message": null,
+        }))
+        .unwrap();
+        plan.pages = vec![page("1002"), PlannedPage { depth: 1, ..page("1003") }, page("1004")];
+        let order: Vec<String> = plan.server_moves().into_iter().map(|(r, _, _)| r).collect();
+        assert_eq!(order, ["1004", "1002"], "each right after the target: 2002, 1002, 1004");
+        assert_eq!(plan.subtree_of("1002"), ["1002", "1003"]);
+        assert!(!plan.was_requested("1002"));
     }
 
     #[test]

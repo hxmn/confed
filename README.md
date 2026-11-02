@@ -156,7 +156,7 @@ keyring, or a `0600` file).
 
 | Sync | Authoring | Discussion | Explore | Workspace |
 |---|---|---|---|---|
-| `clone` · `fetch` · `pull` · `push` · `status` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `completion` |
+| `clone` · `fetch` · `pull` · `push` · `status` · `tree` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `completion` |
 
 Every command, flag and exit code is in [docs/commands.md](https://github.com/hxmn/confed/blob/main/docs/commands.md).
 
@@ -174,6 +174,7 @@ confed instance status --json                                      # every space
 confed instance pull
 confed instance push -m "Quarterly review" --dry-run
 confed instance mv "DOCS:Team Handbook/Onboarding.md" "ENG:Runbooks.md" --dry-run
+confed instance mv --children-of DOCS: https://wiki.example.test/spaces/ENG/pages/2002 -y
 ```
 
 Already have a folder of workspaces? `confed instance adopt --move-credentials` registers
@@ -182,7 +183,9 @@ Each workspace keeps working on its own: `confed -C ENG status` is unchanged.
 
 A move checks everything before it writes anything: every page involved is in sync, no
 title is taken in the destination, it is not a home page, and what you may do there.
-`--dry-run` shows the plan. It moves the pages on the server with Confluence's own move,
+`--dry-run` shows the whole plan, and what stops it if anything does. Several pages, or
+every child of one, move as one plan; pages are named by path, id or Confluence URL,
+and a destination nobody has pulled yet is fetched for the move. It moves the pages on the server with Confluence's own move,
 so nothing is copied. It carries each page's file, sidecar and state into the other
 workspace, and fixes the links that change meaning when a page changes space. Every step
 is journaled, so an interrupted move is finished by `confed instance resume`. Details are

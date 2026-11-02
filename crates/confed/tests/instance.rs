@@ -1205,3 +1205,321 @@ async fn doctor_says_unreachable_the_way_other_commands_do() {
     );
     assert_eq!(code(&out), 5, "{}", stderr(&out));
 }
+
+// ------------------------------------------- several pages, URLs, locating ---
+
+/// A page added on the server after the clone: no workspace has it.
+fn add_page(confluence: &Confluence, id: &str, title: &str, space: &str, parent: &str) {
+    confluence.world().pages.insert(
+        id.into(),
+        Page {
+            title: title.into(),
+            space: space.into(),
+            parent: Some(parent.into()),
+            version: 1,
+            body: "<p/>".into(),
+        },
+    );
+}
+
+#[tokio::test]
+async fn every_page_under_the_home_page_moves_in_one_plan_and_is_verified() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let dst = "ENG:Engineering Home/Runbooks.md";
+
+    let out =
+        run(root.path(), &["instance", "mv", "--children-of", "DOCS:", dst, "--dry-run", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(env["result"]["roots"], json!(["1002", "1004"]), "in their order, home page left");
+    assert_eq!(env["result"]["summary"]["pages"], 3);
+    assert!(confluence.world().writes.is_empty());
+
+    let out = run(
+        root.path(),
+        &["instance", "mv", "--children-of", "DOCS:", dst, "-y", "-m", "hand over", "--json"],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let result = envelope(&out, "instance")["result"].clone();
+    assert!(result["journal_id"].as_str().unwrap().starts_with("mv-"), "one journal entry");
+    assert_eq!(
+        result["verified"],
+        json!({
+            "pages": 3,
+            "at_destination": 3,
+            "source_remaining": ["Team Handbook.md"],
+            "source_remaining_count": 1,
+            "workspaces_clean": true,
+        })
+    );
+    let world = confluence.world();
+    let moves: Vec<&String> = world.writes.iter().filter(|w| w.contains("/move/")).collect();
+    assert_eq!(
+        moves,
+        [
+            "PUT /rest/api/content/1002/move/append/2002",
+            "PUT /rest/api/content/1004/move/append/2002"
+        ],
+        "appended in their old order"
+    );
+    for id in ["1002", "1003", "1004"] {
+        assert_eq!(world.pages[id].space, "ENG", "{id}");
+    }
+    assert_eq!(world.pages["1004"].parent.as_deref(), Some("2002"));
+    drop(world);
+
+    let out = run(root.path(), &["instance", "doctor", "--json"]);
+    let env = envelope(&out, "instance");
+    for check in env["result"]["instance"]["checks"].as_array().unwrap() {
+        if ["journal", "pages tracked once", "page spaces"]
+            .contains(&check["name"].as_str().unwrap())
+        {
+            assert_eq!(check["status"], "pass", "{check}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn several_sources_move_together_and_a_nested_one_is_refused() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+
+    let out = run(root.path(), &["instance", "mv", "1004", "1002", "ENG:", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(envelope(&out, "instance")["result"]["roots"], json!(["1004", "1002"]), "as named");
+
+    // Week One is under Onboarding: naming both is a mistake, shown in the plan.
+    let out = run(root.path(), &["instance", "mv", "1002", "1003", "ENG:", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 7, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(env["result"]["blocking"][0]["kind"], "nested_source");
+
+    // Pages from two spaces are two moves.
+    let out = run(root.path(), &["instance", "mv", "1002", "2002", "OPS:", "--json"]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    assert!(confluence.world().writes.is_empty());
+}
+
+#[tokio::test]
+async fn a_dry_run_that_cannot_run_still_shows_the_whole_plan_and_what_to_rename() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    add_page(&confluence, "2005", "Onboarding", "ENG", "2001");
+    let src = "DOCS:Team Handbook/Onboarding.md";
+
+    let out = run(root.path(), &["instance", "mv", src, "ENG:", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 7, "still a failure for scripts: {}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let result = &env["result"];
+    assert_eq!(result["summary"]["pages"], 2, "the plan is there: {result}");
+    assert_eq!(result["pages"].as_array().unwrap().len(), 2);
+    let blocker = &result["blocking"][0];
+    assert_eq!(blocker["kind"], "title_taken");
+    assert_eq!(blocker["existing_page_id"], "2005");
+    assert_eq!(blocker["suggested_title"], "Onboarding (DOCS)");
+    assert!(env["errors"][0]["message"].as_str().unwrap().contains(r#"title "Onboarding""#));
+
+    let out = run(
+        root.path(),
+        &["instance", "mv", src, "ENG:", "--on-conflict", "suffix", "--dry-run", "--json"],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(
+        envelope(&out, "instance")["result"]["renamed"],
+        json!([{
+            "page_id": "1002",
+            "from_title": "Onboarding",
+            "to_title": "Onboarding (DOCS)",
+            "reason": "conflict_suffix",
+        }]),
+        "only the page renamed, not the pages under it"
+    );
+    assert!(confluence.world().writes.is_empty());
+}
+
+#[tokio::test]
+async fn a_destination_given_by_url_and_not_pulled_yet_is_pulled_alone() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    add_page(&confluence, "2003", "Platform", "ENG", "2001");
+    add_page(&confluence, "2004", "Unrelated", "ENG", "2001");
+    let dest = format!("{}/spaces/ENG/pages/2003/Platform", server.uri());
+    let source = format!("{}/pages/viewpage.action?pageId=1004", server.uri());
+
+    let out = run(root.path(), &["instance", "mv", &source, &dest, "--dry-run", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(env["result"]["new_parent_id"], "2003");
+    assert_eq!(
+        env["result"]["pulled"],
+        json!([{ "space": "ENG", "page_id": "2003", "path": "Engineering Home/Platform.md" }])
+    );
+    assert!(root.path().join("ENG/Engineering Home/Platform.md").exists());
+    assert!(!root.path().join("ENG/Engineering Home/Unrelated.md").exists(), "only what it needs");
+    assert!(confluence.world().writes.is_empty());
+
+    // Another server's URL is not a page of this instance.
+    let out = run(
+        root.path(),
+        &[
+            "instance",
+            "mv",
+            "https://wiki.example.test/pages/viewpage.action?pageId=1004",
+            "ENG:",
+            "--json",
+        ],
+    );
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+}
+
+#[tokio::test]
+async fn locate_and_tree_name_pages_by_id_url_and_path() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    add_page(&confluence, "2003", "Platform", "ENG", "2001");
+
+    let url = format!("{}/display/DOCS/Week+One", server.uri());
+    let out = run(root.path(), &["instance", "locate", "1002", &url, "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let pages = env["result"]["pages"].as_array().unwrap();
+    assert_eq!(pages[0]["file"], "DOCS/Team Handbook/Onboarding.md");
+    assert_eq!(pages[0]["local"], true);
+    assert_eq!(pages[0]["state"], "unchanged");
+    assert_eq!(pages[1]["page_id"], "1003");
+
+    // Not pulled anywhere: offline, not found; with --remote, where it is.
+    let out = run(root.path(), &["instance", "locate", "2003", "--json"]);
+    assert_eq!(code(&out), 6, "{}", stderr(&out));
+    let out = run(root.path(), &["instance", "locate", "2003", "--remote", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let page = &env["result"]["pages"][0];
+    assert_eq!((page["space"].clone(), page["local"].clone()), (json!("ENG"), json!(false)));
+    assert_eq!(page["remote_version"], 1);
+
+    let out = run(root.path(), &["instance", "tree", "1001", "--depth", "1", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let ids: Vec<&str> = env["result"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["page_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["1002", "1004"], "children only, not the files beside them");
+
+    let out = run(root.path(), &["instance", "tree", "ENG:", "--remote", "--json"]);
+    let env = envelope(&out, "instance");
+    let platform = env["result"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["page_id"] == "2003")
+        .cloned()
+        .unwrap();
+    assert_eq!((platform["local"].clone(), platform["depth"].clone()), (json!(false), json!(1)));
+
+    let out = run(&root.path().join("DOCS"), &["tree", "Team Handbook/Onboarding.md", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(envelope(&out, "tree")["result"]["pages"][0]["page_id"], "1003");
+}
+
+#[tokio::test]
+async fn status_summarizes_and_select_prints_just_what_is_asked() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+
+    let out = run(root.path(), &["instance", "status", "--summary", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let docs = &env["result"]["spaces"][0]["result"];
+    assert_eq!(docs["counts_by_state"], json!({ "unchanged": 4 }));
+    assert!(docs.get("pages").is_none());
+
+    let out =
+        run(root.path(), &["instance", "status", "--summary", "--select", "spaces.*.result.clean"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let selected: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(selected, json!([true, true]));
+}
+
+#[tokio::test]
+async fn old_agent_docs_are_named_by_every_instance_command() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+    for file in ["CLAUDE.md", "DOCS/CLAUDE.md"] {
+        let path = root.path().join(file);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let (_, rest) = text.split_once('\n').unwrap();
+        std::fs::write(&path, format!("<!-- confed:agent-docs version=0.0.1 -->\n{rest}")).unwrap();
+    }
+    let out = run(root.path(), &["instance", "status", "--json"]);
+    let env = envelope(&out, "instance");
+    let warning = env["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|w| w.contains("instance doctor --fix"))
+        .unwrap_or_else(|| panic!("{env}"))
+        .to_string();
+    assert!(
+        warning.contains("CLAUDE.md (confed 0.0.1)") && warning.contains("DOCS/CLAUDE.md"),
+        "{warning}"
+    );
+
+    let out = run(root.path(), &["instance", "doctor", "--fix", "--offline", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let out = run(root.path(), &["instance", "status", "--json"]);
+    assert!(envelope(&out, "instance")["warnings"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn progress_can_be_read_as_json_lines_and_a_closed_pipe_is_no_panic() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+    let out = run(root.path(), &["instance", "pull", "--progress", "jsonl", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let events: Vec<Value> =
+        stderr(&out).lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    assert!(
+        events.iter().any(|e| e["event"] == "stage_done" && e["stage"] == "Listing pages"),
+        "{events:?}"
+    );
+    assert!(events.iter().all(|e| e["elapsed_ms"].is_u64()));
+
+    let mut child = confed(root.path(), &["instance", "status", "--json"]).spawn().unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    assert!(!stderr(&out).contains("panicked"), "{}", stderr(&out));
+}
+
+#[tokio::test]
+async fn several_trees_move_one_after_the_other_through_the_web_action() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    confluence.world().no_rest_move = true;
+
+    let out = run(
+        root.path(),
+        &[
+            "instance",
+            "mv",
+            "--children-of",
+            "1001",
+            "ENG:Engineering Home/Runbooks.md",
+            "-y",
+            "--json",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(env["result"]["verified"]["at_destination"], 3);
+    let world = confluence.world();
+    assert_eq!(world.tasks.len(), 2, "one background task per tree");
+    for id in ["1002", "1003", "1004"] {
+        assert_eq!(world.pages[id].space, "ENG", "{id}");
+    }
+}

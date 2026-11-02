@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/tree.schema.json",
+  "title": "confed tree result",
+  "description": "The `result` of `confed tree --json`: the space's pages as the server nests them, from the last fetch (or, with --remote, the server now). Only real pages: no other files in the workspace.",
+  "type": "object",
+  "required": ["space", "root", "pages"],
+  "properties": {
+    "space": { "type": "string" },
+    "root": { "type": ["string", "null"], "description": "The page whose subtree this is, or null for the whole space." },
+    "pages": {
+      "type": "array",
+      "description": "Parent first, in sibling order.",
+      "items": {
+        "type": "object",
+        "required": ["page_id", "title", "depth", "local"],
+        "properties": {
+          "page_id": { "type": "string" },
+          "title": { "type": "string" },
+          "parent_id": { "type": ["string", "null"] },
+          "depth": { "type": "integer", "minimum": 0, "description": "0 for the root's children, or for top-level pages." },
+          "version": { "type": "integer", "minimum": 1 },
+          "local": { "type": "boolean", "description": "Whether the workspace has pulled it." },
+          "path": { "type": ["string", "null"], "description": "Its file, when it has been pulled." }
+        }
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@ pub mod cli;
 pub mod commands;
 pub mod context;
 pub mod output;
+pub mod pageref;
 pub mod progress;
 pub mod prompt;
 
@@ -42,16 +43,26 @@ pub type PagePicker = fn(&Workspace, Option<&str>) -> Result<Option<String>>;
 
 /// Run confed for this process's arguments and return its exit code.
 pub fn main(views: Views) -> std::process::ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     init_tracing(&cli.global);
+    if cli.global.select.is_some() {
+        cli.global.json = true;
+    }
 
     let started = Instant::now();
     let command_name = cli.command.name();
     let json = cli.global.json;
+    let select = cli.global.select.clone();
 
     let exit = match run(cli, views) {
         Ok(out) => {
-            output::emit(command_name, &out, json, started.elapsed().as_millis());
+            output::emit(
+                command_name,
+                &out,
+                json,
+                select.as_deref(),
+                started.elapsed().as_millis(),
+            );
             out.exit
         }
         Err(e) => {
@@ -85,10 +96,10 @@ fn run(cli: Cli, views: Views) -> Result<Output> {
 /// it. After an upgrade an agent would follow obsolete rules, so every command
 /// in the workspace says so until it is regenerated.
 fn stale_guide_warning(ctx: &Context, command: &Command) -> Option<String> {
-    if matches!(
-        command,
-        Command::Doctor(_) | Command::Init(_) | Command::Clone(_) | Command::Instance(_)
-    ) {
+    if let Command::Instance(command) = command {
+        return stale_instance_guides(ctx, command);
+    }
+    if matches!(command, Command::Doctor(_) | Command::Init(_) | Command::Clone(_)) {
         return None;
     }
     let root = ctx.workspace().ok()?.root().to_path_buf();
@@ -102,6 +113,36 @@ fn stale_guide_warning(ctx: &Context, command: &Command) -> Option<String> {
     ))
 }
 
+/// The same for an instance root: its own guide and every member's, named
+/// in one warning, with the one command that rewrites them all.
+fn stale_instance_guides(ctx: &Context, command: &cli::InstanceCommand) -> Option<String> {
+    use cli::InstanceCommand as I;
+    if matches!(command, I::Init(_) | I::Adopt(_) | I::Doctor(_) | I::Add(_) | I::Remove(_)) {
+        return None;
+    }
+    let instance = ctx.instance().ok()?;
+    let mut stale: Vec<String> = Vec::new();
+    let (_, root) = commands::agent_docs::audit(instance.root());
+    if let Some((name, by)) = root.first() {
+        stale.push(format!("{name} ({})", commands::agent_docs::writer(by)));
+    }
+    for member in instance.enabled_members().ok()? {
+        let (_, old) = commands::agent_docs::audit(&instance.member_dir(&member));
+        if let Some((name, by)) = old.first() {
+            stale.push(format!("{}/{name} ({})", member.dir, commands::agent_docs::writer(by)));
+        }
+    }
+    if stale.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "agent docs describe another confed than this one ({}): {}; run `confed instance \
+         doctor --fix` to regenerate them",
+        commands::agent_docs::VERSION,
+        stale.join(", ")
+    ))
+}
+
 fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
     // Purely local commands never touch the network or the keyring.
     match &command {
@@ -112,6 +153,7 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
         Command::New(args) if !args.push => return commands::new::run(&mut ctx, args),
         Command::Log(args) if args.local => return commands::log::run_local(&mut ctx, args),
         Command::Mkdocs(args) => return commands::mkdocs::run(&mut ctx, args),
+        Command::Tree(args) if !args.remote => return commands::tree::run(&mut ctx, args),
         _ => {}
     }
 
@@ -178,6 +220,7 @@ async fn dispatch(
         Command::Whoami(args) => commands::whoami::run(&mut ctx, &args).await,
         Command::Doctor(args) => commands::doctor::run(&mut ctx, &args).await,
         Command::Export(args) => commands::export::run(&mut ctx, &args).await,
+        Command::Tree(args) => commands::tree::run_remote(&mut ctx, &args).await,
         Command::Config(_)
         | Command::Resolve(_)
         | Command::Version(_)
