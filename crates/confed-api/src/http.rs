@@ -385,24 +385,56 @@ impl Http {
         self.body_json(reqwest::Method::PUT, path, body).await
     }
 
+    /// [`Self::post_json`] for a body that carries a secret — a new user's
+    /// password — and so is never traced.
+    pub async fn post_json_sensitive<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> ApiResult<T> {
+        self.send_json(reqwest::Method::POST, path, body, false).await
+    }
+
+    /// PUT with no body, as Data Center's state-changing admin endpoints take it
+    /// (`…/disable`, a group membership).
+    pub async fn put_empty(&self, path: &str) -> ApiResult<()> {
+        let url = self.url(path)?;
+        let ctx = format!("PUT {path}");
+        self.send_with_retry(&ctx, true, || {
+            self.request(reqwest::Method::PUT, url.clone()).header("X-Atlassian-Token", "no-check")
+        })
+        .await?;
+        Ok(())
+    }
+
     async fn body_json<B: Serialize, T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
         path: &str,
         body: &B,
     ) -> ApiResult<T> {
+        self.send_json(method, path, body, true).await
+    }
+
+    async fn send_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: &B,
+        traced: bool,
+    ) -> ApiResult<T> {
         let url = self.url(path)?;
         let ctx = format!("{method} {path}");
         let payload = serde_json::to_vec(body)
             .map_err(|e| ApiError::Decode { context: ctx.clone(), source: e })?;
-        // The body never carries credentials (they travel in headers), so it is
-        // safe to show when tracing what was sent.
-        tracing::trace!(
-            target: "confed::http",
-            context = %ctx,
-            body = %String::from_utf8_lossy(&payload),
-            "request"
-        );
+        // Credentials travel in headers, so a body is safe to show when tracing
+        // what was sent — except the few that carry a password themselves.
+        let shown = if traced {
+            String::from_utf8_lossy(&payload).into_owned()
+        } else {
+            "<redacted>".to_string()
+        };
+        tracing::trace!(target: "confed::http", context = %ctx, body = %shown, "request");
         let resp = self
             .send_with_retry(&ctx, false, || {
                 self.request(method.clone(), url.clone())
@@ -480,6 +512,16 @@ impl Http {
         self.send_with_retry(&ctx, true, || self.request(reqwest::Method::DELETE, url.clone()))
             .await?;
         Ok(())
+    }
+
+    /// DELETE, keeping what the server answered: a background task, for some.
+    pub async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
+        let url = self.url(path)?;
+        let ctx = format!("DELETE {path}");
+        let resp = self
+            .send_with_retry(&ctx, true, || self.request(reqwest::Method::DELETE, url.clone()))
+            .await?;
+        decode(resp, &ctx).await
     }
 
     /// Stream a download straight to disk (never buffers the whole file).

@@ -793,3 +793,195 @@ async fn recent_attachment_activity_searches_the_space_by_key() {
         assert_eq!(activity, ContentActivity::Pages(vec![PageId::new("1001")]));
     }
 }
+
+// ------------------------------------------------------- administration ---
+
+/// Groups are written by id: the picker turns a name into one.
+async fn mount_group_picker(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/wiki/rest/api/group/picker"))
+        .and(query_param("query", "writers"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "type": "group", "name": "writers-archive", "id": "g-2" },
+                { "type": "group", "name": "writers", "id": "g-1" }
+            ],
+            "start": 0, "limit": 200, "size": 2
+        })))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn groups_are_changed_by_the_id_their_name_resolves_to() {
+    let server = MockServer::start().await;
+    mount_group_picker(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/wiki/rest/api/group/userByGroupId"))
+        .and(query_param("groupId", "g-1"))
+        .and(body_json(json!({ "accountId": "5b10ac" })))
+        .respond_with(ResponseTemplate::new(201))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/wiki/rest/api/group/by-id"))
+        .and(query_param("id", "g-1"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    c.add_group_member("writers", "5b10ac").await.unwrap();
+    c.delete_group("writers").await.unwrap();
+    let err = c.delete_group("editors").await.unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "{err}");
+}
+
+#[tokio::test]
+async fn a_site_without_roles_grants_permissions() {
+    let server = MockServer::start().await;
+    let c = client(&server);
+    assert_eq!(c.space_role_mode().await.unwrap(), confed_api::RoleMode::Permissions);
+
+    Mock::given(method("GET"))
+        .and(path("/wiki/api/v2/space-role-mode"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "mode": "ROLES" })))
+        .mount(&server)
+        .await;
+    assert_eq!(c.space_role_mode().await.unwrap(), confed_api::RoleMode::Roles);
+}
+
+#[tokio::test]
+async fn a_grant_posts_one_permission_per_operation() {
+    let server = MockServer::start().await;
+    mount_group_picker(&server).await;
+    for (key, target) in [("read", "space"), ("create", "page")] {
+        Mock::given(method("POST"))
+            .and(path("/wiki/rest/api/space/DOCS/permission"))
+            .and(body_json(json!({
+                "subject": { "type": "group", "identifier": "g-1" },
+                "operation": { "key": key, "target": target }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": 7 })))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let ops = [
+        confed_api::SpaceOperation::new("space", "read"),
+        confed_api::SpaceOperation::new("page", "create"),
+    ];
+    client(&server)
+        .grant_space_permissions("DOCS", &confed_api::Subject::Group("writers".into()), &ops)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_revoke_deletes_only_what_it_names_and_nothing_when_one_is_missing() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wiki/api/v2/spaces"))
+        .and(query_param("keys", "DOCS"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(space_body()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/wiki/api/v2/spaces/500/permissions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                { "id": "p1", "principal": { "type": "user", "id": "5b10ac" },
+                  "operation": { "key": "read", "targetType": "space" } },
+                { "id": "p2", "principal": { "type": "user", "id": "5b10ac" },
+                  "operation": { "key": "create", "targetType": "page" } },
+                { "id": "p3", "principal": { "type": "user", "id": "7c20bd" },
+                  "operation": { "key": "create", "targetType": "page" } }
+            ],
+            "_links": {}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/wiki/rest/api/space/DOCS/permission/p2"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    let alice = confed_api::Subject::User("5b10ac".into());
+    c.revoke_space_permissions(
+        "DOCS",
+        &alice,
+        &[confed_api::SpaceOperation::new("page", "create")],
+    )
+    .await
+    .unwrap();
+    // `comment:create` is not granted: nothing at all is deleted.
+    let err = c
+        .revoke_space_permissions(
+            "DOCS",
+            &alice,
+            &[
+                confed_api::SpaceOperation::new("page", "create"),
+                confed_api::SpaceOperation::new("comment", "create"),
+            ],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "{err}");
+}
+
+#[tokio::test]
+async fn a_role_is_assigned_with_an_array_and_taken_away_without_a_role() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wiki/api/v2/spaces"))
+        .and(query_param("keys", "DOCS"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(space_body()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/wiki/api/v2/spaces/500/role-assignments"))
+        .and(body_json(json!([
+            { "principal": { "principalType": "USER", "principalId": "5b10ac" }, "roleId": "r-viewer" }
+        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "results": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/wiki/api/v2/spaces/500/role-assignments"))
+        .and(body_json(json!([
+            { "principal": { "principalType": "USER", "principalId": "5b10ac" } }
+        ])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "results": [] })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    let alice = confed_api::Subject::User("5b10ac".into());
+    c.set_space_role("DOCS", &alice, Some("r-viewer")).await.unwrap();
+    c.set_space_role("DOCS", &alice, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn cloud_users_are_the_organizations_to_create() {
+    let server = MockServer::start().await;
+    let err = client(&server)
+        .create_user(&confed_api::NewUser {
+            username: "alice".into(),
+            full_name: "Alice Ng".into(),
+            email: "alice@example.com".into(),
+            password: None,
+            notify: true,
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ApiError::Unsupported { .. }), "{err}");
+    assert!(err.to_string().contains("admin.atlassian.com"), "{err}");
+}

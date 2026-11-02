@@ -11,6 +11,8 @@
 /// Serde DTOs for the Cloud REST v2 wire format.
 pub mod v2;
 
+mod admin;
+
 use async_trait::async_trait;
 use confed_api::client::ConfluenceClient;
 use confed_api::error::{ApiError, ApiResult};
@@ -651,6 +653,93 @@ impl ConfluenceClient for CloudClient {
         let mut page = content.into_page("");
         page.summary.version = version;
         Ok(page)
+    }
+
+    async fn create_user(&self, _user: &NewUser) -> ApiResult<User> {
+        Err(admin::organization_only(self.flavor(), "create a user"))
+    }
+
+    async fn update_user(&self, _username: &str, _update: &UserUpdate) -> ApiResult<()> {
+        Err(admin::organization_only(self.flavor(), "change a user's profile"))
+    }
+
+    async fn set_user_enabled(&self, _username: &str, _enabled: bool) -> ApiResult<()> {
+        Err(admin::organization_only(self.flavor(), "disable or enable a user"))
+    }
+
+    async fn delete_user(&self, _username: &str) -> ApiResult<()> {
+        Err(admin::organization_only(self.flavor(), "delete a user"))
+    }
+
+    async fn user_groups(&self, user: &str) -> ApiResult<Vec<Group>> {
+        self.admin_user_groups(user).await
+    }
+
+    async fn list_groups(&self, limit: Option<usize>) -> ApiResult<Vec<Group>> {
+        self.admin_list_groups(limit).await
+    }
+
+    async fn create_group(&self, name: &str) -> ApiResult<Group> {
+        self.admin_create_group(name).await
+    }
+
+    async fn delete_group(&self, name: &str) -> ApiResult<()> {
+        self.admin_delete_group(name).await
+    }
+
+    async fn group_members(&self, group: &str, limit: Option<usize>) -> ApiResult<Vec<User>> {
+        self.admin_group_members(group, limit).await
+    }
+
+    async fn add_group_member(&self, group: &str, user: &str) -> ApiResult<()> {
+        self.admin_membership(group, user, true).await
+    }
+
+    async fn remove_group_member(&self, group: &str, user: &str) -> ApiResult<()> {
+        self.admin_membership(group, user, false).await
+    }
+
+    async fn space_role_mode(&self) -> ApiResult<RoleMode> {
+        self.admin_role_mode().await
+    }
+
+    async fn space_permissions(&self, space_key: &str) -> ApiResult<Vec<SpacePermission>> {
+        self.admin_space_permissions(space_key).await
+    }
+
+    async fn grant_space_permissions(
+        &self,
+        space_key: &str,
+        subject: &Subject,
+        operations: &[SpaceOperation],
+    ) -> ApiResult<()> {
+        self.admin_grant(space_key, subject, operations).await
+    }
+
+    async fn revoke_space_permissions(
+        &self,
+        space_key: &str,
+        subject: &Subject,
+        operations: &[SpaceOperation],
+    ) -> ApiResult<()> {
+        self.admin_revoke(space_key, subject, operations).await
+    }
+
+    async fn space_roles(&self, space_key: &str) -> ApiResult<Vec<SpaceRole>> {
+        self.admin_space_roles(space_key).await
+    }
+
+    async fn space_role_assignments(&self, space_key: &str) -> ApiResult<Vec<RoleAssignment>> {
+        self.admin_role_assignments(space_key).await
+    }
+
+    async fn set_space_role(
+        &self,
+        space_key: &str,
+        subject: &Subject,
+        role_id: Option<&str>,
+    ) -> ApiResult<()> {
+        self.admin_set_role(space_key, subject, role_id).await
     }
 }
 

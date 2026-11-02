@@ -1,6 +1,7 @@
 //! One module per command. Each returns an [`Output`](crate::output::Output)
 //! carrying both the human rendering and the JSON `result` payload.
 
+pub mod admin;
 pub mod agent_docs;
 pub mod attach;
 pub mod clone;

@@ -19,6 +19,7 @@ same list from the binary itself.
 - Maintenance: [`whoami`](#confed-whoami), [`config`](#confed-config),
   [`doctor`](#confed-doctor), [`export`](#confed-export),
   [`version`](#confed-version), [`completion`](#confed-completion)
+- Administration: [`admin`](#confed-admin) — users, groups, space permissions
 - Interactive: [`tui`](#confed-tui)
 - Several spaces: [`instance`](#confed-instance) — init, adopt, spaces, clone, add,
   remove, status, fetch, pull, push, doctor, mv, locate, tree, search, resume, abort
@@ -114,7 +115,7 @@ quietly rather than failing.
 | 6 | `NOT_FOUND` | No such page, space, attachment, or comment. |
 | 7 | `STATE` | A local precondition failed: not a workspace, local edits would be clobbered, tool-managed frontmatter was edited, the lock is held, `.session.db` is too permissive. |
 | 8 | `PARTIAL` | Some operations succeeded and some failed; the details are in `result`. |
-| 9 | `UNSUPPORTED` | The operation does not exist on this Confluence flavor (inline comment creation and comment resolution on Data Center). |
+| 9 | `UNSUPPORTED` | The operation does not exist on this Confluence flavor or release: a Data Center older than an `admin` command needs, creating a user on Cloud, `--role` on a site without space roles. |
 | 10 | `DIFFERENCES` | Differences exist. Only ever produced by `--exit-code`, and deliberately outside the error range. |
 
 Two behaviours are worth knowing because they are not obvious from the table:
@@ -656,6 +657,70 @@ confed spaces
 confed spaces --limit 200 --json | jq -r '.result.spaces[] | "\(.key)\t\(.name)"'
 ```
 
+## confed admin
+
+Administer the instance: users, groups, and who may do what in a space. It needs an
+administrator's credential (on Data Center the Confluence Administrator permission, on
+Cloud a site admin; space permissions need the space's admin permission) and no
+workspace — a base URL and a token are enough, from flags, the environment, or the
+workspace or instance root you run it in.
+
+```bash
+confed admin group create tech-writers
+confed admin group add tech-writers alice.ng bob.lee
+confed admin perms grant group:tech-writers --op space:read,page:create,comment:create
+confed admin perms list --space DOCS
+confed admin user create carol --full-name "Carol Diaz" --email carol@example.com --notify
+```
+
+| Command | Does |
+|---|---|
+| `user create <USERNAME> --full-name N --email E` | Create a user. The password comes from stdin with `--password-stdin`, from a hidden prompt on a terminal, or not at all with `--notify` (the user is mailed a link to set one). Without a terminal and without either flag: exit 2. |
+| `user update <USERNAME> [--full-name N] [--email E]` | Change a user's profile. |
+| `user disable` / `user enable <USERNAME>` | Stop a user signing in, or let them again. Their content stays. |
+| `user delete <USERNAME>` | Delete a user, following the server's background task. Asks first. |
+| `user groups <USER>` | The groups a user is in. |
+| `group list [--limit N]`, `group members <NAME>` | Every group; who is in one. |
+| `group create <NAME>`, `group delete <NAME>` | Create or delete a group (deleting asks first; its members stay). |
+| `group add` / `group remove <NAME> <USER>…` | Change who is in a group, one user at a time: those that fail are listed in `errors` and make the exit 8. |
+| `perms list` | Every permission granted in the space and, on a Cloud site with roles, every role assigned. |
+| `perms roles` | The roles a Cloud space can assign. |
+| `perms grant <SUBJECT> --op T:K…` | Grant operations, leaving the subject's others alone. |
+| `perms grant <SUBJECT> --role R` | Assign a role, by name or id (Cloud sites with roles). |
+| `perms revoke <SUBJECT> --op T:K…` / `--role` | Revoke operations, or take the subject's role away. Asks first. |
+
+- **People and groups.** A user is a username on Data Center and an account id on Cloud
+  — `confed user search` prints both. A `perms` subject is `group:NAME`, `user:NAME` or
+  `anonymous`. The space is `--space`, else the workspace's.
+- **Operations** are `target:key`, repeated or comma-separated, and checked before
+  anything is sent (exit 2 with the valid list):
+
+  | | Data Center | Cloud |
+  |---|---|---|
+  | `space` | `read` `administer` `export` `restrict` `delete_own` `delete_mail` | `read` `administer` `export` `restrict_content` `delete` (own) |
+  | `page` | `create` `delete` | `create` `delete` `archive` |
+  | `blogpost`, `comment`, `attachment` | `create` `delete` | `create` `delete` |
+
+- **Permissions or roles.** Data Center grants permissions. A Cloud site reports its
+  mode (`perms list` shows it as `mode`): `permissions` takes `--op`, `roles` takes
+  `--role`, and `transition` takes both. The other one exits 9 and names the right flag.
+  On Cloud a revoke deletes nothing unless the subject holds every operation named.
+- **`--dry-run`** on every write reads what it needs to check the request (the role
+  mode, the role named) and reports `planned` — what it would do — without sending
+  anything that changes the server.
+- **Confirmations.** `user delete`, `group delete` and `perms revoke` ask on a terminal;
+  `--yes` skips the question, and without a terminal (or with `--json`) they go ahead.
+- **Releases.** On Data Center, users and groups need 8.4 or later and space permissions
+  9.1 or later; an older server exits 9 before anything is sent.
+- **Cloud users** are Atlassian accounts that belong to the organization, so creating,
+  changing, disabling or deleting one exits 9: that is done in admin.atlassian.com or
+  through the Organization API. Groups and space access work.
+- **Exit codes.** 3: the credential is not an administrator's. 4: the user or group
+  already exists. 6: no such user, group, space or role.
+
+The JSON `result` carries `action` (`group.create`, `perms.grant`…) and the fields of
+[admin.schema.json](reference/json/admin.schema.json).
+
 ## confed open
 
 Open a page in the browser using the stored base URL. Omit the page to open the space.
@@ -886,9 +951,10 @@ Places where the accepted command line is ahead of the behaviour, or where
 - **`confed doctor --fix`** repairs `.gitignore` and the agent contract files. It cannot
   repair `.session.db` permissions: it opens the session file itself, so a too-permissive
   one makes `doctor` exit 7 before any fix runs. Use `chmod 600 .session.db`.
-- **`-y` / `--yes`** applies to `push --interactive` (approves every page) and to
-  `rm --push` (skips the "delete on the server?" confirmation). Nothing else prompts, so
-  it has no effect elsewhere.
+- **`-y` / `--yes`** applies to `push --interactive` (approves every page), to
+  `rm --push` (skips the "delete on the server?" confirmation), to `comment rm`, and to
+  `admin user delete`, `admin group delete` and `admin perms revoke`. Nothing else
+  prompts, so it has no effect elsewhere.
 - **`push --force-version`** (design 04) does not exist. There is no way to push over a
   newer remote version; pull and merge instead.
 - **`--json --stream`** NDJSON output (design 04) does not exist.

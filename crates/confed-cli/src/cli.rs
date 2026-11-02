@@ -168,6 +168,11 @@ pub enum Command {
     #[command(subcommand)]
     User(UserCommand),
 
+    /// Administer users, groups and space permissions. Needs an
+    /// administrator's credential.
+    #[command(subcommand)]
+    Admin(AdminCommand),
+
     /// Show the authenticated user and instance capabilities.
     Whoami(WhoamiArgs),
 
@@ -224,6 +229,7 @@ impl Command {
             Command::Search(_) => "search",
             Command::Spaces(_) => "spaces",
             Command::User(_) => "user",
+            Command::Admin(_) => "admin",
             Command::Whoami(_) => "whoami",
             Command::Config(_) => "config",
             Command::Doctor(_) => "doctor",
@@ -684,6 +690,196 @@ pub enum UserCommand {
         query: String,
         #[arg(long, default_value = "10")]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminCommand {
+    /// Create, change, disable and delete users. Data Center only: Cloud
+    /// accounts belong to the Atlassian organization.
+    #[command(subcommand)]
+    User(AdminUserCommand),
+    /// List, create and delete groups, and change who is in them.
+    #[command(subcommand)]
+    Group(AdminGroupCommand),
+    /// Who may do what in a space: permissions, or roles on a Cloud site that
+    /// uses them. The space is --space, else the workspace's.
+    #[command(subcommand)]
+    Perms(AdminPermsCommand),
+}
+
+impl AdminCommand {
+    /// `group.create`, for the JSON result.
+    pub fn action(&self) -> &'static str {
+        match self {
+            AdminCommand::User(c) => match c {
+                AdminUserCommand::Create { .. } => "user.create",
+                AdminUserCommand::Update { .. } => "user.update",
+                AdminUserCommand::Disable { .. } => "user.disable",
+                AdminUserCommand::Enable { .. } => "user.enable",
+                AdminUserCommand::Delete { .. } => "user.delete",
+                AdminUserCommand::Groups { .. } => "user.groups",
+            },
+            AdminCommand::Group(c) => match c {
+                AdminGroupCommand::List { .. } => "group.list",
+                AdminGroupCommand::Create { .. } => "group.create",
+                AdminGroupCommand::Delete { .. } => "group.delete",
+                AdminGroupCommand::Members { .. } => "group.members",
+                AdminGroupCommand::Add { .. } => "group.add",
+                AdminGroupCommand::Remove { .. } => "group.remove",
+            },
+            AdminCommand::Perms(c) => match c {
+                AdminPermsCommand::List => "perms.list",
+                AdminPermsCommand::Roles => "perms.roles",
+                AdminPermsCommand::Grant { .. } => "perms.grant",
+                AdminPermsCommand::Revoke { .. } => "perms.revoke",
+            },
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminUserCommand {
+    /// Create a user. The password is read from stdin with --password-stdin,
+    /// asked for on a terminal, or, with --notify, set by the user from an
+    /// e-mailed link.
+    Create {
+        username: String,
+        #[arg(long)]
+        full_name: String,
+        #[arg(long)]
+        email: String,
+        /// Read the password from the first line of stdin.
+        #[arg(long, conflicts_with = "notify")]
+        password_stdin: bool,
+        /// Send no password: e-mail the user a link to set one.
+        #[arg(long)]
+        notify: bool,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Change a user's full name or e-mail address.
+    #[command(group = clap::ArgGroup::new("change").required(true).multiple(true).args(["full_name", "email"]))]
+    Update {
+        username: String,
+        #[arg(long)]
+        full_name: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Stop a user signing in. Their content and history stay.
+    Disable {
+        username: String,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Let a disabled user sign in again.
+    Enable {
+        username: String,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Delete a user. Asks first when interactive, unless --yes.
+    Delete {
+        username: String,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// The groups a user is in: by username on Data Center, account id on Cloud.
+    Groups { user: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminGroupCommand {
+    /// Every group.
+    List {
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Create a group.
+    Create {
+        name: String,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Delete a group (its members stay). Asks first when interactive, unless --yes.
+    Delete {
+        name: String,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Who is in a group.
+    Members {
+        name: String,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Add users to a group: usernames on Data Center, account ids on Cloud.
+    Add {
+        group: String,
+        #[arg(required = true, num_args = 1..)]
+        users: Vec<String>,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove users from a group.
+    Remove {
+        group: String,
+        #[arg(required = true, num_args = 1..)]
+        users: Vec<String>,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AdminPermsCommand {
+    /// Every permission granted in the space, and on a Cloud site with roles,
+    /// every role assigned.
+    List,
+    /// The roles a Cloud space can assign.
+    Roles,
+    /// Grant operations (--op), or assign a role (--role), to `group:NAME`,
+    /// `user:NAME` or `anonymous`.
+    #[command(group = clap::ArgGroup::new("what").required(true).args(["ops", "role"]))]
+    Grant {
+        /// `group:NAME`, `user:NAME` (username on Data Center, account id on
+        /// Cloud) or `anonymous`.
+        subject: String,
+        /// Operations as target:key, e.g. space:read,page:create. Repeatable.
+        #[arg(long = "op", value_name = "TARGET:KEY", value_delimiter = ',')]
+        ops: Vec<String>,
+        /// A role, by name or id (Cloud sites with roles).
+        #[arg(long)]
+        role: Option<String>,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Revoke operations (--op), or take the subject's role away (--role).
+    /// Asks first when interactive, unless --yes.
+    #[command(group = clap::ArgGroup::new("what").required(true).args(["ops", "role"]))]
+    Revoke {
+        subject: String,
+        #[arg(long = "op", value_name = "TARGET:KEY", value_delimiter = ',')]
+        ops: Vec<String>,
+        /// Take away the subject's role (Cloud sites with roles).
+        #[arg(long)]
+        role: bool,
+        /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

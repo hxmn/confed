@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/admin.schema.json",
+  "title": "confed admin result",
+  "description": "The `result` of every `confed admin … --json`. `action` names the subcommand (`group.create`, `perms.grant`…); the fields beside it depend on it. A write under `--dry-run` carries `dry_run: true` and `planned`, and changed nothing; a write declined at the confirmation prompt carries `cancelled: true`.",
+  "type": "object",
+  "required": ["action"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "user.create", "user.update", "user.disable", "user.enable", "user.delete", "user.groups",
+        "group.list", "group.create", "group.delete", "group.members", "group.add", "group.remove",
+        "perms.list", "perms.roles", "perms.grant", "perms.revoke"
+      ]
+    },
+    "dry_run": { "type": "boolean", "description": "Present on writes. True: nothing was sent that changes the server." },
+    "planned": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "With `dry_run`: what the command would do, one sentence per change."
+    },
+    "cancelled": { "type": "boolean", "description": "The confirmation was declined; nothing changed." },
+    "user": {
+      "anyOf": [{ "$ref": "#/$defs/user" }, { "type": "string" }],
+      "description": "`user.create`: the user made. `user.groups`: the user asked about, as given."
+    },
+    "username": { "type": "string", "description": "`user.update`, `user.disable`, `user.enable`, `user.delete`." },
+    "group": {
+      "anyOf": [{ "$ref": "#/$defs/group" }, { "type": "string" }],
+      "description": "`group.create`, `group.delete`: the group. `group.members`, `group.add`, `group.remove`: its name."
+    },
+    "groups": { "type": "array", "items": { "$ref": "#/$defs/group" } },
+    "members": { "type": "array", "items": { "$ref": "#/$defs/user" } },
+    "users": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "`group.add`, `group.remove`: the users changed. Those that failed are in the envelope's `errors`, and make the exit 8."
+    },
+    "space": { "type": "string" },
+    "mode": {
+      "type": "string",
+      "enum": ["permissions", "transition", "roles"],
+      "description": "How the site grants space access: permissions one by one (Data Center, and Cloud before roles), roles, or both during the transition."
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["subject", "operation"],
+        "properties": {
+          "subject": { "$ref": "#/$defs/principal" },
+          "operation": { "type": "string", "description": "`target:key`, e.g. `space:read`." },
+          "id": { "type": ["string", "null"], "description": "Cloud's permission id; null on Data Center." }
+        }
+      }
+    },
+    "assignments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["subject", "role_id"],
+        "properties": {
+          "subject": { "$ref": "#/$defs/principal" },
+          "role_id": { "type": "string" },
+          "role": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "roles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "type": { "type": ["string", "null"], "description": "`system` or `custom`." },
+          "description": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "subject": { "type": "string", "description": "`perms.grant`, `perms.revoke`: `group:NAME`, `user:NAME` or `anonymous`, as given." },
+    "operations": { "type": "array", "items": { "type": "string" } },
+    "role": { "type": ["string", "null"], "description": "`perms.grant --role`: the role given; `perms.revoke --role`: null." },
+    "role_id": { "type": "string" }
+  },
+  "$defs": {
+    "user": {
+      "type": "object",
+      "required": ["display_name"],
+      "properties": {
+        "display_name": { "type": "string" },
+        "username": { "type": ["string", "null"], "description": "Data Center." },
+        "userkey": { "type": ["string", "null"], "description": "Data Center." },
+        "account_id": { "type": ["string", "null"], "description": "Cloud." },
+        "email": { "type": ["string", "null"] }
+      }
+    },
+    "group": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "id": { "type": ["string", "null"], "description": "Cloud's group id; null on Data Center, which knows a group by name." }
+      }
+    },
+    "principal": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["user", "group", "anonymous", "other"] },
+        "id": { "type": ["string", "null"], "description": "The userkey or account id; the group's name on Data Center, its id on Cloud." },
+        "name": { "type": ["string", "null"], "description": "Who it is, when the server could say." }
+      }
+    }
+  }
+}

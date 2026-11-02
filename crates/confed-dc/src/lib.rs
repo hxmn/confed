@@ -11,6 +11,7 @@
 //! majors outside [`TESTED_MAJORS`] get a warning, and its failures name the step
 //! that failed.
 
+mod admin;
 mod inline;
 
 use async_trait::async_trait;
@@ -25,7 +26,7 @@ use serde_json::json;
 use std::path::Path;
 
 /// v1 collections are happiest at 100 per request; 200+ times out on older instances.
-const PAGE_SIZE: usize = 100;
+pub(crate) const PAGE_SIZE: usize = 100;
 
 /// The expansions a page needs to fill a [`PageSummary`] without extra round trips.
 const PAGE_EXPAND: &str = "version,ancestors,metadata.labels,space";
@@ -135,7 +136,7 @@ impl DcClient {
         }
         judge_web_move(&answer, self.flavor())?;
         match long_task_id(&answer.body) {
-            Some(task) => self.follow_long_task(&task).await,
+            Some(task) => self.follow_long_task(&task, "move").await,
             None => Ok(()),
         }
     }
@@ -143,7 +144,8 @@ impl DcClient {
     /// Follow a background task until it finishes: `rest/api/longtask/{id}`.
     /// Gives up waiting — not failing — after [`LONG_TASK_WAIT`]: the caller
     /// keeps checking where the pages are for as long as it was told to.
-    async fn follow_long_task(&self, task: &str) -> ApiResult<()> {
+    /// `purpose` names the task in logs and errors ("move", "user deletion").
+    async fn follow_long_task(&self, task: &str, purpose: &str) -> ApiResult<()> {
         let started = std::time::Instant::now();
         let mut polls = 0u32;
         loop {
@@ -155,7 +157,7 @@ impl DcClient {
                 percent = status["percentageComplete"].as_u64(),
                 successful = status["successful"].as_bool(),
                 elapsed_ms = status["elapsedTime"].as_u64(),
-                "move task"
+                "{purpose} task"
             );
             match long_task_state(&status) {
                 LongTask::Running => {}
@@ -164,7 +166,7 @@ impl DcClient {
                     return Err(ApiError::Server {
                         status: 500,
                         body: format!(
-                            "the move task {task} finished unsuccessfully: {}",
+                            "the {purpose} task {task} finished unsuccessfully: {}",
                             if messages.is_empty() { "no reason given".into() } else { messages }
                         ),
                     })
@@ -394,7 +396,7 @@ fn as_conflict(err: ApiError) -> ApiError {
 
 /// A username is a path segment, so `/` and `?` must not survive, but the dots
 /// and hyphens usernames are full of should stay readable.
-fn encode_path(value: &str) -> String {
+pub(crate) fn encode_path(value: &str) -> String {
     utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
         .to_string()
         .replace("%2E", ".")
@@ -1147,6 +1149,72 @@ impl ConfluenceClient for DcClient {
         let mut page = content.into_page("");
         page.summary.version = version;
         Ok(page)
+    }
+
+    async fn create_user(&self, user: &NewUser) -> ApiResult<User> {
+        self.admin_create_user(user).await
+    }
+
+    async fn update_user(&self, username: &str, update: &UserUpdate) -> ApiResult<()> {
+        self.admin_update_user(username, update).await
+    }
+
+    async fn set_user_enabled(&self, username: &str, enabled: bool) -> ApiResult<()> {
+        self.admin_set_user_enabled(username, enabled).await
+    }
+
+    async fn delete_user(&self, username: &str) -> ApiResult<()> {
+        self.admin_delete_user(username).await
+    }
+
+    async fn user_groups(&self, user: &str) -> ApiResult<Vec<Group>> {
+        self.admin_user_groups(user).await
+    }
+
+    async fn list_groups(&self, limit: Option<usize>) -> ApiResult<Vec<Group>> {
+        self.admin_list_groups(limit).await
+    }
+
+    async fn create_group(&self, name: &str) -> ApiResult<Group> {
+        self.admin_create_group(name).await
+    }
+
+    async fn delete_group(&self, name: &str) -> ApiResult<()> {
+        self.admin_delete_group(name).await
+    }
+
+    async fn group_members(&self, group: &str, limit: Option<usize>) -> ApiResult<Vec<User>> {
+        self.admin_group_members(group, limit).await
+    }
+
+    async fn add_group_member(&self, group: &str, user: &str) -> ApiResult<()> {
+        self.admin_membership(group, user, true).await
+    }
+
+    async fn remove_group_member(&self, group: &str, user: &str) -> ApiResult<()> {
+        self.admin_membership(group, user, false).await
+    }
+
+    async fn space_permissions(&self, space_key: &str) -> ApiResult<Vec<SpacePermission>> {
+        self.admin_space_permissions(space_key).await
+    }
+
+    async fn grant_space_permissions(
+        &self,
+        space_key: &str,
+        subject: &Subject,
+        operations: &[SpaceOperation],
+    ) -> ApiResult<()> {
+        self.admin_change_space_permissions(space_key, subject, operations, true).await
+    }
+
+    async fn revoke_space_permissions(
+        &self,
+        space_key: &str,
+        subject: &Subject,
+        operations: &[SpaceOperation],
+    ) -> ApiResult<()> {
+        self.admin_change_space_permissions(space_key, subject, operations, false).await
     }
 }
 

@@ -54,6 +54,8 @@
             "open",
             "search",
             "spaces",
+            "user",
+            "admin",
             "whoami",
             "config",
             "doctor",

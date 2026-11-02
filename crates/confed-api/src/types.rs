@@ -418,6 +418,231 @@ pub struct SearchResult {
     pub when: Option<String>,
 }
 
+/// A user for [`crate::ConfluenceClient::create_user`]. Without a password
+/// the server mails the person a link to set one, which `notify` asks for.
+#[derive(Clone, Debug)]
+pub struct NewUser {
+    pub username: String,
+    pub full_name: String,
+    pub email: String,
+    pub password: Option<crate::secret::Secret>,
+    pub notify: bool,
+}
+
+/// The profile fields an administrator may change; `None` leaves one alone.
+#[derive(Clone, Debug, Default)]
+pub struct UserUpdate {
+    pub full_name: Option<String>,
+    pub email: Option<String>,
+}
+
+/// A user group. Data Center knows a group by its name; Cloud also gives it an
+/// id, which its write endpoints take.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Group {
+    pub name: String,
+    pub id: Option<String>,
+}
+
+/// Who a space permission or role is for, as the caller names them: a user by
+/// username on Data Center and by account id on Cloud, a group by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Subject {
+    User(String),
+    Group(String),
+    Anonymous,
+}
+
+impl fmt::Display for Subject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Subject::User(user) => write!(f, "user {user}"),
+            Subject::Group(group) => write!(f, "group {group}"),
+            Subject::Anonymous => f.write_str("anonymous users"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PrincipalKind {
+    User,
+    Group,
+    Anonymous,
+    /// Anything else a server reports (Cloud's access classes).
+    Other,
+}
+
+impl PrincipalKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PrincipalKind::User => "user",
+            PrincipalKind::Group => "group",
+            PrincipalKind::Anonymous => "anonymous",
+            PrincipalKind::Other => "other",
+        }
+    }
+}
+
+/// Who a permission or role is for, as the server reports it: an id (the
+/// userkey or account id, or a Cloud group id; a Data Center group's name) and
+/// a name to show when one is known.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Principal {
+    pub kind: PrincipalKind,
+    pub id: Option<String>,
+    pub name: Option<String>,
+}
+
+impl Principal {
+    pub fn anonymous() -> Self {
+        Self { kind: PrincipalKind::Anonymous, id: None, name: None }
+    }
+
+    /// The name when known, else the id.
+    pub fn label(&self) -> String {
+        match (&self.name, &self.id) {
+            (Some(name), _) => name.clone(),
+            (None, Some(id)) => id.clone(),
+            (None, None) => self.kind.as_str().to_string(),
+        }
+    }
+}
+
+/// One thing a space permission allows: an operation on a kind of content,
+/// written `target:key` (`space:read`, `page:create`).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct SpaceOperation {
+    pub target: String,
+    pub key: String,
+}
+
+/// The operations Data Center's space permission API takes (9.1+).
+pub const DC_SPACE_OPERATIONS: &[(&str, &str)] = &[
+    ("space", "read"),
+    ("space", "administer"),
+    ("space", "export"),
+    ("space", "restrict"),
+    ("space", "delete_own"),
+    ("space", "delete_mail"),
+    ("page", "create"),
+    ("page", "delete"),
+    ("blogpost", "create"),
+    ("blogpost", "delete"),
+    ("comment", "create"),
+    ("comment", "delete"),
+    ("attachment", "create"),
+    ("attachment", "delete"),
+];
+
+/// The operations Cloud's v1 space permission API takes. `space:delete` is
+/// "delete own", `space:restrict_content` "add/delete restrictions".
+pub const CLOUD_SPACE_OPERATIONS: &[(&str, &str)] = &[
+    ("space", "read"),
+    ("space", "administer"),
+    ("space", "export"),
+    ("space", "restrict_content"),
+    ("space", "delete"),
+    ("page", "create"),
+    ("page", "delete"),
+    ("page", "archive"),
+    ("blogpost", "create"),
+    ("blogpost", "delete"),
+    ("comment", "create"),
+    ("comment", "delete"),
+    ("attachment", "create"),
+    ("attachment", "delete"),
+];
+
+impl SpaceOperation {
+    pub fn new(target: impl Into<String>, key: impl Into<String>) -> Self {
+        Self { target: target.into(), key: key.into() }
+    }
+
+    /// `target:key`, as the command line writes it.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim().split_once(':') {
+            Some((target, key)) if !target.trim().is_empty() && !key.trim().is_empty() => {
+                Ok(Self::new(target.trim().to_ascii_lowercase(), key.trim().to_ascii_lowercase()))
+            }
+            _ => Err(format!(
+                "`{text}` is not an operation: write it as target:key, e.g. space:read"
+            )),
+        }
+    }
+
+    /// The operations `flavor`'s space permission API accepts.
+    pub fn valid_for(flavor: Flavor) -> &'static [(&'static str, &'static str)] {
+        match flavor {
+            Flavor::Cloud => CLOUD_SPACE_OPERATIONS,
+            Flavor::DataCenter => DC_SPACE_OPERATIONS,
+        }
+    }
+
+    pub fn is_valid_for(&self, flavor: Flavor) -> bool {
+        Self::valid_for(flavor).iter().any(|(t, k)| *t == self.target && *k == self.key)
+    }
+}
+
+impl fmt::Display for SpaceOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.target, self.key)
+    }
+}
+
+/// One permission granted in a space. `id` is Cloud's, which revoking it takes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpacePermission {
+    pub id: Option<String>,
+    pub principal: Principal,
+    pub operation: SpaceOperation,
+}
+
+/// How a site grants space access. Data Center, and Cloud before roles, grant
+/// permissions one by one; a Cloud site on roles assigns a role instead, and
+/// one in transition takes both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoleMode {
+    Permissions,
+    Transition,
+    Roles,
+}
+
+impl RoleMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RoleMode::Permissions => "permissions",
+            RoleMode::Transition => "transition",
+            RoleMode::Roles => "roles",
+        }
+    }
+
+    pub fn grants_permissions(self) -> bool {
+        matches!(self, RoleMode::Permissions | RoleMode::Transition)
+    }
+
+    pub fn assigns_roles(self) -> bool {
+        matches!(self, RoleMode::Roles | RoleMode::Transition)
+    }
+}
+
+/// A role a Cloud space can assign: a named set of permissions.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpaceRole {
+    pub id: String,
+    pub name: String,
+    /// `system` or `custom`.
+    pub kind: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RoleAssignment {
+    pub principal: Principal,
+    pub role_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,5 +665,24 @@ mod tests {
         assert!(dc.comment_resolve, "inline threads, through the same API");
         assert!(!dc.adf);
         assert!(Capabilities::cloud().inline_comment_create);
+    }
+
+    #[test]
+    fn operations_are_written_target_colon_key() {
+        let op = SpaceOperation::parse(" Page:Create ").unwrap();
+        assert_eq!(op, SpaceOperation::new("page", "create"));
+        assert_eq!(op.to_string(), "page:create");
+        assert!(SpaceOperation::parse("read").is_err());
+        assert!(SpaceOperation::parse("space:").is_err());
+    }
+
+    #[test]
+    fn each_flavor_accepts_its_own_operations() {
+        let restrict = SpaceOperation::new("space", "restrict");
+        assert!(restrict.is_valid_for(Flavor::DataCenter));
+        assert!(!restrict.is_valid_for(Flavor::Cloud));
+        let archive = SpaceOperation::new("page", "archive");
+        assert!(archive.is_valid_for(Flavor::Cloud));
+        assert!(!archive.is_valid_for(Flavor::DataCenter));
     }
 }

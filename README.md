@@ -94,9 +94,13 @@ overwritten. Read [docs/sync.md](https://github.com/hxmn/confed/blob/main/docs/s
 | CQL search, recent activity, open in browser | ✅ | ✅ |
 | HTML export and an MkDocs site over the space | ✅ | ✅ |
 | Interactive terminal UI | ✅ | ✅ |
+| Groups, members and space permissions (`admin`) | ✅ | ✅ ² |
+| Users: create, change, disable, delete (`admin`) | — ³ | ✅ ² |
 
 ¹ Through the inline-comment API the Data Center page view itself uses, which Atlassian
 does not document; tested on 9.x.
+² Users and groups from Data Center 8.4, space permissions from 9.1.
+³ Cloud accounts belong to the Atlassian organization: admin.atlassian.com manages them.
 
 ## 🤖 Built for AI agents
 
@@ -154,9 +158,9 @@ keyring, or a `0600` file).
 
 ## 🧰 Commands
 
-| Sync | Authoring | Discussion | Explore | Workspace |
-|---|---|---|---|---|
-| `clone` · `fetch` · `pull` · `push` · `status` · `tree` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `completion` |
+| Sync | Authoring | Discussion | Explore | Workspace | Admin |
+|---|---|---|---|---|---|
+| `clone` · `fetch` · `pull` · `push` · `status` · `tree` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `completion` | `admin user · group · perms` |
 
 Every command, flag and exit code is in [docs/commands.md](https://github.com/hxmn/confed/blob/main/docs/commands.md).
 

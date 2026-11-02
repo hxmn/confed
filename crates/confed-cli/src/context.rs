@@ -165,7 +165,6 @@ impl Context {
         self.resolver.require(&config::BASE_URL, self.global.base_url.as_deref())
     }
 
-    #[allow(dead_code)]
     pub fn space_key(&self) -> Result<Resolved<String>> {
         self.resolver.require(&config::SPACE, self.global.space_flag())
     }

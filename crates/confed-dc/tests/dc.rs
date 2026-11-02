@@ -1708,3 +1708,199 @@ async fn restrictions_operations_and_archived_spaces_are_read() {
     assert_eq!(archived[0].id.key, "OLD");
     assert_eq!(archived[0].status.as_deref(), Some("archived"));
 }
+
+// ------------------------------------------------------- administration ---
+
+/// The applinks manifest a server reports its version through.
+async fn mount_version(server: &MockServer, version: &str) {
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/applinks/1.0/manifest"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(format!("<manifest><version>{version}</version></manifest>")),
+        )
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn creating_a_user_sends_the_documented_body_and_returns_the_key() {
+    let server = MockServer::start().await;
+    mount_version(&server, "9.5.4").await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/api/admin/user"))
+        .and(body_json(json!({
+            "userName": "alice.ng", "fullName": "Alice Ng", "email": "alice@example.com",
+            "notifyViaEmail": false, "password": "s3cret-Pass"
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "userKey": "ff80a1" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let created = client(&server)
+        .create_user(&confed_api::NewUser {
+            username: "alice.ng".into(),
+            full_name: "Alice Ng".into(),
+            email: "alice@example.com".into(),
+            password: Some(Secret::new("s3cret-Pass")),
+            notify: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.user_key.as_deref(), Some("ff80a1"));
+    assert_eq!(created.username.as_deref(), Some("alice.ng"));
+}
+
+#[tokio::test]
+async fn deleting_a_user_follows_the_background_task() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/confluence/rest/api/admin/user/bob.lee"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({ "id": "77" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/longtask/77"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "successful": true, "percentageComplete": 100 })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server).delete_user("bob.lee").await.unwrap();
+}
+
+#[tokio::test]
+async fn an_older_server_is_refused_before_anything_is_sent() {
+    let server = MockServer::start().await;
+    mount_version(&server, "8.2.1").await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/api/admin/group"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    let err = c.create_group("writers").await.unwrap_err();
+    assert!(matches!(err, ApiError::Unsupported { .. }), "{err}");
+    assert!(err.to_string().contains("needs Data Center 8.4 or later"), "{err}");
+
+    // 9.0 has users and groups, but not yet space permissions.
+    let server = MockServer::start().await;
+    mount_version(&server, "9.0.1").await;
+    let err = client(&server).space_permissions("DOCS").await.unwrap_err();
+    assert!(err.to_string().contains("9.1 or later"), "{err}");
+}
+
+#[tokio::test]
+async fn group_membership_goes_through_the_user_group_endpoint() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/confluence/rest/api/user/alice.ng/group/tech%20writers"))
+        .and(header("X-Atlassian-Token", "no-check"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/confluence/rest/api/user/alice.ng/group/tech%20writers"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/group/tech%20writers/member"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{ "type": "known", "username": "alice.ng", "userKey": "ff80a1",
+                          "displayName": "Alice Ng" }],
+            "start": 0, "limit": 100, "size": 1, "_links": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    c.add_group_member("tech writers", "alice.ng").await.unwrap();
+    c.remove_group_member("tech writers", "alice.ng").await.unwrap();
+    let members = c.group_members("tech writers", None).await.unwrap();
+    assert_eq!(members[0].display_name, "Alice Ng");
+}
+
+#[tokio::test]
+async fn space_permissions_name_groups_users_and_anonymous() {
+    let server = MockServer::start().await;
+    // As a 9.1 server answers: a user by userkey only.
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/space/DOCS/permissions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "operation": { "targetType": "space", "operationKey": "read" },
+              "subject": { "type": "group", "name": "writers" }, "spaceKey": "DOCS", "spaceId": 1001 },
+            { "operation": { "targetType": "page", "operationKey": "create" },
+              "subject": { "type": "user", "userKey": "ff80a1" }, "spaceKey": "DOCS", "spaceId": 1001 },
+            { "operation": { "targetType": "space", "operationKey": "read" },
+              "spaceKey": "DOCS", "spaceId": 1001 }
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/user"))
+        .and(query_param("key", "ff80a1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "username": "alice.ng", "userKey": "ff80a1", "displayName": "Alice Ng"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let perms = client(&server).space_permissions("DOCS").await.unwrap();
+    assert_eq!(perms.len(), 3);
+    assert_eq!(perms[0].principal.kind, confed_api::PrincipalKind::Group);
+    assert_eq!(perms[0].principal.name.as_deref(), Some("writers"));
+    assert_eq!(perms[1].principal.name.as_deref(), Some("Alice Ng"));
+    assert_eq!(perms[1].operation.to_string(), "page:create");
+    assert_eq!(perms[2].principal.kind, confed_api::PrincipalKind::Anonymous);
+}
+
+#[tokio::test]
+async fn granting_to_a_user_puts_by_their_userkey() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/user"))
+        .and(query_param("username", "alice.ng"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "username": "alice.ng", "userKey": "ff80a1", "displayName": "Alice Ng"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/confluence/rest/api/space/DOCS/permissions/user/ff80a1/grant"))
+        .and(body_json(json!([
+            { "targetType": "space", "operationKey": "read" },
+            { "targetType": "page", "operationKey": "create" }
+        ])))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/confluence/rest/api/space/DOCS/permissions/anonymous/revoke"))
+        .and(body_json(json!([{ "targetType": "space", "operationKey": "read" }])))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    let ops = [
+        confed_api::SpaceOperation::new("space", "read"),
+        confed_api::SpaceOperation::new("page", "create"),
+    ];
+    c.grant_space_permissions("DOCS", &confed_api::Subject::User("alice.ng".into()), &ops)
+        .await
+        .unwrap();
+    c.revoke_space_permissions("DOCS", &confed_api::Subject::Anonymous, &ops[..1]).await.unwrap();
+}

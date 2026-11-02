@@ -20,6 +20,34 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-02
+
+Who may work in a space used to be set in Confluence's administration screens, one
+checkbox at a time. `confed admin` does it from the command line, with a dry run first.
+
+### Added
+
+- **`confed admin user`** creates, changes, disables, enables and deletes users, and
+  lists a user's groups. A new user's password comes from stdin (`--password-stdin`) or
+  a hidden prompt, never a flag, or the user is mailed a link to set one (`--notify`).
+  It is never written to the `--log` trace. Data Center 8.4 or later; on Cloud, where
+  accounts belong to the Atlassian organization, it exits 9 and says so.
+- **`confed admin group`** lists, creates and deletes groups, lists their members, and
+  adds or removes users. Several users at once are added one by one, and those that fail
+  are reported in `errors` with exit 8.
+- **`confed admin perms`** lists, grants and revokes space permissions as `target:key`
+  operations (`space:read`, `page:create`), checked before anything is sent, for a
+  `group:NAME`, a `user:NAME` or `anonymous`. On a Cloud site that uses space roles it
+  lists and assigns roles instead (`--role`); a site in transition takes both. Data
+  Center needs 9.1 or later for space permissions.
+- Every admin write takes `--dry-run`; deleting a user or a group and revoking ask first
+  on a terminal, unless `--yes`. The JSON result is described by
+  `docs/reference/json/admin.schema.json`.
+
+### Fixed
+
+- The JSON envelope schema now lists the `user` command, whose envelopes it rejected.
+
 ## [0.15.0] - 2026-11-02
 
 Moving every page of a space but its home page under a page given as a URL used to
@@ -1075,7 +1103,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/hxmn/confed/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/hxmn/confed/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/hxmn/confed/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/hxmn/confed/compare/v0.13.0...v0.14.0
