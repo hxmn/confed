@@ -33,6 +33,6 @@ jobs:
         id: auth
       # Publishes all eight crates, each after those it depends on, each
       # verified by building it from its own package first.
-      - run: cargo publish --workspace
+      - run: cargo publish --locked --workspace
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
