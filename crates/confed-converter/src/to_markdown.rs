@@ -993,8 +993,21 @@ fn heading_line(text: &str) -> String {
     out.trim_end().to_string()
 }
 
+/// A paragraph's trailing line breaks, all of them: they break before
+/// nothing. Trimming only the last one left a paragraph of two breaks as a
+/// lone `\`, which comes back up as a backslash nobody wrote.
+///
+/// A break is a backslash before a newline; an escaped backslash is two. So
+/// a run of trailing backslashes ends in a break only when it is odd.
 fn trim_hard_breaks(text: &str) -> String {
-    text.trim_end_matches('\n').trim_end_matches('\\').to_string()
+    let mut text = text.trim_end();
+    loop {
+        let run = text.len() - text.trim_end_matches('\\').len();
+        if run.is_multiple_of(2) {
+            return text.to_string();
+        }
+        text = text[..text.len() - 1].trim_end();
+    }
 }
 
 fn md_link(label: &str, href: &str) -> String {
@@ -1088,6 +1101,15 @@ mod tests {
         assert_eq!(md("<p><strong>a</strong><strong>b</strong></p>"), "**ab**\n");
         assert_eq!(md("<p><em>a</em><em>b</em> <em>c</em></p>"), "*ab* *c*\n");
         assert_eq!(md("<p><strong>a</strong><em>b</em></p>"), "**a***b*\n");
+    }
+
+    #[test]
+    fn a_paragraph_of_breaks_renders_to_nothing() {
+        assert_eq!(md("<p><br/><br/></p><p>x</p>"), "x\n");
+        assert_eq!(md("<p>a<br/><br/><br/></p>"), "a\n");
+        assert_eq!(md("<p>a<br/> <br/></p>"), "a\n");
+        assert_eq!(md("<p>C:\\<br/></p>"), "C:\\\\\n");
+        assert_eq!(md("<p>C:\\</p>"), "C:\\\\\n");
     }
 
     #[test]
