@@ -15,6 +15,7 @@ mod admin;
 mod space;
 
 use async_trait::async_trait;
+use confed_api::admin::AdminClient;
 use confed_api::client::ConfluenceClient;
 use confed_api::error::{ApiError, ApiResult};
 use confed_api::http::{Auth, Http};
@@ -198,6 +199,10 @@ fn storage_body(value: &str) -> serde_json::Value {
 
 #[async_trait]
 impl ConfluenceClient for CloudClient {
+    fn admin(&self) -> Option<&dyn AdminClient> {
+        Some(self)
+    }
+
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
     }
@@ -665,7 +670,10 @@ impl ConfluenceClient for CloudClient {
         page.summary.version = version;
         Ok(page)
     }
+}
 
+#[async_trait]
+impl AdminClient for CloudClient {
     async fn create_user(&self, _user: &NewUser) -> ApiResult<User> {
         Err(admin::organization_only(self.flavor(), "create a user"))
     }

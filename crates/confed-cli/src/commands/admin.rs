@@ -9,8 +9,8 @@ use crate::cli::{AdminCommand, AdminGroupCommand, AdminPermsCommand, AdminUserCo
 use crate::context::Context;
 use crate::output::{ErrorEntry, Output};
 use confed_api::{
-    ConfluenceClient, Group, NewUser, Principal, RoleMode, Secret, SpaceOperation, Subject, User,
-    UserUpdate,
+    AdminClient, ConfluenceClient, Group, NewUser, Principal, RoleMode, Secret, SpaceOperation,
+    Subject, User, UserUpdate,
 };
 use confed_core::error::{ConfedError, ExitCode, Result};
 use serde_json::{json, Value};
@@ -68,7 +68,7 @@ async fn user(ctx: &mut Context, action: &str, command: &AdminUserCommand) -> Re
                     vec![format!("create user {username} ({full_name}, {email})")],
                 ));
             }
-            let created = client.create_user(&new).await?;
+            let created = admin(&client)?.create_user(&new).await?;
             let mut human = format!("Created user {username}.\n");
             if *notify {
                 let _ = writeln!(human, "{email} gets a link to set a password.");
@@ -92,7 +92,7 @@ async fn user(ctx: &mut Context, action: &str, command: &AdminUserCommand) -> Re
                 return Ok(planned(action, vec![sentence]));
             }
             let update = UserUpdate { full_name: full_name.clone(), email: email.clone() };
-            client.update_user(username, &update).await?;
+            admin(&client)?.update_user(username, &update).await?;
             Ok(done(action, json!({ "username": username }), format!("Updated {username}.\n")))
         }
         AdminUserCommand::Disable { username, dry_run }
@@ -103,7 +103,7 @@ async fn user(ctx: &mut Context, action: &str, command: &AdminUserCommand) -> Re
             if *dry_run {
                 return Ok(planned(action, vec![format!("{verb} user {username}")]));
             }
-            client.set_user_enabled(username, enable).await?;
+            admin(&client)?.set_user_enabled(username, enable).await?;
             Ok(done(
                 action,
                 json!({ "username": username }),
@@ -118,12 +118,12 @@ async fn user(ctx: &mut Context, action: &str, command: &AdminUserCommand) -> Re
             if !confirmed(ctx, &format!("Delete user {username}?"))? {
                 return Ok(cancelled(action));
             }
-            client.delete_user(username).await?;
+            admin(&client)?.delete_user(username).await?;
             Ok(done(action, json!({ "username": username }), format!("Deleted user {username}.\n")))
         }
         AdminUserCommand::Groups { user } => {
             let client = ctx.build_client()?;
-            let groups = client.user_groups(user).await?;
+            let groups = admin(&client)?.user_groups(user).await?;
             let mut human = String::new();
             for g in &groups {
                 let _ = writeln!(human, "{}", g.name);
@@ -157,7 +157,7 @@ async fn group(ctx: &mut Context, action: &str, command: &AdminGroupCommand) -> 
     let client = ctx.build_client()?;
     match command {
         AdminGroupCommand::List { limit } => {
-            let groups = client.list_groups(*limit).await?;
+            let groups = admin(&client)?.list_groups(*limit).await?;
             let mut human = String::new();
             for g in &groups {
                 let _ = writeln!(human, "{}", g.name);
@@ -174,7 +174,7 @@ async fn group(ctx: &mut Context, action: &str, command: &AdminGroupCommand) -> 
             if *dry_run {
                 return Ok(planned(action, vec![format!("create group {name}")]));
             }
-            let created = client.create_group(name).await?;
+            let created = admin(&client)?.create_group(name).await?;
             Ok(done(
                 action,
                 json!({ "group": group_json(&created) }),
@@ -191,7 +191,7 @@ async fn group(ctx: &mut Context, action: &str, command: &AdminGroupCommand) -> 
             )? {
                 return Ok(cancelled(action));
             }
-            client.delete_group(name).await?;
+            admin(&client)?.delete_group(name).await?;
             Ok(done(
                 action,
                 json!({ "group": { "name": name } }),
@@ -199,7 +199,7 @@ async fn group(ctx: &mut Context, action: &str, command: &AdminGroupCommand) -> 
             ))
         }
         AdminGroupCommand::Members { name, limit } => {
-            let members = client.group_members(name, *limit).await?;
+            let members = admin(&client)?.group_members(name, *limit).await?;
             let mut human = String::new();
             for m in &members {
                 let _ = writeln!(
@@ -250,9 +250,9 @@ async fn membership(
     let mut human = String::new();
     for user in users {
         let outcome = if add {
-            client.add_group_member(group, user).await
+            admin(&client)?.add_group_member(group, user).await
         } else {
-            client.remove_group_member(group, user).await
+            admin(&client)?.remove_group_member(group, user).await
         };
         match outcome {
             Ok(()) => {
@@ -287,16 +287,19 @@ async fn membership(
 async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> Result<Output> {
     let space = ctx.space_key()?.value;
     let client = ctx.build_client()?;
-    let mode = client.space_role_mode().await?;
+    let mode = admin(&client)?.space_role_mode().await?;
     match command {
         AdminPermsCommand::List => {
             let permissions = if mode.grants_permissions() {
-                client.space_permissions(&space).await?
+                admin(&client)?.space_permissions(&space).await?
             } else {
                 Vec::new()
             };
             let (assignments, roles) = if mode.assigns_roles() {
-                (client.space_role_assignments(&space).await?, client.space_roles(&space).await?)
+                (
+                    admin(&client)?.space_role_assignments(&space).await?,
+                    admin(&client)?.space_roles(&space).await?,
+                )
             } else {
                 (Vec::new(), Vec::new())
             };
@@ -342,7 +345,7 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
         }
         AdminPermsCommand::Roles => {
             require_roles(mode, "list space roles")?;
-            let roles = client.space_roles(&space).await?;
+            let roles = admin(&client)?.space_roles(&space).await?;
             let mut human = String::new();
             for r in &roles {
                 let _ =
@@ -363,7 +366,7 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
             let who = parse_subject(subject)?;
             if let Some(role) = role {
                 require_roles(mode, "assign a space role")?;
-                let roles = client.space_roles(&space).await?;
+                let roles = admin(&client)?.space_roles(&space).await?;
                 let found = roles
                     .iter()
                     .find(|r| r.id == *role || r.name.eq_ignore_ascii_case(role))
@@ -384,7 +387,7 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
                 if *dry_run {
                     return Ok(planned(action, vec![sentence]));
                 }
-                client.set_space_role(&space, &who, Some(&found.id)).await?;
+                admin(&client)?.set_space_role(&space, &who, Some(&found.id)).await?;
                 return Ok(done(
                     action,
                     json!({ "space": space, "subject": subject, "role": found.name, "role_id": found.id }),
@@ -397,7 +400,7 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
             if *dry_run {
                 return Ok(planned(action, vec![format!("grant {who} {listed} in {space}")]));
             }
-            client.grant_space_permissions(&space, &who, &operations).await?;
+            admin(&client)?.grant_space_permissions(&space, &who, &operations).await?;
             Ok(done(
                 action,
                 json!({ "space": space, "subject": subject, "operations": operations_json(&operations) }),
@@ -414,7 +417,7 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
                 if !confirmed(ctx, &format!("Take {who}'s role in {space} away?"))? {
                     return Ok(cancelled(action));
                 }
-                client.set_space_role(&space, &who, None).await?;
+                admin(&client)?.set_space_role(&space, &who, None).await?;
                 return Ok(done(
                     action,
                     json!({ "space": space, "subject": subject, "role": Value::Null }),
@@ -430,7 +433,7 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
             if !confirmed(ctx, &format!("Revoke {listed} from {who} in {space}?"))? {
                 return Ok(cancelled(action));
             }
-            client.revoke_space_permissions(&space, &who, &operations).await?;
+            admin(&client)?.revoke_space_permissions(&space, &who, &operations).await?;
             Ok(done(
                 action,
                 json!({ "space": space, "subject": subject, "operations": operations_json(&operations) }),
@@ -441,6 +444,13 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
 }
 
 /// `group:NAME`, `user:NAME` or `anonymous`.
+/// The administration half of `client`, or why it has none.
+fn admin(client: &Arc<dyn ConfluenceClient>) -> Result<&dyn AdminClient> {
+    client.admin().ok_or_else(|| {
+        ConfedError::from(confed_api::ApiError::unsupported(client.flavor(), "administration"))
+    })
+}
+
 fn parse_subject(text: &str) -> Result<Subject> {
     let hint =
         "name it group:NAME, user:NAME (username on Data Center, account id on Cloud) or anonymous";

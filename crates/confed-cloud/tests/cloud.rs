@@ -4,9 +4,9 @@
 //! milliseconds instead of sleeping through real backoff.
 
 use confed_api::{
-    ApiError, Attachment, AttachmentId, Auth, BodyFormat, CommentActivity, CommentKind,
-    ConfluenceClient, ContentActivity, Http, InlineAnchor, NewPage, PageId, PageStatus, PageUpdate,
-    Position, RetryPolicy, SpaceId,
+    AdminClient, ApiError, Attachment, AttachmentId, Auth, BodyFormat, CommentActivity,
+    CommentKind, ConfluenceClient, ContentActivity, Http, InlineAnchor, NewPage, PageId,
+    PageStatus, PageUpdate, Position, RetryPolicy, SpaceId,
 };
 use confed_cloud::CloudClient;
 use serde_json::json;

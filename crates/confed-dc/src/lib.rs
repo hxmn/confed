@@ -16,6 +16,7 @@ mod inline;
 mod space;
 
 use async_trait::async_trait;
+use confed_api::admin::AdminClient;
 use confed_api::client::ConfluenceClient;
 use confed_api::error::{ApiError, ApiResult};
 use confed_api::http::{Auth, Http};
@@ -523,6 +524,10 @@ fn judge_web_move(answer: &confed_api::WebAnswer, flavor: Flavor) -> ApiResult<(
 
 #[async_trait]
 impl ConfluenceClient for DcClient {
+    fn admin(&self) -> Option<&dyn AdminClient> {
+        Some(self)
+    }
+
     fn capabilities(&self) -> &Capabilities {
         &self.capabilities
     }
@@ -1160,7 +1165,10 @@ impl ConfluenceClient for DcClient {
         page.summary.version = version;
         Ok(page)
     }
+}
 
+#[async_trait]
+impl AdminClient for DcClient {
     async fn create_user(&self, user: &NewUser) -> ApiResult<User> {
         self.admin_create_user(user).await
     }

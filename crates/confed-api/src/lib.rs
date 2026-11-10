@@ -7,6 +7,7 @@
 //! Capability differences are reported through [`types::Capabilities`] rather
 //! than by branching on the flavor.
 
+pub mod admin;
 pub mod client;
 pub mod error;
 pub mod http;
@@ -19,6 +20,7 @@ pub mod secret;
 pub mod types;
 pub mod wire;
 
+pub use admin::AdminClient;
 pub use client::ConfluenceClient;
 pub use error::{ApiError, ApiResult};
 pub use http::{partial_path, Auth, Http, RetryPolicy, Timeouts, WebAnswer, PARTIAL_SUFFIX};
