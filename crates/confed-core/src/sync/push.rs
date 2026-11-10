@@ -851,7 +851,7 @@ impl SyncEngine {
                 {
                     let (page, sent) = found;
                     created_ids.insert(path.clone(), page.summary.id.0.clone());
-                    self.commit_page(ws, &page, &path, &file)?;
+                    self.commit_page(ws, &page, &path, &file, None)?;
                     // The base is what was sent. Should the file have changed
                     // since, that change is still owed, and shows as one.
                     if let Some(mut record) = ws.state().get_page(&page.summary.id.0)? {
@@ -919,7 +919,7 @@ impl SyncEngine {
                 };
 
                 created_ids.insert(path.clone(), created.summary.id.0.clone());
-                self.commit_page(ws, &created, &path, &file)?;
+                self.commit_page(ws, &created, &path, &file, None)?;
                 ws.state().delete_meta(&journal)?;
                 ws.state().log(
                     "push-create",
@@ -978,12 +978,51 @@ impl SyncEngine {
                     )
                     .await?;
 
-                if op.ops.iter().any(|o| o == "labels") {
-                    self.sync_labels(&page_id, &base_record.labels, &file.frontmatter.labels)
-                        .await?;
-                }
+                // The page is updated: from here on the base must follow it,
+                // whatever happens to the labels, or the next push would be
+                // refused as stale against a version it made itself.
+                let labels_failed = if op.ops.iter().any(|o| o == "labels") {
+                    match self
+                        .sync_labels(&page_id, &base_record.labels, &file.frontmatter.labels)
+                        .await
+                    {
+                        Ok(()) => None,
+                        Err(e) => {
+                            let id = PageId::new(&page_id);
+                            let now = self
+                                .client
+                                .get_labels(&id)
+                                .await
+                                .unwrap_or_else(|_| base_record.labels.clone());
+                            Some((now, e))
+                        }
+                    }
+                } else {
+                    None
+                };
 
-                self.commit_page(ws, &updated, &path, &file)?;
+                self.commit_page(
+                    ws,
+                    &updated,
+                    &path,
+                    &file,
+                    labels_failed.as_ref().map(|(now, _)| now.as_slice()),
+                )?;
+                if let Some((_, e)) = labels_failed {
+                    ws.state().log(
+                        "push-update",
+                        Some(&page_id),
+                        Some(base_record.version),
+                        Some(updated.summary.version),
+                        "labels-failed",
+                        Some(&e.to_string()),
+                    )?;
+                    return Err(ConfedError::Other(format!(
+                        "{path}: updated to version {}, but its labels could not be changed \
+                         ({e}); the next push tries them again",
+                        updated.summary.version
+                    )));
+                }
                 ws.state().log(
                     "push-update",
                     Some(&page_id),
@@ -1137,12 +1176,17 @@ impl SyncEngine {
     }
 
     /// After a successful upload, advance the base and rewrite managed frontmatter.
+    ///
+    /// `server_labels` is for an update whose labels could not all be changed:
+    /// the labels the page has on the server, which the base records instead
+    /// of the file's, so the difference is still there for the next push.
     pub(super) fn commit_page(
         &self,
         ws: &mut Workspace,
         page: &Page,
         path: &str,
         local: &MarkdownFile,
+        server_labels: Option<&[String]>,
     ) -> Result<()> {
         let summary = &page.summary;
         let convert_opts = page_convert_options(ws, path)?;
@@ -1165,6 +1209,10 @@ impl SyncEngine {
         // The id goes into the file first. Everything after it can fail and
         // be redone; a page the file does not name would be created again.
         write_atomic(&ws.absolute(path), &file.render()?)?;
+        let mut recorded = file;
+        if let Some(labels) = server_labels {
+            recorded.frontmatter.labels = labels.to_vec();
+        }
         // The server's response is the new truth, including for the copy on disk.
         self.write_storage_copy(ws, path, &page.body_storage)?;
 
@@ -1197,13 +1245,13 @@ impl SyncEngine {
                 position: summary.position,
                 version: summary.version,
                 status: summary.status.as_str().to_string(),
-                labels: file.frontmatter.labels.clone(),
+                labels: recorded.frontmatter.labels.clone(),
                 author: summary.author.clone(),
                 created_at: summary.created_at.clone(),
                 updated_at: summary.updated_at.clone(),
                 storage_body: page.body_storage.clone(),
                 storage_hash: hash_str(&page.body_storage),
-                markdown_hash: file.content_hash(),
+                markdown_hash: recorded.content_hash(),
                 block_map,
                 sync_state: SyncState::Clean,
                 synced_at: now(),
@@ -1217,7 +1265,7 @@ impl SyncEngine {
                 position: summary.position,
                 version: summary.version,
                 status: summary.status.as_str().to_string(),
-                labels: file.frontmatter.labels.clone(),
+                labels: recorded.frontmatter.labels.clone(),
                 author: summary.author.clone(),
                 created_at: summary.created_at.clone(),
                 updated_at: summary.updated_at.clone(),

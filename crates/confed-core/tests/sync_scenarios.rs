@@ -454,6 +454,38 @@ both_flavors!(pull_refuses_to_clobber_a_locally_edited_deleted_page, |mut h: Har
     assert!(!h.path("Contested.md").exists());
 });
 
+// The update went through and the labels did not: the base follows the
+// page to its new version — the next push is not refused as stale against a
+// version it made itself — and the labels are still owed, and go up next time.
+both_flavors!(
+    a_label_failure_after_an_update_keeps_the_base_in_step,
+    |mut h: Harness| async move {
+        let id = h.mock.seed_page("1001", "Labelled", None, "<p>Body.</p>");
+        h.pull().await;
+        let file = h.read("Labelled.md").replace("labels: []", "labels:\n- added");
+        h.write("Labelled.md", &format!("{file}\nФраза 1.\n"));
+
+        h.mock.refuse_labels(true);
+        let outcome = h.push().await;
+        assert_eq!(outcome.failed.len(), 1, "{outcome:?}");
+        assert!(outcome.failed[0].error.contains("labels could not be changed"), "{outcome:?}");
+        assert!(h.mock.page_body("1001").unwrap().contains("Фраза 1."), "the body went up");
+        let base = h.ws.state().get_page("1001").unwrap().unwrap();
+        assert_eq!(
+            base.version,
+            h.mock.page_version("1001").unwrap(),
+            "the base followed the page"
+        );
+        assert_eq!(h.status("1001"), PageState::Modified, "the labels are still to send");
+
+        h.mock.refuse_labels(false);
+        let outcome = h.push().await;
+        assert!(outcome.failed.is_empty(), "{outcome:?}");
+        assert!(h.engine.client().get_labels(&id).await.unwrap().contains(&"added".to_string()));
+        assert_eq!(h.status("1001"), PageState::Unchanged);
+    }
+);
+
 both_flavors!(labels_sync_in_both_directions, |mut h: Harness| async move {
     let id = h.mock.seed_page("1001", "Labelled", None, "<p>Body.</p>");
     h.engine.client().add_label(&id, "existing").await.unwrap();

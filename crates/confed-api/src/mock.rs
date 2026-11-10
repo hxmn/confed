@@ -81,6 +81,9 @@ struct MockState {
     /// Whether a create fails with a network error before the page is
     /// stored: a request that never reached the server.
     drop_creates: bool,
+    /// Whether adding a label is refused (403), as for a page whose labels
+    /// the user may not change.
+    refuse_labels: bool,
     /// Every mutating call recorded, so tests can assert "--dry-run wrote nothing".
     calls: Vec<String>,
 }
@@ -402,6 +405,11 @@ impl MockClient {
     /// answer creates normally again.
     pub fn lose_create_answers(&self, lose: bool) {
         self.state.lock().expect("mock poisoned").lose_create_answers = lose;
+    }
+
+    /// Refuse every label added, or accept them again.
+    pub fn refuse_labels(&self, refuse: bool) {
+        self.state.lock().expect("mock poisoned").refuse_labels = refuse;
     }
 
     /// Fail every create with a network error without storing the page, or
@@ -986,6 +994,9 @@ impl ConfluenceClient for MockClient {
     async fn add_label(&self, id: &PageId, label: &str) -> ApiResult<()> {
         self.record(format!("add_label:{id}:{label}"));
         let mut state = self.state.lock().expect("mock poisoned");
+        if state.refuse_labels {
+            return Err(ApiError::Auth(format!("POST labels of {id}: HTTP 403")));
+        }
         if let Some(page) = state.pages.get_mut(id.as_str()) {
             if !page.summary.labels.iter().any(|l| l == label) {
                 page.summary.labels.push(label.to_string());
