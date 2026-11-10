@@ -91,6 +91,15 @@ audit:
 		|| { echo "cargo-audit is not installed: cargo install cargo-audit"; exit 127; }
 	$(CARGO) audit
 
+## fuzz: run every converter fuzz target for FUZZ_SECONDS (default 60); needs nightly and cargo-fuzz
+FUZZ_SECONDS ?= 60
+fuzz:
+	@command -v cargo-fuzz >/dev/null \
+		|| { echo "cargo-fuzz is not installed: cargo install cargo-fuzz"; exit 127; }
+	cd crates/confed-converter && for target in storage markdown; do \
+		$(CARGO) +nightly fuzz run $$target -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
+	done
+
 ## deny: licenses, advisories, duplicate versions and sources, per deny.toml
 deny:
 	@command -v cargo-deny >/dev/null \
@@ -126,5 +135,5 @@ help:
 	@echo "Variables: CARGO=$(CARGO)  MSRV=$(MSRV)  ARGS (for make run)  NAME (for make test-one)"
 
 .PHONY: build release install run test test-one test-sync test-cli \
-        fmt fmt-check lint lint-fix doc doc-open changelog msrv audit deny ci \
+        fmt fmt-check lint lint-fix doc doc-open changelog msrv audit deny fuzz ci \
         clean clean-cache update help

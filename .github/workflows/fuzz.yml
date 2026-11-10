@@ -1,0 +1,29 @@
+name: Fuzz
+
+# The converter's fuzz targets, ten minutes each: weekly, and on demand from
+# the Actions tab. A crash uploads the input that caused it.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [storage, markdown]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      - name: Fuzz
+        working-directory: crates/confed-converter
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=600
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-${{ matrix.target }}
+          path: crates/confed-converter/fuzz/artifacts

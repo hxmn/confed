@@ -12,6 +12,8 @@ members = [
     "crates/confed-dc",
     "crates/confed-tui",
 ]
+# Built by cargo-fuzz on nightly, against the converter as a path dependency.
+exclude = ["crates/confed-converter/fuzz"]
 
 [workspace.package]
 version = "0.19.0"
