@@ -112,7 +112,10 @@ impl ConvertContext {
                     confed_converter::UserLink {
                         display_name: u.display_name,
                         profile_url: u.profile_url,
-                        id_attr: u.id_attr,
+                        // Stored as the server wrote it; one confed does not
+                        // know reads as a userkey, as an unnamed one would.
+                        id_attr: confed_converter::UserIdAttr::parse(&u.id_attr)
+                            .unwrap_or_default(),
                         id_value: u.id,
                     },
                 )
@@ -135,17 +138,25 @@ impl ConvertContext {
     /// Options for the page whose file is `path`, with `links` (page id →
     /// file path) as the pages it can link to.
     pub fn options(&self, path: &str, links: &HashMap<String, String>) -> ConvertOptions {
-        let mut page_links: HashMap<String, String> = links
+        let mut page_links = confed_converter::PageLinks {
+            by_id: links
+                .iter()
+                .map(|(id, target)| (id.clone(), paths::relative_link(path, target)))
+                .collect(),
+            ..Default::default()
+        };
+        let link_targets = page_links
+            .by_id
             .iter()
-            .map(|(id, target)| (id.clone(), paths::relative_link(path, target)))
+            .map(|(id, link)| (link.clone(), confed_converter::PageTarget::Id(id.clone())))
             .collect();
-        let link_targets = page_links.iter().map(|(id, link)| (link.clone(), id.clone())).collect();
         for (id, title) in &self.titles {
-            if let Some(link) = page_links.get(id).cloned() {
+            if let Some(link) = page_links.by_id.get(id).cloned() {
                 page_links
-                    .entry(format!("{}:{title}", self.space_key))
+                    .by_space_title
+                    .entry((self.space_key.clone(), title.clone()))
                     .or_insert_with(|| link.clone());
-                page_links.entry(title.clone()).or_insert(link);
+                page_links.by_title.entry(title.clone()).or_insert(link);
             }
         }
         ConvertOptions {

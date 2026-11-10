@@ -544,13 +544,14 @@ impl<'a> Generator<'a> {
         // gives the key). `user:account-id=…` and `user:username=…` say which
         // attribute; a bare key is matched against known people, else a userkey.
         if let Some(id) = url.strip_prefix("user:") {
-            let (attr, value) = match id.split_once('=') {
-                Some((attr @ ("userkey" | "account-id" | "username"), value)) => {
-                    (attr.to_string(), value.to_string())
-                }
-                _ => match self.opts.users.values().find(|u| u.id_value == id) {
-                    Some(user) => (user.id_attr.clone(), id.to_string()),
-                    None => ("userkey".to_string(), id.to_string()),
+            let named = id.split_once('=').and_then(|(attr, value)| {
+                crate::UserIdAttr::parse(attr).map(|attr| (attr, value.to_string()))
+            });
+            let (attr, value) = match named {
+                Some(named) => named,
+                None => match self.opts.users.values().find(|u| u.id_value == id) {
+                    Some(user) => (user.id_attr, id.to_string()),
+                    None => (crate::UserIdAttr::UserKey, id.to_string()),
                 },
             };
             return format!(
@@ -570,19 +571,19 @@ impl<'a> Generator<'a> {
         }
 
         if let Some(target) = self.opts.link_targets.get(url.as_str()) {
-            let by_id = target.chars().all(|c| c.is_ascii_digit());
-            let title = match (by_id, self.opts.links_by_title) {
-                (true, true) => self.opts.page_titles.get(target).cloned(),
-                (false, _) => Some(target.clone()),
-                (true, false) => None,
-            };
-            return match title {
-                Some(title) => page_link_by_title(&title, None, label),
-                None => format!(
-                    r#"<ac:link><ri:page ri:content-id="{}" />{}</ac:link>"#,
-                    dom::escape_attr(target),
-                    link_body(label)
-                ),
+            return match target {
+                crate::PageTarget::Title(title) => page_link_by_title(title, None, label),
+                crate::PageTarget::Id(id) => {
+                    match self.opts.links_by_title.then(|| self.opts.page_titles.get(id)).flatten()
+                    {
+                        Some(title) => page_link_by_title(title, None, label),
+                        None => format!(
+                            r#"<ac:link><ri:page ri:content-id="{}" />{}</ac:link>"#,
+                            dom::escape_attr(id),
+                            link_body(label)
+                        ),
+                    }
+                }
             };
         }
 
@@ -1000,6 +1001,19 @@ mod tests {
         assert_eq!(gen("- </u>\n"), "<ul><li>&lt;/u&gt;</li></ul>");
     }
 
+    /// A page whose title is a number is linked by that title, not taken for
+    /// the page with that id: which the target is, is said, not guessed.
+    #[test]
+    fn a_page_titled_with_a_number_is_linked_by_title() {
+        let mut opts = ConvertOptions::default();
+        opts.link_targets.insert("2024.md".into(), crate::PageTarget::Title("2024".into()));
+        opts.link_targets.insert("Plan.md".into(), crate::PageTarget::Id("1001".into()));
+        let out = generate("[year](2024.md) and [plan](Plan.md)\n", &opts).unwrap();
+        assert!(out.contains(r#"ri:content-title="2024""#), "{out}");
+        assert!(!out.contains(r#"ri:content-id="2024""#), "{out}");
+        assert!(out.contains(r#"ri:content-id="1001""#), "{out}");
+    }
+
     #[test]
     fn paragraphs_and_headings() {
         assert_eq!(gen("hello\n"), "<p>hello</p>");
@@ -1143,7 +1157,7 @@ mod tests {
             r#"<p><a href="https://x.test/a">docs</a></p>"#
         );
         let mut opts = ConvertOptions::default();
-        opts.link_targets.insert("runbook.md".into(), "Runbook".into());
+        opts.link_targets.insert("runbook.md".into(), crate::PageTarget::Title("Runbook".into()));
         assert_eq!(
             generate("[the runbook](runbook.md)\n", &opts).unwrap(),
             r#"<p><ac:link><ri:page ri:content-title="Runbook" /><ac:plain-text-link-body><![CDATA[the runbook]]></ac:plain-text-link-body></ac:link></p>"#
@@ -1251,8 +1265,8 @@ mod page_link_tests {
             links_by_title: true,
             ..Default::default()
         };
-        o.link_targets.insert("CH-200.5.md".into(), "900000098561".into());
-        o.link_targets.insert("WALL.md".into(), "42".into());
+        o.link_targets.insert("CH-200.5.md".into(), crate::PageTarget::Id("900000098561".into()));
+        o.link_targets.insert("WALL.md".into(), crate::PageTarget::Id("42".into()));
         o.page_titles.insert("900000098561".into(), "CH-200.5. Подготовить план (v.1.1)".into());
         o.page_titles.insert("42".into(), "Разделы (с учетом всех примечаний)".into());
         o

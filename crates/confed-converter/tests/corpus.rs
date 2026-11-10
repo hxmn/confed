@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use confed_converter::{BlockEntry, ConvertOptions};
+use confed_converter::{BlockEntry, ConvertOptions, PageLinks, PageTarget, UserIdAttr};
 
 pub struct Fixture {
     pub name: String,
@@ -33,10 +33,10 @@ pub fn load() -> Vec<Fixture> {
 /// The options the tests convert with: a sidecar directory, one known page link
 /// and a site URL, so every link path in the mapping table is exercised.
 pub fn options() -> ConvertOptions {
-    let mut page_links = HashMap::new();
-    page_links.insert("Runbook".to_string(), "runbook.md".to_string());
+    let mut page_links = PageLinks::default();
+    page_links.by_title.insert("Runbook".to_string(), "runbook.md".to_string());
     let mut link_targets = HashMap::new();
-    link_targets.insert("runbook.md".to_string(), "Runbook".to_string());
+    link_targets.insert("runbook.md".to_string(), PageTarget::Title("Runbook".to_string()));
 
     // The corpus mentions this person; without them the fixtures would exercise
     // the unresolved path instead of the rendering under test.
@@ -47,7 +47,7 @@ pub fn options() -> ConvertOptions {
             confed_converter::UserLink {
                 display_name: name.to_string(),
                 profile_url: format!("https://wiki.example.test/people/{id}"),
-                id_attr: "account-id".to_string(),
+                id_attr: UserIdAttr::AccountId,
                 id_value: id.to_string(),
             },
         );

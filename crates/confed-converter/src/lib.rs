@@ -58,10 +58,83 @@ pub struct UserLink {
     /// Absolute URL of the profile page, in whatever form this site uses:
     /// `…/display/~username` on Data Center, `…/people/<account id>` on Cloud.
     pub profile_url: String,
-    /// The attribute Confluence identifies them by — `userkey`, `account-id`
-    /// or `username` — kept so an edited mention can be rebuilt exactly.
-    pub id_attr: String,
+    /// The attribute Confluence identifies them by, kept so an edited
+    /// mention can be rebuilt exactly.
+    pub id_attr: UserIdAttr,
     pub id_value: String,
+}
+
+/// How a mention names a person: the attribute of its `ri:user`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum UserIdAttr {
+    /// `ri:userkey`, Data Center's.
+    #[default]
+    UserKey,
+    /// `ri:account-id`, Cloud's.
+    AccountId,
+    /// `ri:username`, older Data Center content.
+    Username,
+}
+
+impl UserIdAttr {
+    /// The attribute as storage writes it, without the `ri:` prefix.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserIdAttr::UserKey => "userkey",
+            UserIdAttr::AccountId => "account-id",
+            UserIdAttr::Username => "username",
+        }
+    }
+
+    pub fn parse(attr: &str) -> Option<Self> {
+        match attr {
+            "userkey" => Some(UserIdAttr::UserKey),
+            "account-id" => Some(UserIdAttr::AccountId),
+            "username" => Some(UserIdAttr::Username),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for UserIdAttr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The local file a page link can lead to, by what the link names: the
+/// page's id, its title in this space, or its title in a named space. One
+/// map per kind of key, so a title that happens to be a number is not
+/// taken for an id.
+#[derive(Clone, Debug, Default)]
+pub struct PageLinks {
+    /// page id → path of that page's file, relative to this page's file.
+    pub by_id: HashMap<String, String>,
+    /// title of a page of this space → its path.
+    pub by_title: HashMap<String, String>,
+    /// (space key, title) → its path.
+    pub by_space_title: HashMap<(String, String), String>,
+}
+
+impl PageLinks {
+    /// The path a link to page `id`, titled `title` in `space`, leads to
+    /// here, if it leads anywhere here. `own` says `space` is this one, where
+    /// a title alone is enough.
+    pub fn find(&self, id: &str, title: &str, space: &str, own: bool) -> Option<&String> {
+        let by_id = (!id.is_empty()).then(|| self.by_id.get(id)).flatten();
+        let by_title = || (own && !title.is_empty()).then(|| self.by_title.get(title)).flatten();
+        let qualified = || self.by_space_title.get(&(space.to_string(), title.to_string()));
+        by_id.or_else(by_title).or_else(qualified)
+    }
+}
+
+/// What a Markdown link to a local page file goes back up as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageTarget {
+    /// The page with this id.
+    Id(String),
+    /// The page with this title, in this space.
+    Title(String),
 }
 
 /// Context the converter needs to rewrite links and attachment references.
@@ -70,11 +143,12 @@ pub struct ConvertOptions {
     /// Path of the page's sidecar directory relative to the Markdown file,
     /// e.g. `.Onboarding` — attachments render as `.Onboarding/diagram.png`.
     pub attachment_dir: String,
-    /// page id → path of that page's Markdown file, relative to this page's file.
-    /// Used to turn same-space `ac:link`s into relative Markdown links.
-    pub page_links: HashMap<String, String>,
-    /// Reverse of `page_links`, for turning Markdown links back into `ac:link`.
-    pub link_targets: HashMap<String, String>,
+    /// Where page links lead locally, to turn same-space `ac:link`s into
+    /// relative Markdown links.
+    pub page_links: PageLinks,
+    /// Relative link → the page it names, for turning Markdown links back
+    /// into `ac:link`.
+    pub link_targets: HashMap<String, PageTarget>,
     /// page id → the page's title on the server, for page links written by title.
     pub page_titles: HashMap<String, String>,
     /// Write page links by title (`ri:content-title`), which is all Data Center

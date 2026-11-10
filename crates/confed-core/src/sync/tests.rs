@@ -211,7 +211,7 @@ fn the_conversion_context_is_rebuilt_when_its_index_moves() {
     ws.state().upsert_page(&record("1002", "Фраза", "Фраза.md")).unwrap();
     let opts = page_convert_options(&ws, "Onboarding.md").unwrap();
     assert_eq!(opts.page_titles.get("1001").map(String::as_str), Some("Onboarding"));
-    assert_eq!(opts.page_links.get("1002").map(String::as_str), Some("Фраза.md"));
+    assert_eq!(opts.page_links.by_id.get("1002").map(String::as_str), Some("Фраза.md"));
 
     ws.state().set_meta("space_key", "ENG").unwrap();
     assert_eq!(page_convert_options(&ws, "Onboarding.md").unwrap().space_key, "ENG");

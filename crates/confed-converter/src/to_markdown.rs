@@ -684,20 +684,14 @@ impl Renderer<'_> {
     /// A page link becomes a relative `.md` path when confed knows where that
     /// page lives locally, and an absolute site URL when it does not.
     fn page_href(&self, id: &str, title: &str, space: &str) -> String {
-        let qualified = format!("{space}:{title}");
         // A title alone means this space's page. A link that names another
         // space is that space's page, even when this one has a page of that
         // title: the file link would hide a link that leads elsewhere — or
         // nowhere.
         let own = space.is_empty() || space == self.opts.space_key;
-        let by_title = if own { title } else { "" };
-        for key in [id, by_title, qualified.as_str()] {
-            if key.is_empty() {
-                continue;
-            }
-            if let Some(path) = self.opts.page_links.get(key) {
-                return path.clone();
-            }
+        let space = if space.is_empty() { self.opts.space_key.as_str() } else { space };
+        if let Some(path) = self.opts.page_links.find(id, title, space, own) {
+            return path.clone();
         }
         let base = self.opts.base_url.trim_end_matches('/');
         let title_enc = percent_encode_path(title);
@@ -1268,7 +1262,7 @@ mod tests {
     #[test]
     fn page_links_resolve_to_relative_paths_when_known() {
         let mut opts = ConvertOptions::default();
-        opts.page_links.insert("Runbook".into(), "runbook.md".into());
+        opts.page_links.by_title.insert("Runbook".into(), "runbook.md".into());
         let src = r#"<p><ac:link><ri:page ri:content-title="Runbook"/><ac:plain-text-link-body><![CDATA[the runbook]]></ac:plain-text-link-body></ac:link></p>"#;
         let out = crate::storage_to_markdown(src, &opts).unwrap().markdown;
         assert_eq!(out, "[the runbook](runbook.md)\n");
@@ -1281,8 +1275,10 @@ mod tests {
             space_key: "DOCS".into(),
             ..Default::default()
         };
-        opts.page_links.insert("Runbook".into(), "runbook.md".into());
-        opts.page_links.insert("DOCS:Runbook".into(), "runbook.md".into());
+        opts.page_links.by_title.insert("Runbook".into(), "runbook.md".into());
+        opts.page_links
+            .by_space_title
+            .insert(("DOCS".into(), "Runbook".into()), "runbook.md".into());
         let other =
             r#"<p><ac:link><ri:page ri:space-key="ENG" ri:content-title="Runbook"/></ac:link></p>"#;
         let out = crate::storage_to_markdown(other, &opts).unwrap().markdown;
@@ -1437,7 +1433,7 @@ mod user_mention_tests {
             UserLink {
                 display_name: "Alice Ng".into(),
                 profile_url: "https://wiki.corp/display/~alice.ng".into(),
-                id_attr: "userkey".into(),
+                id_attr: crate::UserIdAttr::UserKey,
                 id_value: "6cb6d404f61e0043d34f805b8eca16d6".into(),
             },
         );
@@ -1485,7 +1481,7 @@ mod user_mention_tests {
             UserLink {
                 display_name: "Bob Kaur".into(),
                 profile_url: "https://acme.atlassian.net/wiki/people/557058:abc".into(),
-                id_attr: "account-id".into(),
+                id_attr: crate::UserIdAttr::AccountId,
                 id_value: "557058:abc".into(),
             },
         );
