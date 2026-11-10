@@ -136,6 +136,12 @@ mod tests {
 
         holder.kill().unwrap();
         holder.wait().unwrap();
-        assert!(WorkspaceLock::acquire(dir.path()).is_ok(), "released when the holder died");
+        // flock(1) hands its child the descriptor until the child closes it
+        // to exec; killed before then, the lock lives a moment longer.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while WorkspaceLock::acquire(dir.path()).is_err() {
+            assert!(std::time::Instant::now() < deadline, "released when the holder died");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }
