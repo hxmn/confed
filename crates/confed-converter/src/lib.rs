@@ -14,7 +14,7 @@
 /// converted Markdown out of date. It feeds the render fingerprint confed keeps
 /// per page, so an improvement reaches a workspace on the next pull without
 /// waiting for each page to change on the server.
-pub const CONVERTER_VERSION: u32 = 8;
+pub const CONVERTER_VERSION: u32 = 9;
 
 // What confed-core needs and nothing else is public: each public item is a
 // semver commitment once the crate is on crates.io. The modules below the

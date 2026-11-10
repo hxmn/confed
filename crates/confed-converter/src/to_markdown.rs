@@ -55,7 +55,10 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
         };
         let text = text.trim_matches('\n').to_string();
         if text.trim().is_empty() {
-            r.last_bullet = None;
+            // Dropped into the gap, so the blocks either side of it meet in
+            // the Markdown: a list after it must still differ from the list
+            // before it, or the two fuse.
+            r.last_bullet = bullet_before;
             continue;
         }
         // Inline comment marks are placed by a second render that drops a
@@ -159,8 +162,11 @@ impl Renderer<'_> {
                 } else {
                     '-'
                 };
-                let delim = if ordered && self.last_bullet == Some('1') { ')' } else { '.' };
-                self.last_bullet = Some(bullet);
+                // Ordered lists alternate their delimiter instead: `1.` after
+                // `1)`, `1)` after `1.`. Remembered as the delimiter itself, so a
+                // third list does not repeat the second's and fuse with it.
+                let delim = if ordered && self.last_bullet == Some('.') { ')' } else { '.' };
+                self.last_bullet = Some(if ordered { delim } else { bullet });
                 self.render_list(el, bullet, delim)
             }
             BlockKind::TaskList => {
@@ -1007,6 +1013,17 @@ mod tests {
     #[test]
     fn entities_are_expanded() {
         assert_eq!(md("<p>a&nbsp;&mdash;&nbsp;b</p>"), "a \u{2014} b\n");
+    }
+
+    /// Lists side by side stay apart however many there are, and with an
+    /// empty spacer paragraph between them that renders to nothing.
+    #[test]
+    fn adjacent_ordered_lists_never_share_a_delimiter() {
+        assert_eq!(
+            md("<ol><li>a</li></ol><ol><li>b</li></ol><ol><li>c</li></ol>"),
+            "1. a\n\n1) b\n\n1. c\n"
+        );
+        assert_eq!(md("<ol><li>a</li></ol><p></p><ol><li>b</li></ol>"), "1. a\n\n1) b\n");
     }
 
     #[test]
