@@ -14,7 +14,7 @@ pub mod pageref;
 pub mod progress;
 pub mod prompt;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Command, GlobalArgs};
 use confed_core::error::{ConfedError, Result};
 use confed_core::workspace::Workspace;
@@ -43,7 +43,10 @@ pub type PagePicker = fn(&Workspace, Option<&str>) -> Result<Option<String>>;
 
 /// Run confed for this process's arguments and return its exit code.
 pub fn main(views: Views) -> std::process::ExitCode {
-    let mut cli = Cli::parse();
+    let mut cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => return usage_error(error),
+    };
     init_tracing(&cli.global);
     if cli.global.select.is_some() {
         cli.global.json = true;
@@ -71,6 +74,43 @@ pub fn main(views: Views) -> std::process::ExitCode {
         }
     };
     std::process::ExitCode::from(exit.as_i32() as u8)
+}
+
+/// A command line clap could not read. Asked for JSON — `--json`,
+/// `--select`, or `CONFED_JSON` — it is answered with the error envelope like
+/// every other failure, so a script reading stdout gets JSON whatever it
+/// typed; otherwise clap reports it, as it does help and the version.
+fn usage_error(error: clap::Error) -> std::process::ExitCode {
+    use clap::error::ErrorKind;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let json_flag =
+        args.iter().any(|a| a == "--json" || a == "--select" || a.starts_with("--select="));
+    let json_env = std::env::var("CONFED_JSON")
+        .is_ok_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+    let informational = matches!(error.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion);
+    if informational || !(json_flag || json_env) {
+        error.exit();
+    }
+    let rendered = error.to_string();
+    let message = rendered
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("could not read the command line")
+        .trim_start_matches("error: ")
+        .to_string();
+    // The command it was meant to be, as far as there is one.
+    let known = Cli::command();
+    let command = args
+        .iter()
+        .find(|a| known.find_subcommand(a.as_str()).is_some())
+        .cloned()
+        .unwrap_or_else(|| "confed".to_string());
+    let error = ConfedError::usage_with_hint(
+        message,
+        "run `confed --help` for the commands and their flags",
+    );
+    output::emit_error(&command, &error, true, 0);
+    std::process::ExitCode::from(error.exit_code().as_i32() as u8)
 }
 
 fn run(cli: Cli, views: Views) -> Result<Output> {

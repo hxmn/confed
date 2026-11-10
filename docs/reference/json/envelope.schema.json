@@ -35,8 +35,9 @@
         },
         "command": {
           "type": "string",
-          "description": "The subcommand that ran, in its canonical spelling.",
+          "description": "The subcommand that ran, in its canonical spelling; `confed` for a command line that names none confed knows, answered with a USAGE error.",
           "enum": [
+            "confed",
             "init",
             "clone",
             "fetch",

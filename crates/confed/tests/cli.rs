@@ -2634,3 +2634,26 @@ async fn paths_outside_the_workspace_and_ids_that_climb_are_refused() {
     assert!(stderr(&output).contains("is not a comment id"), "{}", stderr(&output));
     assert!(mutations(&server).await.is_empty());
 }
+
+/// A command line confed cannot read is still answered in JSON when JSON
+/// was asked for: the error envelope, exit 2. Without JSON, clap reports it.
+#[tokio::test]
+async fn usage_errors_come_back_in_the_envelope_under_json() {
+    let dir = tempfile::tempdir().unwrap();
+    for (args, command) in
+        [(vec!["--json", "nosuch"], "confed"), (vec!["pull", "--json", "--no-such-flag"], "pull")]
+    {
+        let output = run(confed(dir.path(), &args));
+        assert_eq!(exit_code(&output), 2, "{args:?}: {}", stderr(&output));
+        let value = envelope(&output, command);
+        assert_eq!(value["errors"][0]["code"], json!("USAGE"), "{value}");
+    }
+    let mut cmd = confed(dir.path(), &["nosuch"]);
+    cmd.env("CONFED_JSON", "1");
+    let output = run(cmd);
+    envelope(&output, "confed");
+
+    let output = run(confed(dir.path(), &["nosuch"]));
+    assert_eq!(exit_code(&output), 2);
+    assert!(stdout(&output).is_empty() && stderr(&output).contains("nosuch"));
+}
