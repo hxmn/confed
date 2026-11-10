@@ -197,6 +197,24 @@ impl<'a> Generator<'a> {
             self.inline_run(children[0], out)?;
             return Ok(());
         }
+        // A lone line CommonMark took for an HTML block (`- </u>`) that is not
+        // markup after all goes up as the item's text, as a paragraph would —
+        // not wrapped in a `<p>` the next round trip would take away.
+        if let [only] = children.as_slice() {
+            if let NodeValue::HtmlBlock(h) = &only.data.borrow().value {
+                let literal = h.literal.trim_end();
+                if dom::check_well_formed(literal).is_err() {
+                    let text = self.as_markdown(literal)?;
+                    // One paragraph is the item's text, unwrapped as any
+                    // single paragraph in an item is.
+                    match text.strip_prefix("<p>").and_then(|t| t.strip_suffix("</p>")) {
+                        Some(inner) if !inner.contains("<p>") => out.push_str(inner),
+                        _ => out.push_str(&text),
+                    }
+                    return Ok(());
+                }
+            }
+        }
         for (i, child) in children.iter().enumerate() {
             let is_para = matches!(child.data.borrow().value, NodeValue::Paragraph);
             if is_para && i == 0 {
@@ -305,17 +323,22 @@ impl<'a> Generator<'a> {
             out.push_str("</ac:rich-text-body></ac:structured-macro>");
             return Ok(());
         }
-        // Hand-written HTML: pass it through when it is well-formed, otherwise
-        // show it as text rather than uploading something that breaks the page.
+        // Hand-written HTML: pass it through when it is well-formed. Otherwise
+        // it was never markup — a line that only looked like a tag — so it is
+        // read again as the Markdown it is, with its first `<` escaped so it
+        // cannot start an HTML block twice. Its stray tags become text, and
+        // the Markdown on the lines CommonMark swept in with it is not lost.
         match dom::check_well_formed(literal) {
             Ok(()) => out.push_str(literal),
-            Err(_) => {
-                out.push_str("<p>");
-                out.push_str(&dom::escape_text(literal));
-                out.push_str("</p>");
-            }
+            Err(_) => out.push_str(&self.as_markdown(literal)?),
         }
         Ok(())
+    }
+
+    /// [`Self::html_block`]'s fallback: `literal` read as Markdown.
+    fn as_markdown(&self, literal: &str) -> ConvertResult<String> {
+        let escaped = format!("\\{}\n", literal.trim_start());
+        generate_at(&escaped, self.opts, self.line_offset)
     }
 
     // -- inline ------------------------------------------------------------
@@ -917,6 +940,18 @@ mod tests {
         let added = patch(storage, &c.block_map, &c.markdown, "Фраза 1.\n", &opts).unwrap();
         assert!(added.starts_with(storage), "{added}");
         assert!(added.contains("Фраза 1."), "{added}");
+    }
+
+    /// A line CommonMark takes for an HTML block but that is no markup — a
+    /// stray closing tag alone on a line — is read as the Markdown it is:
+    /// the tag as text, and what follows it still converted.
+    #[test]
+    fn a_line_that_only_looked_like_html_is_read_as_markdown() {
+        assert_eq!(
+            gen("</u>\n[link](https://example.com)\n"),
+            "<p>&lt;/u&gt; <a href=\"https://example.com\">link</a></p>"
+        );
+        assert_eq!(gen("- </u>\n"), "<ul><li>&lt;/u&gt;</li></ul>");
     }
 
     #[test]
