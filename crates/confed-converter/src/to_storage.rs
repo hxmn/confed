@@ -626,9 +626,11 @@ pub fn patch(
 
     // Everything before the first block (a stray comment, indentation) is not
     // owned by any block, so it rides along at the front.
+    // With no blocks at all — a page of nothing but spacer paragraphs — the
+    // whole body is unowned, and kept.
     let prefix = match base_map.blocks.first() {
         Some(b) => &base_storage[..b.storage_span.0],
-        None => "",
+        None => base_storage,
     };
     let mut out = String::with_capacity(base_storage.len());
     out.push_str(prefix);
@@ -901,6 +903,20 @@ mod tests {
     fn gen(md: &str) -> String {
         generate(md, &ConvertOptions { attachment_dir: ".page".into(), ..Default::default() })
             .unwrap()
+    }
+
+    /// A page of nothing but spacer paragraphs has no blocks: all of it is
+    /// gap, kept by a push whether or not something is added after it.
+    #[test]
+    fn a_body_with_no_blocks_is_kept_by_a_patch() {
+        let opts = ConvertOptions::default();
+        let storage = "<p></p><p> </p>";
+        let c = crate::storage_to_markdown(storage, &opts).unwrap();
+        assert!(c.block_map.is_empty());
+        assert_eq!(patch(storage, &c.block_map, &c.markdown, &c.markdown, &opts).unwrap(), storage);
+        let added = patch(storage, &c.block_map, &c.markdown, "Фраза 1.\n", &opts).unwrap();
+        assert!(added.starts_with(storage), "{added}");
+        assert!(added.contains("Фраза 1."), "{added}");
     }
 
     #[test]
