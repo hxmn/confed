@@ -3,7 +3,7 @@
 //! and the TUI's resolver both come here, so they agree on what "resolved"
 //! means.
 
-use crate::error::Result;
+use crate::error::{ConfedError, Result};
 use crate::merge;
 use crate::state::{PageRecord, SyncState};
 use crate::sync::write_atomic;
@@ -127,28 +127,52 @@ pub fn finish_resolution(
     if !markers.is_empty() {
         return Ok(markers);
     }
+    // Still a valid page, before anything is written.
+    crate::frontmatter::parse(resolved, &record.local_path)?;
 
     let _lock = ws.lock()?;
+    // What the caller read came before the lock: another confed may have
+    // pulled or pushed this page since. Writing the resolution over that, or
+    // the old record back, would undo it — so both are read again here, and
+    // a page that moved on is refused rather than resolved.
+    let changed = || {
+        ConfedError::state_with_hint(
+            format!("{} changed since it was read", record.local_path),
+            "another confed pulled or pushed it meanwhile; run `confed resolve` again",
+        )
+    };
+    let current = ws
+        .state()
+        .get_page(&record.page_id)?
+        .ok_or_else(|| ConfedError::NotFound(format!("no page {}", record.page_id)))?;
+    if current.version != record.version
+        || current.local_path != record.local_path
+        || current.storage_hash != record.storage_hash
+    {
+        return Err(changed());
+    }
+    let path = ws.absolute(&record.local_path);
+    let on_disk = std::fs::read_to_string(&path)
+        .map_err(|e| ConfedError::io(format!("reading {}", record.local_path), e))?;
+    if on_disk != original {
+        return Err(changed());
+    }
     if resolved != original {
-        write_atomic(&ws.absolute(&record.local_path), resolved)?;
+        write_atomic(&path, resolved)?;
     }
 
-    // Parse to be sure the resolution is still a valid page, but leave
-    // `markdown_hash` pointing at what the last sync wrote: the resolved text is
-    // a local edit on top of it, so `status` says "modified" and `push` has
-    // something to send. Adopting the resolved hash here would mark the page
-    // clean and silently strand the merge on disk.
-    crate::frontmatter::parse(resolved, &record.local_path)?;
-    let mut updated = record.clone();
-    updated.sync_state = SyncState::Clean;
-
+    // Only the conflicted state changes. `markdown_hash` stays pointing at
+    // what the last sync wrote: the resolved text is a local edit on top of
+    // it, so `status` says "modified" and `push` has something to send.
+    // Adopting the resolved hash here would mark the page clean and silently
+    // strand the merge on disk.
     ws.atomically(|ws| {
-        ws.state().upsert_page(&updated)?;
+        ws.state().set_sync_state(&record.page_id, SyncState::Clean)?;
         ws.state().log(
             "resolve",
             Some(&record.page_id),
             None,
-            Some(updated.version),
+            Some(current.version),
             "ok",
             None,
         )?;
@@ -244,6 +268,33 @@ mod tests {
         };
         ws.state().upsert_page(&record).expect("upsert");
         (dir, ws, record, page)
+    }
+
+    /// A pull or push by another confed between reading the page and
+    /// resolving it is not undone: the resolution is refused, and neither the
+    /// file nor the newer record is touched.
+    #[test]
+    fn a_page_that_moved_on_since_it_was_read_is_not_resolved() {
+        let (dir, mut ws, record, page) = conflicted_workspace();
+        let resolved = take_side(&page, true);
+
+        // Another process advances the base meanwhile.
+        let mut newer = record.clone();
+        newer.version = 3;
+        newer.storage_hash = "sh3".into();
+        ws.state().upsert_page(&newer).unwrap();
+        let err = finish_resolution(&mut ws, &record, &page, &resolved).unwrap_err();
+        assert!(err.to_string().contains("changed since it was read"), "{err}");
+        assert_eq!(ws.state().get_page("1").unwrap().unwrap().version, 3, "the newer base stays");
+        assert_eq!(std::fs::read_to_string(dir.path().join("Runbook.md")).unwrap(), page);
+
+        // Or rewrites the file.
+        ws.state().upsert_page(&record).unwrap();
+        std::fs::write(dir.path().join("Runbook.md"), "rewritten").unwrap();
+        let err = finish_resolution(&mut ws, &record, &page, &resolved).unwrap_err();
+        assert!(err.to_string().contains("changed since it was read"), "{err}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("Runbook.md")).unwrap(), "rewritten");
+        assert_eq!(ws.state().get_page("1").unwrap().unwrap().sync_state, SyncState::Conflicted);
     }
 
     /// Resolving clears the conflict, but the merge result is a local edit that
