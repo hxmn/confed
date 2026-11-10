@@ -191,8 +191,9 @@ impl DcClient {
 
     pub(crate) async fn admin_create_group(&self, name: &str) -> ApiResult<Group> {
         self.require_version(ADMIN_USERS_SINCE, "create a group").await?;
-        let created: Option<GroupDto> =
-            self.http.post_json("rest/api/admin/group", &json!({ "name": name })).await?;
+        // The server reads the body as a typed entity and refuses it without `type`.
+        let body = json!({ "type": "group", "name": name });
+        let created: Option<GroupDto> = self.http.post_json("rest/api/admin/group", &body).await?;
         Ok(Group { name: created.map(|g| g.name).unwrap_or_else(|| name.to_string()), id: None })
     }
 
@@ -214,6 +215,18 @@ impl DcClient {
             limit,
         )
         .await?;
+        // The member listing answers a group that does not exist with no
+        // members; only the group itself tells the two apart.
+        if raw.is_empty() {
+            let path = format!("rest/api/group/{}", encode_path(group));
+            match self.http.get_json::<GroupDto>(&path, &[]).await {
+                Ok(_) => {}
+                Err(ApiError::NotFound(_)) => {
+                    return Err(ApiError::NotFound(format!("group {group}")))
+                }
+                Err(e) => return Err(e),
+            }
+        }
         Ok(raw.into_iter().map(v1::User::into_domain).collect())
     }
 

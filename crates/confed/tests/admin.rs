@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const ENV_VARS: &[&str] = &[
@@ -81,6 +81,7 @@ async fn a_group_is_created_and_reported() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/rest/api/admin/group"))
+        .and(body_json(json!({ "type": "group", "name": "writers" })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "name": "writers" })))
         .expect(1)
         .mount(&server)
@@ -133,6 +134,27 @@ async fn an_unknown_operation_is_refused_before_anything_is_sent() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("space:read"), "the hint lists the valid operations: {stderr}");
     assert!(mutations(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn members_of_a_group_that_does_not_exist_exit_6() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/group/nobody/member"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [], "start": 0, "limit": 100, "size": 0, "_links": {}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/group/nobody"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "message": "no group" })))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let out = run(admin(dir.path(), &server, &["group", "members", "nobody"]));
+    assert_eq!(exit_code(&out), 6, "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[tokio::test]

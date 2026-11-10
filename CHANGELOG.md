@@ -20,6 +20,18 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-10
+
+### Fixed
+
+- **`confed admin group create` failed on Data Center** with 400 "missing type id
+  property 'type'": the server reads the body as a typed entity, and confed sent only
+  the name. It now sends `"type": "group"` beside it.
+- **`confed admin group members` on Data Center listed a group that does not exist as
+  an empty one**, with exit 0, because the server answers both the same way. An empty
+  listing is now checked against the group itself, and a missing group is exit 6, as
+  `admin group add` already reports it.
+
 ## [0.17.0] - 2026-11-10
 
 Starting a space used to mean leaving confed: the browser, or `POST /rest/api/space`
@@ -1139,7 +1151,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/hxmn/confed/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/hxmn/confed/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/hxmn/confed/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/hxmn/confed/compare/v0.14.1...v0.15.0

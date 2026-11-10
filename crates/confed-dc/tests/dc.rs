@@ -1798,6 +1798,53 @@ async fn an_older_server_is_refused_before_anything_is_sent() {
 }
 
 #[tokio::test]
+async fn a_group_is_created_with_its_entity_type() {
+    let server = MockServer::start().await;
+    // Without `"type": "group"` the server answers 400: missing type id property.
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/api/admin/group"))
+        .and(body_json(json!({ "type": "group", "name": "writers" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "name": "writers" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let group = client(&server).create_group("writers").await.unwrap();
+    assert_eq!(group.name, "writers");
+}
+
+#[tokio::test]
+async fn members_of_a_missing_group_are_not_found_and_of_an_empty_one_are_none() {
+    let server = MockServer::start().await;
+    let no_members = json!({ "results": [], "start": 0, "limit": 100, "size": 0, "_links": {} });
+    for name in ["nobody", "empty"] {
+        Mock::given(method("GET"))
+            .and(path(format!("/confluence/rest/api/group/{name}/member")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(no_members.clone()))
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/group/nobody"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "message": "no group" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/group/empty"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "name": "empty", "type": "group" })),
+        )
+        .mount(&server)
+        .await;
+
+    let c = client(&server);
+    let err = c.group_members("nobody", None).await.unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "{err}");
+    assert!(err.to_string().contains("nobody"), "{err}");
+    assert!(c.group_members("empty", None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn group_membership_goes_through_the_user_group_endpoint() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
