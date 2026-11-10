@@ -136,6 +136,23 @@ pub(super) fn status_of<'a>(statuses: &'a [PageStatus], page_id: &str) -> Option
     statuses.iter().find(|s| s.page_id.as_deref() == Some(page_id))
 }
 
+/// What a pull reads once and every pass of it consults: the server's
+/// pages, the base, each page's status and placement, and how to render.
+pub(super) struct PullView<'a> {
+    pub(super) remote: &'a [RemotePage],
+    pub(super) base: &'a [PageRecord],
+    pub(super) statuses: &'a [PageStatus],
+    pub(super) placements: &'a HashMap<String, Placement>,
+    pub(super) render: &'a Rendering,
+    pub(super) files_by_id: HashMap<&'a str, &'a LocalFile>,
+    pub(super) base_by_id: HashMap<&'a str, &'a PageRecord>,
+    pub(super) claimed: Vec<&'a str>,
+    pub(super) claimed_sidecars: Vec<&'a str>,
+    /// Whether attachments and comments are read for every page in scope,
+    /// not only for those the checks point at.
+    pub(super) insist: bool,
+}
+
 /// What `pull` should do with one page.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum PullAction {
@@ -266,6 +283,81 @@ pub(super) fn move_sidecar(old: &Path, new: &Path) {
 impl SyncEngine {
     /// Materialize the fetched state into working files.
     pub async fn pull(&self, ws: &mut Workspace, opts: &PullOptions) -> Result<PullOutcome> {
+        let (warnings, read) = self.fetch_before_pull(ws, opts).await?;
+        let mut outcome = PullOutcome { dry_run: opts.dry_run, warnings, ..Default::default() };
+
+        let (files, _) = worktree::read_working_files(ws)?;
+        self.reconcile_paths(ws, &files)?;
+        let base = ws.state().all_pages()?;
+        let remote = ws.state().all_remote()?;
+        let statuses = worktree::compute_status(&files, &base, &remote);
+        let placements = self.plan_placements(&remote, &base);
+        let render = Rendering { links: link_map(&placements), ctx: ConvertContext::load(ws)? };
+        let view = PullView {
+            remote: &remote,
+            base: &base,
+            statuses: &statuses,
+            placements: &placements,
+            render: &render,
+            files_by_id: files
+                .iter()
+                .filter_map(|f| f.file.frontmatter.page_id().map(|id| (id, f)))
+                .collect(),
+            base_by_id: base.iter().map(|p| (p.page_id.as_str(), p)).collect(),
+            // What every page in the space lays claim to. A rename leaves a
+            // file and a sidecar behind, and they are removed — but never one
+            // that another page is taking over: when two pages swap titles,
+            // one page's old path is the other's new one.
+            claimed: placements.values().map(|p| p.path.as_str()).collect(),
+            claimed_sidecars: placements.values().map(|p| p.sidecar.as_str()).collect(),
+            // A page named in the scope, and every page under `--force` or
+            // `--reset`, has its attachments and comments read whatever its
+            // version says.
+            insist: !opts.scope.is_empty() || opts.force || opts.reset,
+        };
+
+        // Pass one: decide, and refuse the whole operation if anything would
+        // be clobbered. Nothing is written until the plan is known to be safe.
+        let plan = self.plan_pull(ws, opts, &view, &mut outcome)?;
+        if !outcome.skipped_dirty.is_empty() && !opts.force && !opts.reset {
+            return Err(ConfedError::state_with_hint(
+                format!(
+                    "{} page(s) have local changes that `pull` would overwrite",
+                    outcome.skipped_dirty.len()
+                ),
+                "review with `confed diff`, then re-run with --force to discard local edits \
+                 (or push your changes first)",
+            ));
+        }
+
+        if view.insist {
+            self.reread_extras(ws, opts, &view, &read, &mut outcome).await?;
+        }
+
+        // Pass two: apply.
+        self.progress.stage(if opts.dry_run { "Checking" } else { "Writing" }, Some(plan.len()));
+        let mut handled: Vec<String> = Vec::new();
+        let planned = plan.len();
+        for (done, (remote_page, action)) in plan.into_iter().enumerate() {
+            crate::interrupt::check(|| format!("{done} of {planned} page(s) pulled"))?;
+            handled.push(remote_page.page_id.clone());
+            self.pull_one(ws, opts, &view, remote_page, action, &mut outcome).await?;
+        }
+
+        self.tend_unpulled_sidecars(ws, opts, &view, &handled, &mut outcome).await?;
+        self.warn_missing_comment_attachments(ws, opts, &view, &mut outcome)?;
+
+        self.progress.finish();
+        Ok(outcome)
+    }
+
+    /// Fetch first, unless told not to: what it could not read becomes the
+    /// pull's first warnings, and what it did read is not asked for twice.
+    async fn fetch_before_pull(
+        &self,
+        ws: &mut Workspace,
+        opts: &PullOptions,
+    ) -> Result<(Vec<String>, ExtrasRead)> {
         let mut warnings: Vec<String> = Vec::new();
         // What this run has already read from the server, beside page bodies.
         let mut read = ExtrasRead::default();
@@ -280,24 +372,19 @@ impl SyncEngine {
             }));
             warnings.extend(fetch.check_warnings());
         }
+        Ok((warnings, read))
+    }
 
-        let mut outcome = PullOutcome { dry_run: opts.dry_run, warnings, ..Default::default() };
-        let (files, _) = worktree::read_working_files(ws)?;
-        self.reconcile_paths(ws, &files)?;
-        let base = ws.state().all_pages()?;
-        let remote = ws.state().all_remote()?;
-        let statuses = worktree::compute_status(&files, &base, &remote);
-
-        let placements = self.plan_placements(&remote, &base);
-        let render = Rendering { links: link_map(&placements), ctx: ConvertContext::load(ws)? };
-        let files_by_id: HashMap<&str, &LocalFile> =
-            files.iter().filter_map(|f| f.file.frontmatter.page_id().map(|id| (id, f))).collect();
-        let base_by_id: HashMap<&str, &PageRecord> =
-            base.iter().map(|p| (p.page_id.as_str(), p)).collect();
-
-        // Pass one: decide, and refuse the whole operation if anything would be
-        // clobbered. Nothing is written until the plan is known to be safe.
-        let known_users = &render.ctx.users;
+    /// Pass one: what to do with each page in scope. A page whose local work
+    /// the plan would overwrite is listed in `skipped_dirty`.
+    fn plan_pull(
+        &self,
+        ws: &Workspace,
+        opts: &PullOptions,
+        view: &PullView<'_>,
+        outcome: &mut PullOutcome,
+    ) -> Result<Vec<(RemotePage, PullAction)>> {
+        let known_users = &view.render.ctx.users;
         // Pages the listing has moved on whose body could not be fetched yet.
         // What is stored for them is the previous text, or none: writing it
         // would stamp old content with the new version, and nothing would ever
@@ -310,8 +397,8 @@ impl SyncEngine {
             .map(|(id, _)| id)
             .collect();
         let mut plan: Vec<(RemotePage, PullAction)> = Vec::new();
-        for remote_page in &remote {
-            if !self.in_scope(&opts.scope, &placements, &remote_page.page_id) {
+        for remote_page in view.remote {
+            if !self.in_scope(&opts.scope, view.placements, &remote_page.page_id) {
                 continue;
             }
             if owed.contains(&remote_page.page_id) && !remote_page.deleted {
@@ -326,8 +413,8 @@ impl SyncEngine {
                 continue;
             }
             let status =
-                statuses.iter().find(|s| s.page_id.as_deref() == Some(&remote_page.page_id));
-            let base_record = base_by_id.get(remote_page.page_id.as_str()).copied();
+                view.statuses.iter().find(|s| s.page_id.as_deref() == Some(&remote_page.page_id));
+            let base_record = view.base_by_id.get(remote_page.page_id.as_str()).copied();
             // Was this file rendered from the same inputs confed would use now?
             let stale_rendering = match (base_record, &remote_page.storage_body) {
                 (Some(base), Some(body)) => base.render_key != render_key(body, known_users),
@@ -359,28 +446,27 @@ impl SyncEngine {
             }
         }
 
-        if !outcome.skipped_dirty.is_empty() && !opts.force && !opts.reset {
-            return Err(ConfedError::state_with_hint(
-                format!(
-                    "{} page(s) have local changes that `pull` would overwrite",
-                    outcome.skipped_dirty.len()
-                ),
-                "review with `confed diff`, then re-run with --force to discard local edits \
-                 (or push your changes first)",
-            ));
-        }
+        Ok(plan)
+    }
 
-        // A page named in the scope, and every page under `--force` or
-        // `--reset`, has its attachments and comments read whatever its version
-        // says. The check fetch makes finds what was added or edited, through a
-        // search; this is the request that cannot miss, and the one that sees a
-        // deletion.
-        let insist = !opts.scope.is_empty() || opts.force || opts.reset;
-        if insist && !opts.no_fetch {
-            let work: Vec<FetchWork> = remote
+    /// The check fetch makes finds what was added or edited, through a
+    /// search; this is the request that cannot miss, and the one that sees a
+    /// deletion: the attachments and comments of every page in scope, read
+    /// again unless this run already has.
+    async fn reread_extras(
+        &self,
+        ws: &mut Workspace,
+        opts: &PullOptions,
+        view: &PullView<'_>,
+        read: &ExtrasRead,
+        outcome: &mut PullOutcome,
+    ) -> Result<()> {
+        if !opts.no_fetch {
+            let work: Vec<FetchWork> = view
+                .remote
                 .iter()
                 .filter(|r| !r.deleted && r.storage_body.is_some())
-                .filter(|r| self.in_scope(&opts.scope, &placements, &r.page_id))
+                .filter(|r| self.in_scope(&opts.scope, view.placements, &r.page_id))
                 .map(|r| FetchWork {
                     page_id: r.page_id.clone(),
                     body: false,
@@ -390,196 +476,208 @@ impl SyncEngine {
                 .filter(|w| w.attachments || w.comments)
                 .collect();
             let titles: HashMap<String, String> =
-                remote.iter().map(|r| (r.page_id.clone(), r.title.clone())).collect();
+                view.remote.iter().map(|r| (r.page_id.clone(), r.title.clone())).collect();
             self.progress.stage("Reading attachments and comments", Some(work.len()));
             let tally = self.run_fetches(ws, work, &titles).await?;
             outcome.warnings.extend(tally.failed.iter().map(|f| {
-                let path = placements.get(&f.page_id).map_or(f.page_id.as_str(), |p| &p.path);
+                let path = view.placements.get(&f.page_id).map_or(f.page_id.as_str(), |p| &p.path);
                 format!("{path}: {}", f.error)
             }));
         }
+        Ok(())
+    }
 
-        // Pass two: apply.
-        self.progress.stage(if opts.dry_run { "Checking" } else { "Writing" }, Some(plan.len()));
-        let mut handled: Vec<String> = Vec::new();
-        // What every page in the space lays claim to. A rename leaves a file
-        // and a sidecar behind, and they are removed — but never one that
-        // another page is taking over: when two pages swap titles, one page's
-        // old path is the other's new one.
-        let claimed: Vec<&str> = placements.values().map(|p| p.path.as_str()).collect();
-        let claimed_sidecars: Vec<&str> = placements.values().map(|p| p.sidecar.as_str()).collect();
-        let planned = plan.len();
-        for (done, (remote_page, action)) in plan.into_iter().enumerate() {
-            crate::interrupt::check(|| format!("{done} of {planned} page(s) pulled"))?;
-            handled.push(remote_page.page_id.clone());
-            let local = files_by_id.get(remote_page.page_id.as_str()).copied();
-            let base_record = base_by_id.get(remote_page.page_id.as_str()).copied();
+    /// Pass two, for one page: delete it, or write or merge it at its
+    /// placement — following a server-side rename, and bringing its sidecar
+    /// along — and then its attachments and comments.
+    async fn pull_one(
+        &self,
+        ws: &mut Workspace,
+        opts: &PullOptions,
+        view: &PullView<'_>,
+        remote_page: RemotePage,
+        action: PullAction,
+        outcome: &mut PullOutcome,
+    ) -> Result<()> {
+        let local = view.files_by_id.get(remote_page.page_id.as_str()).copied();
+        let base_record = view.base_by_id.get(remote_page.page_id.as_str()).copied();
 
-            // Deletions are handled first: a page that is gone on the server has
-            // no placement, because placements only cover pages that still exist.
-            if action == PullAction::Delete {
-                let path = base_record.map(|b| b.local_path.clone()).unwrap_or_default();
-                // Say what --force threw away with it.
-                let dirty =
-                    status_of(&statuses, &remote_page.page_id).is_some_and(|s| s.local_dirty);
-                if (opts.force || opts.reset) && (dirty || pending_comment_work(ws, &path) > 0) {
-                    outcome.discarded.push(PageChange {
-                        page_id: remote_page.page_id.clone(),
-                        path: path.clone(),
-                        title: remote_page.title.clone(),
-                        from_version: base_record.map(|b| b.version),
-                        to_version: None,
-                        ops: Vec::new(),
-                    });
-                }
-                if !opts.dry_run {
-                    self.delete_local(ws, base_record)?;
-                }
-                self.progress.item(&path);
-                outcome.deleted.push(PageChange {
+        // Deletions are handled first: a page that is gone on the server has
+        // no placement, because placements only cover pages that still exist.
+        if action == PullAction::Delete {
+            let path = base_record.map(|b| b.local_path.clone()).unwrap_or_default();
+            // Say what --force threw away with it.
+            let dirty =
+                status_of(view.statuses, &remote_page.page_id).is_some_and(|s| s.local_dirty);
+            if (opts.force || opts.reset) && (dirty || pending_comment_work(ws, &path) > 0) {
+                outcome.discarded.push(PageChange {
                     page_id: remote_page.page_id.clone(),
-                    path,
+                    path: path.clone(),
                     title: remote_page.title.clone(),
                     from_version: base_record.map(|b| b.version),
                     to_version: None,
                     ops: Vec::new(),
                 });
-                continue;
             }
-
-            let Some(placement) = placements.get(&remote_page.page_id) else { continue };
-            let writes = match &action {
-                PullAction::Nothing | PullAction::Delete => false,
-                PullAction::Blocked(_) => opts.force || opts.reset,
-                _ => true,
-            };
-            if !writes {
-                continue;
+            if !opts.dry_run {
+                self.delete_local(ws, base_record)?;
             }
+            self.progress.item(&path);
+            outcome.deleted.push(PageChange {
+                page_id: remote_page.page_id.clone(),
+                path,
+                title: remote_page.title.clone(),
+                from_version: base_record.map(|b| b.version),
+                to_version: None,
+                ops: Vec::new(),
+            });
+            return Ok(());
+        }
 
-            // A page renamed on the server moves its file, and its sidecar goes
-            // ahead of it: the attachments and unsent comment work in it are
-            // then where everything below looks for them, and a pull cut short
-            // right here is finished by the next one. Unless the sidecar cannot
-            // simply follow — pages that swap titles, or take over one
-            // another's, each want a directory another still has. Whatever such
-            // a page finds at its new path is not its own, so nothing there is
-            // taken for its attachments: they are all fetched again.
-            let moved_from = base_record
-                .map(|b| b.local_path.as_str())
-                .filter(|old| *old != placement.path && !opts.dry_run);
-            let mut displaced = false;
-            if let Some(old) = moved_from {
-                let page = remote_page.page_id.as_str();
-                let old_sidecar = paths::sidecar_for(old);
-                let new_sidecar = paths::sidecar_for(&placement.path);
-                displaced = placements.iter().any(|(id, p)| id != page && p.sidecar == old_sidecar)
-                    || base.iter().any(|b| {
+        let Some(placement) = view.placements.get(&remote_page.page_id) else { return Ok(()) };
+        let writes = match &action {
+            PullAction::Nothing | PullAction::Delete => false,
+            PullAction::Blocked(_) => opts.force || opts.reset,
+            _ => true,
+        };
+        if !writes {
+            return Ok(());
+        }
+
+        // A page renamed on the server moves its file, and its sidecar goes
+        // ahead of it: the attachments and unsent comment work in it are
+        // then where everything below looks for them, and a pull cut short
+        // right here is finished by the next one. Unless the sidecar cannot
+        // simply follow — pages that swap titles, or take over one
+        // another's, each want a directory another still has. Whatever such
+        // a page finds at its new path is not its own, so nothing there is
+        // taken for its attachments: they are all fetched again.
+        let moved_from = base_record
+            .map(|b| b.local_path.as_str())
+            .filter(|old| *old != placement.path && !opts.dry_run);
+        let mut displaced = false;
+        if let Some(old) = moved_from {
+            let page = remote_page.page_id.as_str();
+            let old_sidecar = paths::sidecar_for(old);
+            let new_sidecar = paths::sidecar_for(&placement.path);
+            displaced =
+                view.placements.iter().any(|(id, p)| id != page && p.sidecar == old_sidecar)
+                    || view.base.iter().any(|b| {
                         b.page_id != page && paths::sidecar_for(&b.local_path) == new_sidecar
                     });
-                if displaced {
-                    for mut record in ws.state().page_attachments(page)? {
-                        record.downloaded = false;
-                        ws.state().upsert_attachment(&record)?;
-                    }
+            if displaced {
+                for mut record in ws.state().page_attachments(page)? {
+                    record.downloaded = false;
+                    ws.state().upsert_attachment(&record)?;
+                }
+            } else {
+                move_sidecar(&ws.absolute(&old_sidecar), &ws.absolute(&new_sidecar));
+            }
+        }
+
+        match action {
+            PullAction::Nothing | PullAction::Delete => return Ok(()),
+            PullAction::Create | PullAction::Overwrite | PullAction::Blocked(_) => {
+                let change =
+                    self.write_page(ws, &remote_page, placement, local, view.render, opts, None)?;
+                if base_record.is_some() {
+                    outcome.updated.push(change);
                 } else {
-                    move_sidecar(&ws.absolute(&old_sidecar), &ws.absolute(&new_sidecar));
+                    outcome.created.push(change);
                 }
             }
-
-            match action {
-                PullAction::Nothing | PullAction::Delete => continue,
-                PullAction::Create | PullAction::Overwrite | PullAction::Blocked(_) => {
-                    let change =
-                        self.write_page(ws, &remote_page, placement, local, &render, opts, None)?;
-                    if base_record.is_some() {
-                        outcome.updated.push(change);
-                    } else {
-                        outcome.created.push(change);
-                    }
-                }
-                PullAction::Merge => {
-                    let (change, conflicted) = self.merge_page(
-                        ws,
-                        &remote_page,
-                        placement,
-                        local,
-                        base_record,
-                        &render,
-                        opts,
-                    )?;
-                    if conflicted {
-                        outcome.conflicted.push(change);
-                    } else {
-                        outcome.merged.push(change);
-                    }
-                }
-            }
-
-            // The page is at its new path, so the file at the old one goes
-            // now: two files naming one page is not a state to leave behind,
-            // should the rest of this pull not happen.
-            if let Some(old) = moved_from {
-                outcome.moved.push(MovedPage {
-                    page_id: remote_page.page_id.clone(),
-                    from: old.to_string(),
-                    to: placement.path.clone(),
-                });
-                let left = ws.absolute(old);
-                if !claimed.contains(&old) && left.exists() {
-                    let _ = std::fs::remove_file(&left);
-                }
-            }
-
-            // Say what was thrown away. A destructive flag is not a licence to
-            // be quiet about it.
-            if (opts.reset || opts.force)
-                && status_of(&statuses, &remote_page.page_id).is_some_and(|s| s.local_dirty)
-            {
-                outcome.discarded.push(PageChange {
-                    page_id: remote_page.page_id.clone(),
-                    path: placement.path.clone(),
-                    title: remote_page.title.clone(),
-                    from_version: base_record.map(|b| b.version),
-                    to_version: Some(remote_page.version),
-                    ops: Vec::new(),
-                });
-            }
-
-            self.progress.item(&placement.path);
-
-            if opts.with_attachments && !opts.dry_run {
-                let synced = self
-                    .sync_attachments(ws, &remote_page.page_id, &placement.path, opts, displaced)
-                    .await?;
-                outcome.attachments_downloaded += synced.downloaded;
-                outcome.attachments_removed += synced.removed;
-                outcome.warnings.extend(synced.warnings);
-            }
-            if opts.with_comments && !opts.dry_run {
-                self.write_comments_sidecar(
+            PullAction::Merge => {
+                let (change, conflicted) = self.merge_page(
                     ws,
-                    &remote_page.page_id,
-                    &remote_page.title,
-                    &placement.path,
-                    !opts.reset,
+                    &remote_page,
+                    placement,
+                    local,
+                    base_record,
+                    view.render,
+                    opts,
                 )?;
-            }
-
-            // A sidecar that could not go ahead of its page is folded into the
-            // new one now, where nobody else is taking it over: what the page
-            // just wrote and downloaded stays, the rest comes along.
-            if let (Some(old), true) = (moved_from, displaced) {
-                let old_sidecar = paths::sidecar_for(old);
-                if !claimed_sidecars.contains(&old_sidecar.as_str()) {
-                    move_sidecar(
-                        &ws.absolute(&old_sidecar),
-                        &ws.absolute(&paths::sidecar_for(&placement.path)),
-                    );
+                if conflicted {
+                    outcome.conflicted.push(change);
+                } else {
+                    outcome.merged.push(change);
                 }
             }
         }
 
+        // The page is at its new path, so the file at the old one goes
+        // now: two files naming one page is not a state to leave behind,
+        // should the rest of this pull not happen.
+        if let Some(old) = moved_from {
+            outcome.moved.push(MovedPage {
+                page_id: remote_page.page_id.clone(),
+                from: old.to_string(),
+                to: placement.path.clone(),
+            });
+            let left = ws.absolute(old);
+            if !view.claimed.contains(&old) && left.exists() {
+                let _ = std::fs::remove_file(&left);
+            }
+        }
+
+        // Say what was thrown away. A destructive flag is not a licence to
+        // be quiet about it.
+        if (opts.reset || opts.force)
+            && status_of(view.statuses, &remote_page.page_id).is_some_and(|s| s.local_dirty)
+        {
+            outcome.discarded.push(PageChange {
+                page_id: remote_page.page_id.clone(),
+                path: placement.path.clone(),
+                title: remote_page.title.clone(),
+                from_version: base_record.map(|b| b.version),
+                to_version: Some(remote_page.version),
+                ops: Vec::new(),
+            });
+        }
+
+        self.progress.item(&placement.path);
+
+        if opts.with_attachments && !opts.dry_run {
+            let synced = self
+                .sync_attachments(ws, &remote_page.page_id, &placement.path, opts, displaced)
+                .await?;
+            outcome.attachments_downloaded += synced.downloaded;
+            outcome.attachments_removed += synced.removed;
+            outcome.warnings.extend(synced.warnings);
+        }
+        if opts.with_comments && !opts.dry_run {
+            self.write_comments_sidecar(
+                ws,
+                &remote_page.page_id,
+                &remote_page.title,
+                &placement.path,
+                !opts.reset,
+            )?;
+        }
+
+        // A sidecar that could not go ahead of its page is folded into the
+        // new one now, where nobody else is taking it over: what the page
+        // just wrote and downloaded stays, the rest comes along.
+        if let (Some(old), true) = (moved_from, displaced) {
+            let old_sidecar = paths::sidecar_for(old);
+            if !view.claimed_sidecars.contains(&old_sidecar.as_str()) {
+                move_sidecar(
+                    &ws.absolute(&old_sidecar),
+                    &ws.absolute(&paths::sidecar_for(&placement.path)),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Pages pull had nothing to write still need their sidecar looked after.
+    async fn tend_unpulled_sidecars(
+        &self,
+        ws: &mut Workspace,
+        opts: &PullOptions,
+        view: &PullView<'_>,
+        handled: &[String],
+        outcome: &mut PullOutcome,
+    ) -> Result<()> {
         // Pages pull had nothing to write still need their sidecar looked after:
         // the markup copy may be missing (a workspace pulled by an older confed,
         // or a deleted file), a page edited only locally is exactly when an
@@ -591,7 +689,7 @@ impl SyncEngine {
                 "every page was pulled; some sidecars were not checked".into()
             })?;
             if handled.contains(&record.page_id)
-                || !self.in_scope(&opts.scope, &placements, &record.page_id)
+                || !self.in_scope(&opts.scope, view.placements, &record.page_id)
             {
                 continue;
             }
@@ -641,7 +739,17 @@ impl SyncEngine {
                 });
             }
         }
+        Ok(())
+    }
 
+    /// Warn about comments that show or link a file their page lacks.
+    fn warn_missing_comment_attachments(
+        &self,
+        ws: &Workspace,
+        opts: &PullOptions,
+        view: &PullView<'_>,
+        outcome: &mut PullOutcome,
+    ) -> Result<()> {
         // A comment that shows or links a file the page does not have cannot
         // be read in full here. Said for the pages this pull touched or was
         // pointed at, not for the whole space on every run.
@@ -651,18 +759,17 @@ impl SyncEngine {
             .chain(&outcome.conflicted)
             .map(|change| change.page_id.as_str())
             .collect();
-        if opts.with_attachments && opts.with_comments && (insist || !touched.is_empty()) {
+        if opts.with_attachments && opts.with_comments && (view.insist || !touched.is_empty()) {
             for record in ws.state().all_pages()? {
                 let wanted = touched.contains(&record.page_id.as_str())
-                    || (insist && self.in_scope(&opts.scope, &placements, &record.page_id));
+                    || (view.insist
+                        && self.in_scope(&opts.scope, view.placements, &record.page_id));
                 if wanted {
                     outcome.warnings.extend(missing_comment_attachments(ws, &record)?);
                 }
             }
         }
-
-        self.progress.finish();
-        Ok(outcome)
+        Ok(())
     }
 
     /// Learn where files actually are.
