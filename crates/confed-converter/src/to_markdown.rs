@@ -819,7 +819,9 @@ pub fn escape_md(s: &str) -> String {
                 let next_word = chars.get(i + 1).is_some_and(|c| c.is_alphanumeric());
                 !(prev_word && next_word)
             }
-            '~' => chars.get(i + 1) == Some(&'~'),
+            // Every tilde of a run: leaving the last one bare would let it
+            // pair with a real `~~` beside it.
+            '~' => chars.get(i + 1) == Some(&'~') || (i > 0 && chars[i - 1] == '~'),
             // Only when it looks like an entity comrak would decode.
             '&' => looks_like_entity(&chars[i + 1..]),
             _ => false,
@@ -1024,6 +1026,12 @@ mod tests {
             "1. a\n\n1) b\n\n1. c\n"
         );
         assert_eq!(md("<ol><li>a</li></ol><p></p><ol><li>b</li></ol>"), "1. a\n\n1) b\n");
+    }
+
+    #[test]
+    fn a_run_of_tildes_in_struck_text_stays_text() {
+        assert_eq!(md("<p><del>a~~~~b</del></p>"), "~~a\\~\\~\\~\\~b~~\n");
+        assert_eq!(md("<p>about ~5 min</p>"), "about ~5 min\n", "a lone tilde is left alone");
     }
 
     #[test]
