@@ -26,6 +26,9 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets
       - run: cargo doc --locked --workspace --no-deps
+      # The fuzz targets run on nightly, weekly; this keeps them building.
+      # Their crate keeps no Cargo.lock (cargo-fuzz's layout), so no --locked.
+      - run: cargo check --manifest-path crates/confed-converter/fuzz/Cargo.toml
 
   test:
     name: test (${{ matrix.os }})

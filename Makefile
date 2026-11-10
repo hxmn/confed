@@ -96,9 +96,12 @@ FUZZ_SECONDS ?= 60
 fuzz:
 	@command -v cargo-fuzz >/dev/null \
 		|| { echo "cargo-fuzz is not installed: cargo install cargo-fuzz"; exit 127; }
-	cd crates/confed-converter && for target in storage markdown; do \
-		$(CARGO) +nightly fuzz run $$target -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
-	done
+	cd crates/confed-converter && \
+		mkdir -p fuzz/corpus/storage fuzz/corpus/markdown && \
+		$(CARGO) +nightly fuzz run storage fuzz/corpus/storage fixtures \
+			-- -max_total_time=$(FUZZ_SECONDS) && \
+		$(CARGO) +nightly fuzz run markdown fuzz/corpus/markdown fuzz/seeds/markdown \
+			-- -max_total_time=$(FUZZ_SECONDS)
 
 ## deny: licenses, advisories, duplicate versions and sources, per deny.toml
 deny:
