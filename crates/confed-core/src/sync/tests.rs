@@ -166,3 +166,53 @@ fn a_locally_modified_page_is_left_alone_by_pull() {
         PullAction::Nothing
     );
 }
+
+/// The cached conversion context follows every change it is built from:
+/// a page renamed, a page added, a setting changed — and only those.
+#[test]
+fn the_conversion_context_is_rebuilt_when_its_index_moves() {
+    use crate::state::{hash_str, now, PageRecord, SyncState};
+    let dir = tempfile::tempdir().unwrap();
+    let ws = Workspace::create(dir.path()).unwrap();
+    let record = |id: &str, title: &str, path: &str| PageRecord {
+        page_id: id.into(),
+        title: title.into(),
+        slug: title.into(),
+        local_path: path.into(),
+        parent_id: None,
+        position: None,
+        version: 1,
+        status: "current".into(),
+        labels: Vec::new(),
+        author: None,
+        created_at: None,
+        updated_at: None,
+        storage_body: "<p>x</p>".into(),
+        storage_hash: hash_str("<p>x</p>"),
+        markdown_hash: String::new(),
+        block_map: None,
+        sync_state: SyncState::Clean,
+        synced_at: now(),
+        render_key: String::new(),
+    };
+    ws.state().upsert_page(&record("1001", "Team Handbook", "Team Handbook.md")).unwrap();
+    let opts = page_convert_options(&ws, "Team Handbook.md").unwrap();
+    assert_eq!(opts.page_titles.get("1001").map(String::as_str), Some("Team Handbook"));
+
+    // Nothing indexed changed: the same context, not rebuilt.
+    let before = ws.state().index_generation();
+    let mut bumped = record("1001", "Team Handbook", "Team Handbook.md");
+    bumped.version = 2;
+    ws.state().upsert_page(&bumped).unwrap();
+    assert_eq!(ws.state().index_generation(), before);
+
+    // A rename and a new page are seen.
+    ws.state().upsert_page(&record("1001", "Onboarding", "Onboarding.md")).unwrap();
+    ws.state().upsert_page(&record("1002", "Фраза", "Фраза.md")).unwrap();
+    let opts = page_convert_options(&ws, "Onboarding.md").unwrap();
+    assert_eq!(opts.page_titles.get("1001").map(String::as_str), Some("Onboarding"));
+    assert_eq!(opts.page_links.get("1002").map(String::as_str), Some("Фраза.md"));
+
+    ws.state().set_meta("space_key", "ENG").unwrap();
+    assert_eq!(page_convert_options(&ws, "Onboarding.md").unwrap().space_key, "ENG");
+}

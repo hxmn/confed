@@ -298,6 +298,12 @@ pub struct RemoteEntry {
 pub struct StateDb {
     conn: Connection,
     path: PathBuf,
+    /// Moves whenever something a page's conversion context is built from
+    /// may have changed — a page's title, path or parent, a remote page's
+    /// title or deletion, the people cache — and not otherwise, so the
+    /// context can be kept across a push of many pages. See
+    /// [`Self::index_generation`].
+    index_generation: std::cell::Cell<u64>,
 }
 
 impl StateDb {
@@ -333,7 +339,7 @@ impl StateDb {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "busy_timeout", 5_000)?;
-        Ok(Self { conn, path })
+        Ok(Self { conn, path, index_generation: std::cell::Cell::new(0) })
     }
 
     pub fn path(&self) -> &Path {
@@ -380,6 +386,8 @@ impl StateDb {
         if ok {
             self.conn.execute_batch("COMMIT")?;
         } else {
+            // What the rolled-back writes said may have been read meanwhile.
+            self.touch_index();
             self.conn.execute_batch("ROLLBACK")?;
         }
         Ok(())
@@ -432,6 +440,10 @@ impl StateDb {
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        // The settings a conversion context is built from.
+        if matches!(key, "base_url" | "flavor" | "space_key") {
+            self.touch_index();
+        }
         self.conn.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -441,6 +453,9 @@ impl StateDb {
     }
 
     pub fn delete_meta(&self, key: &str) -> Result<()> {
+        if matches!(key, "base_url" | "flavor" | "space_key") {
+            self.touch_index();
+        }
         self.conn.execute("DELETE FROM meta WHERE key = ?1", params![key])?;
         Ok(())
     }
@@ -454,7 +469,29 @@ impl StateDb {
     // ---- base pages -------------------------------------------------------
 
     pub fn upsert_page(&self, page: &PageRecord) -> Result<()> {
+        let before: Option<(String, String, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT title, local_path, parent_id FROM pages WHERE page_id = ?1",
+                params![page.page_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let after = (page.title.clone(), page.local_path.clone(), page.parent_id.clone());
+        if before.as_ref() != Some(&after) {
+            self.touch_index();
+        }
         upsert_page_on(&self.conn, page)
+    }
+
+    /// See the field: how many times the index a conversion context is
+    /// built from may have changed. Equal values mean nothing has.
+    pub fn index_generation(&self) -> u64 {
+        self.index_generation.get()
+    }
+
+    fn touch_index(&self) {
+        self.index_generation.set(self.index_generation.get() + 1);
     }
 
     pub fn get_page(&self, page_id: &str) -> Result<Option<PageRecord>> {
@@ -532,6 +569,7 @@ impl StateDb {
     }
 
     pub fn delete_page(&self, page_id: &str) -> Result<()> {
+        self.touch_index();
         self.atomically(|db| {
             db.conn.execute("DELETE FROM pages WHERE page_id = ?1", params![page_id])?;
             db.conn.execute("DELETE FROM attachments WHERE page_id = ?1", params![page_id])?;
@@ -553,6 +591,17 @@ impl StateDb {
     // ---- remote pages -----------------------------------------------------
 
     pub fn upsert_remote(&self, page: &RemotePage) -> Result<()> {
+        let before: Option<(String, i32)> = self
+            .conn
+            .query_row(
+                "SELECT title, deleted FROM remote_pages WHERE page_id = ?1",
+                params![page.page_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if before != Some((page.title.clone(), page.deleted as i32)) {
+            self.touch_index();
+        }
         upsert_remote_on(&self.conn, page)
     }
 
@@ -580,12 +629,14 @@ impl StateDb {
     }
 
     pub fn mark_remote_deleted(&self, page_id: &str) -> Result<()> {
+        self.touch_index();
         self.conn
             .execute("UPDATE remote_pages SET deleted = 1 WHERE page_id = ?1", params![page_id])?;
         Ok(())
     }
 
     pub fn delete_remote(&self, page_id: &str) -> Result<()> {
+        self.touch_index();
         self.conn.execute("DELETE FROM remote_pages WHERE page_id = ?1", params![page_id])?;
         Ok(())
     }
@@ -753,6 +804,7 @@ impl StateDb {
 
     /// Remember a person so their mentions render without another lookup.
     pub fn upsert_user(&self, user: &UserRecord) -> Result<()> {
+        self.touch_index();
         self.conn.execute(
             "INSERT INTO users (id, id_attr, username, display_name, profile_url, fetched_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)

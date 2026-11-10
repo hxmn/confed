@@ -24,9 +24,8 @@ pub fn comment_convert_options(ws: &Workspace, page_path: &str) -> Result<Conver
 /// page rendered without its links would be recorded as clean with every link
 /// broken.
 pub fn page_convert_options(ws: &Workspace, page_path: &str) -> Result<ConvertOptions> {
-    let ctx = ConvertContext::load(ws)?;
-    let links = ctx.base_links(ws)?;
-    let mut opts = ctx.options(page_path, &links);
+    let cached = ConvertContext::cached(ws)?;
+    let mut opts = cached.ctx.options(page_path, &cached.links);
     if let Some(record) = ws.state().get_page_by_path(page_path)? {
         opts.inline_marks = inline_marks_for(ws, &record.page_id)?;
     }
@@ -61,7 +60,38 @@ pub struct ConvertContext {
     pub(super) links_by_title: bool,
 }
 
+/// A [`ConvertContext`] with the links it was built beside, as of one
+/// state of the index.
+#[derive(Debug)]
+pub struct CachedContext {
+    generation: u64,
+    pub(crate) ctx: Arc<ConvertContext>,
+    pub(crate) links: Arc<HashMap<String, String>>,
+}
+
 impl ConvertContext {
+    /// The context as of now, built afresh only when the index it comes
+    /// from has moved since the last call: a push of many pages reads it
+    /// once, not once per page.
+    pub(crate) fn cached(ws: &Workspace) -> Result<CachedContext> {
+        let generation = ws.state().index_generation();
+        if let Some(cached) = ws.convert_cache.borrow().as_ref() {
+            if cached.generation == generation {
+                return Ok(CachedContext {
+                    generation,
+                    ctx: cached.ctx.clone(),
+                    links: cached.links.clone(),
+                });
+            }
+        }
+        let ctx = ConvertContext::load(ws)?;
+        let links = ctx.base_links(ws)?;
+        let fresh = CachedContext { generation, ctx: Arc::new(ctx), links: Arc::new(links) };
+        *ws.convert_cache.borrow_mut() =
+            Some(CachedContext { generation, ctx: fresh.ctx.clone(), links: fresh.links.clone() });
+        Ok(fresh)
+    }
+
     pub fn load(ws: &Workspace) -> Result<Self> {
         let state = ws.state();
         let mut titles: HashMap<String, String> = state

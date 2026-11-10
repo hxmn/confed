@@ -18,13 +18,16 @@ const GITIGNORE_HEADER: &str = "# confed: local sync state and credentials";
 pub struct Workspace {
     root: PathBuf,
     state: StateDb,
+    /// The conversion context, kept while the index it was built from has
+    /// not moved; see [`crate::sync::ConvertContext`].
+    pub(crate) convert_cache: std::cell::RefCell<Option<crate::sync::CachedContext>>,
 }
 
 impl Workspace {
     /// Open the workspace rooted at `dir`.
     pub fn open(dir: &Path) -> Result<Self> {
         let state = StateDb::open(dir)?;
-        Ok(Self { root: dir.to_path_buf(), state })
+        Ok(Self { root: dir.to_path_buf(), state, convert_cache: Default::default() })
     }
 
     /// Walk up from `start` looking for a `.state.db`, like git looks for `.git`.
@@ -46,7 +49,7 @@ impl Workspace {
         std::fs::create_dir_all(dir)
             .map_err(|e| ConfedError::io(format!("creating {}", dir.display()), e))?;
         let state = StateDb::create(dir)?;
-        Ok(Self { root: dir.to_path_buf(), state })
+        Ok(Self { root: dir.to_path_buf(), state, convert_cache: Default::default() })
     }
 
     pub fn root(&self) -> &Path {
