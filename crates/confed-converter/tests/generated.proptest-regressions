@@ -1,0 +1,18 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d6fc15c5ce9ce3dfa1dee61de8fb30165005537ff276ad620a945f77d27180ca # shrinks to storage = "<ol><li>a</li></ol><ol><li>0</li></ol><ol><li>a</li></ol>"
+cc 1ae24ce5c31356e52384b4522ea81591c6a7b51578413a8ac7752b62e6324932 # shrinks to storage = "<ol><li>0</li></ol><ol><li> </li></ol><ol><li> </li></ol>"
+cc 42e238c15f66b2c0276491a9a4dfe81669f0edcc25d30095ef6892066ebe6df9 # shrinks to storage = "<ol><li>0</li></ol><p></p><ol><li>A</li></ol>"
+cc 7c8f1aae1ed34fd04c9329dc6102dbfa2dd189d266574cbba6fd90e0631d7b36 # shrinks to storage = "<p></p>"
+cc 8a8bdaee0afaf7572de31db6c36b8c024492c1eca8842a3d31c7953aa997f233 # shrinks to md = "<br><br>\n"
+cc 77f1e7369d8194dda297d45b2f50badfa3781b08f9e8300ae9988bbde408a615 # shrinks to md = "> a<br>\n> A\n"
+cc 661eb28c161a27d0acd2c9676630a4fafc06519ba1811c6e2e2867b542dd0da5 # shrinks to md = "# <br><u>x</u>\n"
+cc 2b5a423e4c53e2e5ead8ecd200c998f296d7578d84224e7e190259c7b264dac6 # shrinks to md = "> </u>\n> <u>x</u>\n"
+cc 68e0f76108266968a79dbc700f7dfcaf27de7076e0549623ebe7a806f3a09cb9 # shrinks to md = "А <br>\n"
+cc 807a6706596e6d02987358d1cff47ae8ea3b91783409bb6eb55e1930cab5a8bf # shrinks to md = "# ~~del~~~~del~~\n"
+cc f61e8d344cadd1cfdd2164f3ba6669b661bfce2ba11bae2d3b5dee1510ff8158 # shrinks to md = "> </u>\n> [link](https://example.com)\n"
+cc 39e68056e843bd08f8fd140922fe78856257a0061db09ea147931c20985360fa # shrinks to md = "**bold***em**em**em*\n"
