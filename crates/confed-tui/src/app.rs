@@ -662,7 +662,10 @@ impl App {
             // TUI stays usable instead of freezing with no state.
             Err(TryRecvError::Disconnected) => {
                 self.job = None;
-                self.status = format!("{label} stopped unexpectedly.");
+                self.status = match crate::term::take_worker_panic() {
+                    Some(why) => format!("{label} stopped unexpectedly: {why}"),
+                    None => format!("{label} stopped unexpectedly."),
+                };
                 self.ws = Workspace::open(&self.root).ok();
                 let _ = self.reload();
             }

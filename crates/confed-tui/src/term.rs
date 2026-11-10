@@ -62,12 +62,36 @@ fn restore_terminal() {
 
 /// Chain a restore step in front of the current panic hook, so the panic message
 /// lands on a terminal that can display it.
+///
+/// Only for a panic on the thread that installed it — the UI's. A worker
+/// that panics is reported by the UI, which is still drawing: restoring the
+/// terminal under it, or printing a backtrace over it, would leave a live UI
+/// on a terminal in cooked mode. The worker's message is kept instead, for
+/// [`take_worker_panic`].
 pub fn install_panic_hook(restore: impl Fn() + Send + Sync + 'static) {
+    let ui = std::thread::current().id();
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore();
-        previous(info);
+        if std::thread::current().id() == ui {
+            restore();
+            previous(info);
+        } else {
+            let payload = info.payload();
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic".to_string());
+            *WORKER_PANIC.lock().unwrap_or_else(|e| e.into_inner()) = Some(message);
+        }
     }));
+}
+
+static WORKER_PANIC: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// What the last worker thread that panicked said, once.
+pub fn take_worker_panic() -> Option<String> {
+    WORKER_PANIC.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
 #[cfg(test)]
@@ -88,10 +112,19 @@ mod tests {
         install_panic_hook(move || flag.store(true, Ordering::SeqCst));
 
         let outcome = std::panic::catch_unwind(|| panic!("simulated TUI panic"));
-
-        std::panic::set_hook(previous);
         assert!(outcome.is_err(), "the panic must still propagate");
         assert!(restored.load(Ordering::SeqCst), "the terminal must be restored first");
+
+        // A worker's panic leaves the terminal to the UI, which is still on
+        // it, and is kept for the UI to report. In the same test: the hook is
+        // process-wide.
+        restored.store(false, Ordering::SeqCst);
+        let worker = std::thread::spawn(|| panic!("simulated worker panic")).join();
+        std::panic::set_hook(previous);
+        assert!(worker.is_err());
+        assert!(!restored.load(Ordering::SeqCst), "the UI's terminal is left alone");
+        assert_eq!(take_worker_panic().as_deref(), Some("simulated worker panic"));
+        assert_eq!(take_worker_panic(), None, "reported once");
     }
 
     #[test]
