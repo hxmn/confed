@@ -587,20 +587,23 @@ pub const CLOUD_SPACE_OPERATIONS: &[(&str, &str)] = &[
     ("attachment", "delete"),
 ];
 
+/// Text that is not `target:key`, as [`SpaceOperation::parse`] takes it.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("`{0}` is not an operation: write it as target:key, e.g. space:read")]
+pub struct InvalidOperation(pub String);
+
 impl SpaceOperation {
     pub fn new(target: impl Into<String>, key: impl Into<String>) -> Self {
         Self { target: target.into(), key: key.into() }
     }
 
     /// `target:key`, as the command line writes it.
-    pub fn parse(text: &str) -> Result<Self, String> {
+    pub fn parse(text: &str) -> Result<Self, InvalidOperation> {
         match text.trim().split_once(':') {
             Some((target, key)) if !target.trim().is_empty() && !key.trim().is_empty() => {
                 Ok(Self::new(target.trim().to_ascii_lowercase(), key.trim().to_ascii_lowercase()))
             }
-            _ => Err(format!(
-                "`{text}` is not an operation: write it as target:key, e.g. space:read"
-            )),
+            _ => Err(InvalidOperation(text.to_string())),
         }
     }
 

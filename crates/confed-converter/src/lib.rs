@@ -39,7 +39,7 @@ mod corpus;
 #[cfg(test)]
 mod corpus_tests;
 
-pub use blockmap::{BlockEntry, BlockKind, BlockMap};
+pub use blockmap::{BlockEntry, BlockKind, BlockMap, Side, SpanError};
 pub use dom::MAX_DEPTH;
 pub use error::{ConvertError, ConvertResult};
 pub use marks::{Mark, MarkId, MarkIssue, PlacedMark, Stripped};

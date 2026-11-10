@@ -721,8 +721,10 @@ fn check_map_matches(
     base_map: &BlockMap,
     base_markdown: &str,
 ) -> ConvertResult<()> {
-    base_map.validate_spans(base_storage).map_err(ConvertError::StaleBlockMap)?;
-    base_map.validate_md_spans().map_err(ConvertError::StaleBlockMap)?;
+    base_map
+        .validate_spans(base_storage)
+        .map_err(|e| ConvertError::StaleBlockMap(e.to_string()))?;
+    base_map.validate_md_spans().map_err(|e| ConvertError::StaleBlockMap(e.to_string()))?;
 
     let ranges = mdblock::split_blocks(base_markdown);
     if ranges.len() != base_map.blocks.len() {

@@ -469,7 +469,7 @@ fn parse_operations(client: &dyn ConfluenceClient, ops: &[String]) -> Result<Vec
     };
     let mut out: Vec<SpaceOperation> = Vec::new();
     for text in ops.iter().filter(|o| !o.trim().is_empty()) {
-        let op = SpaceOperation::parse(text).map_err(ConfedError::usage)?;
+        let op = SpaceOperation::parse(text).map_err(|e| ConfedError::usage(e.to_string()))?;
         if !op.is_valid_for(flavor) {
             return Err(ConfedError::usage_with_hint(
                 format!("{flavor} has no space permission {op}"),

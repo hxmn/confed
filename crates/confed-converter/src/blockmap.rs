@@ -55,6 +55,35 @@ pub struct BlockMap {
     pub blocks: Vec<BlockEntry>,
 }
 
+/// Which of a block's two spans: bytes of storage, or lines of Markdown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Storage,
+    Markdown,
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Side::Storage => "storage",
+            Side::Markdown => "Markdown",
+        })
+    }
+}
+
+/// How a block map fails to describe the body it is checked against.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SpanError {
+    #[error("block {block}: inverted {side} span {}..{}", span.0, span.1)]
+    Inverted { block: usize, side: Side, span: (usize, usize) },
+    #[error("block {block}: storage span {}..{} exceeds body length {len}", span.0, span.1)]
+    PastEnd { block: usize, span: (usize, usize), len: usize },
+    #[error("block {block}: storage span {}..{} falls inside a character", span.0, span.1)]
+    InsideCharacter { block: usize, span: (usize, usize) },
+    #[error("block {block}: {side} span {}..{} overlaps the previous block", span.0, span.1)]
+    Overlapping { block: usize, side: Side, span: (usize, usize) },
+}
+
 impl BlockMap {
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
@@ -68,42 +97,41 @@ impl BlockMap {
     /// and start and end on character boundaries: a map recorded against
     /// another body can point into the middle of a Cyrillic letter, and
     /// slicing there would panic rather than fall back.
-    pub fn validate_spans(&self, storage: &str) -> Result<(), String> {
-        let storage_len = storage.len();
+    pub fn validate_spans(&self, storage: &str) -> Result<(), SpanError> {
         let mut prev_end = 0usize;
-        for (i, b) in self.blocks.iter().enumerate() {
-            let (s, e) = b.storage_span;
-            if s > e {
-                return Err(format!("block {i}: inverted storage span {s}..{e}"));
+        for (block, b) in self.blocks.iter().enumerate() {
+            let (start, end) = b.storage_span;
+            let span = (start, end);
+            if start > end {
+                return Err(SpanError::Inverted { block, side: Side::Storage, span });
             }
-            if e > storage_len {
-                return Err(format!(
-                    "block {i}: storage span {s}..{e} exceeds body length {storage_len}"
-                ));
+            if end > storage.len() {
+                return Err(SpanError::PastEnd { block, span, len: storage.len() });
             }
-            if !storage.is_char_boundary(s) || !storage.is_char_boundary(e) {
-                return Err(format!("block {i}: storage span {s}..{e} falls inside a character"));
+            if !storage.is_char_boundary(start) || !storage.is_char_boundary(end) {
+                return Err(SpanError::InsideCharacter { block, span });
             }
-            if s < prev_end {
-                return Err(format!("block {i}: storage span {s}..{e} overlaps previous block"));
+            if start < prev_end {
+                return Err(SpanError::Overlapping { block, side: Side::Storage, span });
             }
-            prev_end = e;
+            prev_end = end;
         }
         Ok(())
     }
 
     /// Markdown line ranges must be ordered and non-overlapping.
-    pub fn validate_md_spans(&self) -> Result<(), String> {
+    pub fn validate_md_spans(&self) -> Result<(), SpanError> {
         let mut prev_end = 0usize;
-        for (i, b) in self.blocks.iter().enumerate() {
-            let (s, e) = b.md_span;
-            if s > e {
-                return Err(format!("block {i}: inverted md span {s}..{e}"));
+        for (block, b) in self.blocks.iter().enumerate() {
+            let (start, end) = b.md_span;
+            let span = (start, end);
+            if start > end {
+                return Err(SpanError::Inverted { block, side: Side::Markdown, span });
             }
-            if s < prev_end {
-                return Err(format!("block {i}: md span {s}..{e} overlaps previous block"));
+            if start < prev_end {
+                return Err(SpanError::Overlapping { block, side: Side::Markdown, span });
             }
-            prev_end = e;
+            prev_end = end;
         }
         Ok(())
     }
@@ -184,7 +212,10 @@ mod tests {
     fn spans_inside_a_character_are_rejected() {
         // "Фраза" is two bytes a letter: 3 is the middle of the second one.
         let map = BlockMap { blocks: vec![entry(BlockKind::Paragraph, (0, 3), (0, 1))] };
-        assert!(map.validate_spans("Фраза").unwrap_err().contains("inside a character"));
+        assert_eq!(
+            map.validate_spans("Фраза"),
+            Err(SpanError::InsideCharacter { block: 0, span: (0, 3) })
+        );
         let map = BlockMap { blocks: vec![entry(BlockKind::Paragraph, (0, 4), (0, 1))] };
         assert!(map.validate_spans("Фраза").is_ok());
     }
