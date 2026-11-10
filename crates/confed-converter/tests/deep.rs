@@ -86,3 +86,16 @@ fn many_lines_of_unclosed_block_tags_convert() {
         assert_eq!(storage.matches("&lt;div&gt;").count(), count, "every tag kept as text");
     }
 }
+
+/// `<details>` inside `<details>` with no blank line between is one HTML
+/// block, converted by converting its body: past the nesting limit it is
+/// refused, not a stack overflow.
+#[test]
+fn deeply_nested_details_are_refused() {
+    let nested = |n: usize| {
+        format!("{}x\n{}", "<details><summary>s</summary>\n".repeat(n), "</details>\n".repeat(n))
+    };
+    let err = markdown_to_storage(&nested(5_000), &opts()).unwrap_err().to_string();
+    assert!(err.contains("levels deep"), "{err}");
+    assert!(markdown_to_storage(&nested(3), &opts()).is_ok());
+}

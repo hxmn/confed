@@ -27,7 +27,7 @@ use std::cell::RefCell;
 pub const PRESERVED_LANG: &str = "confluence";
 
 pub fn generate(markdown: &str, opts: &ConvertOptions) -> ConvertResult<String> {
-    let body = generate_at(markdown, opts, 0)?;
+    let body = generate_at(markdown, opts, 0, 0)?;
     dom::check_well_formed(&body)
         .map_err(|e| ConvertError::Generate(format!("generated body is not well-formed: {e}")))?;
     Ok(body)
@@ -35,14 +35,31 @@ pub fn generate(markdown: &str, opts: &ConvertOptions) -> ConvertResult<String> 
 
 /// `line_offset` shifts reported line numbers so errors inside a single patched
 /// block still point at the right line of the whole document.
-fn generate_at(markdown: &str, opts: &ConvertOptions, line_offset: usize) -> ConvertResult<String> {
+///
+/// `nesting` counts the calls this one is inside: an HTML block — a
+/// `<details>` holding another — is converted by calling back here, and a
+/// page nested deep enough that way would overflow the stack.
+fn generate_at(
+    markdown: &str,
+    opts: &ConvertOptions,
+    line_offset: usize,
+    nesting: usize,
+) -> ConvertResult<String> {
+    if nesting > dom::MAX_DEPTH {
+        return Err(ConvertError::Generate(format!(
+            "line {}: HTML blocks nest more than {} levels deep here, which confed does not \
+             write",
+            line_offset + 1,
+            dom::MAX_DEPTH
+        )));
+    }
     // A user may have written an inline comment mark at the start of a line,
     // where CommonMark would read it as an HTML block; the same repair the
     // renderer applies keeps it a paragraph.
     let markdown = marks::normalize_line_starts(markdown);
     let arena = Arena::new();
     let root = mdblock::parse(&arena, &markdown);
-    let g = Generator { opts, line_offset, open_marks: RefCell::new(Vec::new()) };
+    let g = Generator { opts, line_offset, nesting, open_marks: RefCell::new(Vec::new()) };
     let mut out = String::new();
     // Checked block by block, so a failure names the Markdown line that
     // caused it rather than a byte offset into storage nobody has seen.
@@ -72,6 +89,8 @@ fn generate_at(markdown: &str, opts: &ConvertOptions, line_offset: usize) -> Con
 struct Generator<'a> {
     opts: &'a ConvertOptions,
     line_offset: usize,
+    /// See [`generate_at`].
+    nesting: usize,
     /// Marker refs of the inline comment marks currently open, in opening
     /// order. Storage markers must nest, so an open mark is closed before any
     /// element boundary and reopened after it — the same fragmenting Confluence
@@ -301,7 +320,12 @@ impl<'a> Generator<'a> {
         {
             let stripped = marks::strip(literal);
             if !stripped.body.trim().is_empty() {
-                out.push_str(&generate_at(&stripped.body, self.opts, self.line_offset)?);
+                out.push_str(&generate_at(
+                    &stripped.body,
+                    self.opts,
+                    self.line_offset,
+                    self.nesting + 1,
+                )?);
             }
             return Ok(());
         }
@@ -319,7 +343,12 @@ impl<'a> Generator<'a> {
                 ));
             }
             out.push_str("<ac:rich-text-body>");
-            out.push_str(&generate_at(&format!("{}\n", body.trim()), self.opts, self.line_offset)?);
+            out.push_str(&generate_at(
+                &format!("{}\n", body.trim()),
+                self.opts,
+                self.line_offset,
+                self.nesting + 1,
+            )?);
             out.push_str("</ac:rich-text-body></ac:structured-macro>");
             return Ok(());
         }
@@ -353,7 +382,7 @@ impl<'a> Generator<'a> {
             escaped.push_str(body);
         }
         escaped.push('\n');
-        generate_at(&escaped, self.opts, self.line_offset)
+        generate_at(&escaped, self.opts, self.line_offset, self.nesting + 1)
     }
 
     // -- inline ------------------------------------------------------------
@@ -712,7 +741,7 @@ fn self_generate(
         if text.trim().is_empty() {
             continue;
         }
-        out.push_str(&generate_at(text, opts, new_ranges[i].0)?);
+        out.push_str(&generate_at(text, opts, new_ranges[i].0, 0)?);
         out.push('\n');
     }
     Ok(())
