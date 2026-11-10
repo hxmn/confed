@@ -30,7 +30,6 @@ confed-core = { path = "crates/confed-core", version = "0.19.0" }
 confed-dc = { path = "crates/confed-dc", version = "0.19.0" }
 confed-tui = { path = "crates/confed-tui", version = "0.19.0" }
 
-anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
@@ -58,7 +57,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 rusqlite = { version = "0.41", features = ["bundled", "blob"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+# serde_yaml was deprecated; this maintained fork keeps its API and its output
+# byte for byte, so no page file is rewritten by the switch.
+serde_norway = "0.9"
 sha2 = "0.10"
 similar = { version = "2", features = ["text", "inline"] }
 tempfile = "3"

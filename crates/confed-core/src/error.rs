@@ -113,7 +113,7 @@ pub enum ConfedError {
     Convert(#[from] confed_converter::ConvertError),
 
     #[error("could not parse YAML frontmatter: {0}")]
-    Yaml(#[from] serde_yaml::Error),
+    Yaml(#[from] serde_norway::Error),
 
     #[error("{0}")]
     Json(#[from] serde_json::Error),

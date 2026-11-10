@@ -9,7 +9,7 @@
 use crate::error::{ConfedError, Result};
 use confed_converter::marks::{self, Mark, MarkIssue, PlacedMark};
 use serde::{Deserialize, Serialize};
-use serde_yaml::{Mapping, Value};
+use serde_norway::{Mapping, Value};
 use sha2::{Digest, Sha256};
 
 /// Bumped when the frontmatter contract changes in a way tools must notice.
@@ -198,7 +198,9 @@ impl MarkdownFile {
         hasher.update(fm.parent_id.clone().unwrap_or_default().as_bytes());
         hasher.update(b"\0extra\0");
         hasher.update(
-            serde_yaml::to_string(&Value::Mapping(fm.extra.clone())).unwrap_or_default().as_bytes(),
+            serde_norway::to_string(&Value::Mapping(fm.extra.clone()))
+                .unwrap_or_default()
+                .as_bytes(),
         );
         hasher.update(b"\0body\0");
         // Normalize line endings and the trailing newline: neither is content.
@@ -239,10 +241,10 @@ impl MarkdownFile {
             map.insert(k.clone(), v.clone());
         }
         if let Some(managed) = &fm.managed {
-            map.insert(Value::from("confed"), serde_yaml::to_value(managed)?);
+            map.insert(Value::from("confed"), serde_norway::to_value(managed)?);
         }
 
-        let yaml = serde_yaml::to_string(&Value::Mapping(map))?;
+        let yaml = serde_norway::to_string(&Value::Mapping(map))?;
         let mut out = String::with_capacity(yaml.len() + 8);
         out.push_str("---\n");
         out.push_str(&yaml);
@@ -287,7 +289,7 @@ pub fn parse(content: &str, path: &str) -> Result<MarkdownFile> {
     let value: Value = if yaml.trim().is_empty() {
         Value::Mapping(Mapping::new())
     } else {
-        serde_yaml::from_str(yaml)?
+        serde_norway::from_str(yaml)?
     };
     let mut map = match value {
         Value::Mapping(m) => m,
@@ -340,7 +342,7 @@ pub fn parse(content: &str, path: &str) -> Result<MarkdownFile> {
 
     let managed = match map.remove(Value::from("confed")) {
         None | Some(Value::Null) => None,
-        Some(value) => Some(serde_yaml::from_value::<Managed>(value).map_err(|e| {
+        Some(value) => Some(serde_norway::from_value::<Managed>(value).map_err(|e| {
             ConfedError::state_with_hint(
                 format!("{path}: the `confed:` block is malformed: {e}"),
                 "the `confed:` block is tool-managed; `confed pull --force <page>` will rebuild it",
