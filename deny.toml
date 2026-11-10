@@ -1,0 +1,48 @@
+# cargo-deny: `make deny`, and the `deny` job in CI.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = false
+
+[advisories]
+# Vulnerabilities fail. Unmaintained and unsound crates fail too, unless named
+# below with the reason confed cannot drop them yet.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+    # zbus 4 and its parts, merged into zbus 6: reached through keyring 3's
+    # Secret Service backend. keyring 4 moves to the new zbus, but it is a new
+    # API and stores credentials under its own layout; that migration is its
+    # own change.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant 4, via keyring 3; drop with the keyring 4 migration" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names 3, via keyring 3; drop with the keyring 4 migration" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 4, via keyring 3; drop with the keyring 4 migration" },
+]
+
+[licenses]
+# What a crate published under MIT OR Apache-2.0 may depend on.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies within the workspace carry a version as well, so they are
+# not wildcards.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

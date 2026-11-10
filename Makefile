@@ -91,9 +91,15 @@ audit:
 		|| { echo "cargo-audit is not installed: cargo install cargo-audit"; exit 127; }
 	$(CARGO) audit
 
+## deny: licenses, advisories, duplicate versions and sources, per deny.toml
+deny:
+	@command -v cargo-deny >/dev/null \
+		|| { echo "cargo-deny is not installed: cargo install cargo-deny"; exit 127; }
+	$(CARGO) deny check
+
 ## ci: everything the CI pipeline runs
 ci: fmt-check lint doc test
-	@echo 'ok — CI also runs "make msrv" and "make audit"'
+	@echo 'ok — CI also runs "make msrv", "make audit" and "make deny"'
 
 # ----------------------------------------------------------------- tidying --
 
@@ -120,5 +126,5 @@ help:
 	@echo "Variables: CARGO=$(CARGO)  MSRV=$(MSRV)  ARGS (for make run)  NAME (for make test-one)"
 
 .PHONY: build release install run test test-one test-sync test-cli \
-        fmt fmt-check lint lint-fix doc doc-open changelog msrv audit ci \
+        fmt fmt-check lint lint-fix doc doc-open changelog msrv audit deny ci \
         clean clean-cache update help
