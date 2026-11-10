@@ -1212,10 +1212,8 @@ pub async fn execute(
     for step in steps.into_iter().filter(|s| *s > done) {
         let result = match step {
             Step::ServerMoved => {
-                let save = |plan: &MovePlan| {
-                    if let Ok(value) = serde_json::to_value(plan) {
-                        let _ = instance.journal_save(journal_id, &value);
-                    }
+                let save = |plan: &MovePlan| -> Result<()> {
+                    instance.journal_save(journal_id, &serde_json::to_value(plan)?)
                 };
                 server_move(client, plan, &save).await
             }
@@ -1229,7 +1227,16 @@ pub async fn execute(
             // The plan as it stands — a move already asked for, say — so a
             // resume knows what was done.
             let plan_now = serde_json::to_value(&*plan).unwrap_or_default();
-            let _ = instance.journal_fail_with_plan(journal_id, &e.to_string(), &plan_now);
+            if let Err(journal) =
+                instance.journal_fail_with_plan(journal_id, &e.to_string(), &plan_now)
+            {
+                // Both are said: the failure, and that the record of how far
+                // the move got could not be kept.
+                return Err(ConfedError::Other(format!(
+                    "{e}; and the move journal could not record it ({journal}), so `confed \
+                     instance resume` may not know how far the move got"
+                )));
+            }
             return Err(e);
         }
         instance.journal_advance(journal_id, step, &serde_json::to_value(&*plan)?)?;
@@ -1300,7 +1307,7 @@ pub async fn abort(
 async fn server_move(
     client: &Arc<dyn ConfluenceClient>,
     plan: &mut MovePlan,
-    save: &dyn Fn(&MovePlan),
+    save: &dyn Fn(&MovePlan) -> Result<()>,
 ) -> Result<()> {
     let mut placed = Vec::new();
     for root in plan.root_ids() {
@@ -1337,7 +1344,7 @@ async fn server_move(
                     .await?;
             }
             plan.renamed.push(id);
-            save(plan);
+            save(plan)?;
         }
     }
 
@@ -1354,7 +1361,9 @@ async fn server_move(
                 return Err(move_error(client, plan, &root, e).await);
             }
             plan.requested.push(root.clone());
-            save(plan);
+            // What a resume reads to know the move was asked for. Unsaved, it
+            // would ask again; so not saving it stops the move here.
+            save(plan)?;
         }
 
         // Trust nothing but the pages themselves: the web action Data Center
