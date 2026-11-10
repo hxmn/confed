@@ -2523,6 +2523,15 @@ async fn local_moves_and_removals_need_no_credentials() {
         status.to_string().contains("deleted"),
         "the next push has a deletion to send: {status}"
     );
+
+    // Attaching a file and drafting a comment only write files too.
+    let file = dir.path().join("diagram.txt");
+    std::fs::write(&file, "Фраза 1.").unwrap();
+    let output = run(confed(dir.path(), &["attach", ROOT_FILE, file.to_str().unwrap(), "--json"]));
+    assert_eq!(exit_code(&output), 0, "attach: {}", stderr(&output));
+    let output =
+        run(confed(dir.path(), &["comment", "add", ROOT_FILE, "-m", "Фраза 2.", "--json"]));
+    assert_eq!(exit_code(&output), 0, "comment add: {}", stderr(&output));
 }
 
 /// Send Ctrl-C (SIGINT) to a running confed once `after` has passed, and wait

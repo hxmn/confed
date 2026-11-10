@@ -330,6 +330,34 @@ impl Context {
         })
     }
 
+    /// What the server can do, as far as its flavor says — with no client
+    /// built and no credential read, for a command that only writes files.
+    pub fn capabilities(&self) -> Result<(Flavor, confed_api::Capabilities)> {
+        let flavor = match (&self.global.flavor, self.workspace.as_ref()) {
+            (None, Some(ws)) => match ws.flavor()? {
+                Some(flavor) => flavor,
+                None => self.flavor_from_settings()?,
+            },
+            _ => self.flavor_from_settings()?,
+        };
+        let caps = match flavor {
+            Flavor::Cloud => confed_api::Capabilities::cloud(),
+            Flavor::DataCenter => confed_api::Capabilities::data_center(),
+        };
+        Ok((flavor, caps))
+    }
+
+    fn flavor_from_settings(&self) -> Result<Flavor> {
+        let session = self.session()?;
+        let base_url = self
+            .resolver
+            .lookup(&config::BASE_URL, self.global.base_url.as_deref())
+            .map(|r| r.value)
+            .or_else(|| session.as_ref().map(|s| s.base_url.clone()))
+            .unwrap_or_default();
+        self.resolve_flavor(&base_url, session.as_ref())
+    }
+
     /// Token precedence: flag, `CONFED_TOKEN`, stored session (keyring or DB).
     fn resolve_secret(&self, session: Option<&Session>) -> Result<Secret> {
         if let Some(resolved) = self.resolver.lookup(&config::TOKEN, self.global.token.as_deref()) {

@@ -177,7 +177,11 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
             None
         }
         _ => {
-            ctx.preload_credentials()?;
+            // A credential is read only by a command that will use one. Any
+            // other loads it itself, should it turn out to need the server.
+            if needs_credentials(&command) {
+                ctx.preload_credentials()?;
+            }
             None
         }
     };
@@ -203,6 +207,21 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
         return Ok(output);
     }
     Ok(output)
+}
+
+/// Whether `command` is sure to talk to the server. Adding attachments or
+/// comment drafts without `--push` only writes files, and must work with no
+/// credential at all.
+fn needs_credentials(command: &Command) -> bool {
+    use cli::CommentCommand as C;
+    match command {
+        Command::Attach(args) => args.push || (args.list && args.remote),
+        Command::Comment(C::Add { push, .. } | C::Reply { push, .. } | C::Resolve { push, .. }) => {
+            *push
+        }
+        Command::Comment(C::List { refresh, .. }) => *refresh,
+        _ => true,
+    }
 }
 
 /// Whether `command` runs through the engine's page loops, which look at

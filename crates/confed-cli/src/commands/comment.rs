@@ -522,11 +522,10 @@ async fn add(
     let mut selection = None;
     if let Some(anchor_text) = anchor {
         selection = Some(check_anchor(ctx, &page_id, anchor_text, placement.occurrence)?);
-        let client = ctx.build_client()?;
-        if !client.capabilities().inline_comment_create {
+        let (flavor, caps) = ctx.capabilities()?;
+        if !caps.inline_comment_create {
             return Err(ConfedError::Unsupported(format!(
-                "creating inline comments is not available on Confluence {}",
-                client.flavor()
+                "creating inline comments is not available on Confluence {flavor}"
             )));
         }
         let body_draft = if placement.sidecar {
@@ -545,7 +544,7 @@ async fn add(
                 format!("Added a draft inline comment at line {line} of {}\n", path.display());
             let mut result = json!({ "page_id": page_id, "draft": true, "body": body, "anchor": anchor_text, "line": line, "written_to": "body" });
             if push {
-                let engine = ctx.engine(client)?;
+                let engine = ctx.engine(ctx.build_client()?)?;
                 let ws = ctx.workspace_mut()?;
                 let _lock = ws.lock()?;
                 let outcome = engine.push(ws, &comment_push(vec![page_id.clone()])).await?;
@@ -626,14 +625,13 @@ async fn resolve(
     all: Option<&str>,
     push: bool,
 ) -> Result<Output> {
-    let client = ctx.build_client()?;
-    if !client.capabilities().comment_resolve {
+    let (flavor, caps) = ctx.capabilities()?;
+    if !caps.comment_resolve {
         return Err(ConfedError::Unsupported(format!(
-            "resolving comments is not available on Confluence {}",
-            client.flavor()
+            "resolving comments is not available on Confluence {flavor}"
         )));
     }
-    let data_center = client.flavor() == confed_api::Flavor::DataCenter;
+    let data_center = flavor == confed_api::Flavor::DataCenter;
 
     let mut targets: Vec<(String, String)> = Vec::new(); // (page, id)
     let mut skipped: Vec<serde_json::Value> = Vec::new();
