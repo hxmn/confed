@@ -15,16 +15,24 @@ fn remove_locally(ctx: &mut Context, args: &RmArgs) -> Result<(Vec<Value>, Strin
     if args.paths.is_empty() {
         return Err(ConfedError::usage("name at least one page to remove"));
     }
+    // Every name resolved and every page checked before anything is removed:
+    // one that cannot go stops the lot.
+    let mut page_ids = Vec::with_capacity(args.paths.len());
+    for reference in &args.paths {
+        let id = ctx.resolve_page(reference)?;
+        if !page_ids.contains(&id) {
+            page_ids.push(id);
+        }
+    }
+    let ws = ctx.workspace()?;
+    let records = if args.dry_run {
+        local::removable_pages(ws, &page_ids)?
+    } else {
+        local::remove_pages(ws, &page_ids, args.keep_local)?
+    };
     let mut removed = Vec::new();
     let mut human = String::new();
-    for reference in &args.paths {
-        let page_id = ctx.resolve_page(reference)?;
-        let ws = ctx.workspace()?;
-        let record = if args.dry_run {
-            local::removable(ws, &page_id)?
-        } else {
-            local::remove_page(ws, &page_id, args.keep_local)?
-        };
+    for record in records {
         let _ = if args.dry_run {
             writeln!(
                 human,
@@ -36,7 +44,7 @@ fn remove_locally(ctx: &mut Context, args: &RmArgs) -> Result<(Vec<Value>, Strin
             writeln!(human, "  removed {}", record.local_path)
         };
         removed.push(json!({
-            "page_id": page_id,
+            "page_id": record.page_id,
             "path": record.local_path,
             "server_deleted": false,
         }));
