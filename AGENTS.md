@@ -72,6 +72,11 @@ Every change that reaches the binary is a release:
    its own directory. A test fails if the copy is stale.
 4. `make ci`, commit, tag `vX.Y.Z`, push the commit and the tag.
 
+Pushing the tag runs `.github/workflows/release.yml`, which builds `confed` for Linux
+(x86_64, aarch64), macOS (x86_64, aarch64) and Windows (x86_64), and attaches the
+archives and their SHA-256 sums to a GitHub release whose notes are the version's
+`CHANGELOG.md` section.
+
 ### crates.io
 
 Eight crates are published, each after the crates it depends on: `confed-api`,
