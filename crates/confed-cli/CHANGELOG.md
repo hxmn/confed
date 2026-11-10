@@ -20,6 +20,71 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-10
+
+The problems found in 0.20, and the rest of the first review's list.
+
+### Changed
+
+- **Ctrl-C keeps what was done.** `fetch`, `pull` and `push` stopped by Ctrl-C now
+  return their outcome so far, marked `"interrupted": true`, with exit 130 — the pages
+  already written or sent are listed, not lost from the result. Only commands that go
+  through those page loops (`fetch`, `pull`, `push`, `clone`, their `instance` forms,
+  and commands with `--push`) wait for the page in hand; every other command now ends
+  on the first Ctrl-C, where before it said it was stopping and ran on to the end.
+- **Under `--json`, a command line confed cannot read** (`confed --json nosuch`, a
+  mistyped flag) is answered with the error envelope, exit 2, instead of clap's text on
+  stderr. The envelope's `command` is `confed` when no command was named.
+- **`attach`, and `comment add`, `reply` and `resolve` without `--push`** run with no
+  credential, as `mv` and `rm` do.
+- **A workspace that cannot be opened says why** — a database from a newer confed,
+  locked, damaged — instead of "not a confed workspace", which sent people to `init`.
+- **The token prompt refuses to read a secret** on a terminal that cannot hide what is
+  typed (exit 2, pointing at `--token` and `CONFED_TOKEN`), rather than echoing it.
+- **For Rust callers:** `confed-converter`'s `ConvertOptions` takes `PageLinks` (one map
+  per kind of key) and `PageTarget` (`Id` or `Title`) for links, and `UserLink.id_attr`
+  is a `UserIdAttr`. `confed-core`'s `FetchOutcome`, `PullOutcome` and `PushOutcome`
+  have `interrupted`, and `interrupt::check` is gone.
+
+### Fixed
+
+- **A lost create could adopt somebody else's page.** The next push took any page with
+  the same title and parent for its own. It now takes it only when its body is the one
+  sent, or it is still version 1, by the signed-in user, made no earlier than the
+  request.
+- **Version-conflict detection never read the server's message** in practice: the body
+  had been prefixed and cut short before it was parsed. It is judged from the body as
+  the server sent it.
+- **`resolve` could undo another confed's pull or push**: it wrote back a page record
+  read before taking the lock. Both record and file are read again under the lock, and
+  a page that changed meanwhile is refused.
+- **A label change that failed after a successful update** left the base a version
+  behind the server, and the next push was refused as stale. The base now follows the
+  update, and the labels are still owed.
+- **Atomic writes and downloads are synced to disk** before they replace a file, and a
+  failed write or rename no longer leaves its temp file behind. The agent contract
+  files are written atomically too.
+- **`rm A B` removed A and then refused B**; every page is checked before any is
+  removed, and a parent may go together with its children.
+- **`mv` ignored a sidecar or children folder that could not follow** the page; the
+  move is now undone.
+- **Paths outside the workspace** — absolute, or climbing out with `..` — are refused
+  by `new` and `mv` instead of being written there or quietly clamped to the root.
+  Comment ids must be digits, and no API path may hold a `.` or `..` segment.
+- **A pulled page reported the new version as its `from_version`.**
+- **Migrations ran step by step**, so one stopped halfway left a partly new schema; it
+  is one transaction now.
+- **A cross-space move went on when its journal could not be written**, so a resume
+  might ask the server to move again.
+- **The TUI restored the terminal under itself** when a worker panicked; it now shows
+  the worker's message in its status line instead.
+- **Credentials are wiped from memory** when dropped, and the Authorization header is
+  marked sensitive.
+- **Push rebuilt the conversion context for every page**; it is kept while nothing it
+  depends on changes, and a 1000-page push takes 1.8 s instead of 4.2. Attachments are
+  hashed in chunks instead of read into memory whole.
+- **A Confluence page whose title is a number** was linked as the page with that id.
+
 ## [0.20.1] - 2026-11-10
 
 ### Fixed
@@ -1337,7 +1402,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/hxmn/confed/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/hxmn/confed/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/hxmn/confed/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/hxmn/confed/compare/v0.18.0...v0.19.0

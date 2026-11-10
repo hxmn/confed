@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "confed"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "confed-cli",
  "confed-tui",
@@ -637,7 +637,7 @@ dependencies = [
 
 [[package]]
 name = "confed-api"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "confed-cli"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "chrono",
  "clap",
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "confed-cloud"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "async-trait",
  "confed-api",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "confed-converter"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "comrak",
  "insta",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "confed-core"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "chrono",
  "confed-api",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "confed-dc"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -756,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "confed-tui"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "confed-api",
  "confed-cli",
