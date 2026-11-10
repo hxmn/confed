@@ -187,13 +187,14 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
         .build()
         .map_err(|e| ConfedError::io("starting the async runtime", e))?;
 
+    let graceful = stops_between_pages(&command);
     let output = runtime.block_on(async {
-        watch_interrupts();
+        watch_interrupts(graceful);
         dispatch(ctx, command, prepared_init, prepared_instance).await
     })?;
     // Stopped by Ctrl-C between pages: the outcome lists what was done, and
     // the exit code says it is not all.
-    if confed_core::interrupt::requested() {
+    if graceful && confed_core::interrupt::requested() {
         let mut output = output.warn(
             "interrupted: stopped after the page in hand; what is listed was done, and running \
              the command again finishes the rest",
@@ -204,13 +205,32 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
     Ok(output)
 }
 
-/// The first Ctrl-C asks the running command to stop at the next page
-/// boundary, so no page file is left out of step with what `.state.db`
-/// records for it; the second quits at once, for a command stuck waiting.
-fn watch_interrupts() {
-    tokio::spawn(async {
+/// Whether `command` runs through the engine's page loops, which look at
+/// the interrupt flag between pages. Any other command has no point at
+/// which to stop cleanly, so Ctrl-C ends it at once.
+fn stops_between_pages(command: &Command) -> bool {
+    use cli::InstanceCommand as I;
+    match command {
+        Command::Fetch(_) | Command::Pull(_) | Command::Push(_) | Command::Clone(_) => true,
+        Command::Status(args) => args.fetch,
+        Command::Diff(args) => args.remote,
+        Command::New(args) => args.push,
+        Command::Mv(args) => args.push,
+        Command::Rm(args) => args.push,
+        Command::Comment(_) => true,
+        Command::Instance(I::Fetch(_) | I::Pull(_) | I::Push(_) | I::Clone(_)) => true,
+        _ => false,
+    }
+}
+
+/// For a command that stops between pages, the first Ctrl-C asks it to
+/// stop at the next page boundary, so no page file is left out of step with
+/// what `.state.db` records for it; the second quits at once, for a command
+/// stuck waiting. Any other command quits on the first.
+fn watch_interrupts(graceful: bool) {
+    tokio::spawn(async move {
         while tokio::signal::ctrl_c().await.is_ok() {
-            if confed_core::interrupt::requested() {
+            if !graceful || confed_core::interrupt::requested() {
                 eprintln!("confed: interrupted");
                 std::process::exit(confed_core::ExitCode::Interrupted.as_i32());
             }

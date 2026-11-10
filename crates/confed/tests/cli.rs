@@ -2538,6 +2538,29 @@ fn interrupt_after(mut cmd: Command, after: std::time::Duration) -> (Output, std
     (output, sent.elapsed())
 }
 
+/// A command with no page loop to stop in quits on the first Ctrl-C, as
+/// before confed caught it; it does not run on to the end.
+#[cfg(unix)]
+#[tokio::test]
+async fn ctrl_c_ends_a_command_that_cannot_stop_between_pages() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/user/current"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "username": "tester", "displayName": "Test" }))
+                .set_delay(std::time::Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = confed_authed(dir.path(), &["whoami", "--json"]);
+    cmd.args(["--base-url", &server.uri(), "--flavor", "dc"]);
+    let (output, took) = interrupt_after(cmd, std::time::Duration::from_millis(500));
+    assert_eq!(exit_code(&output), 130, "stderr: {}", stderr(&output));
+    assert!(took < std::time::Duration::from_secs(3), "it did not wait for the answer: {took:?}");
+}
+
 /// A pull stops after the page in hand, and says what it did: the envelope
 /// carries the outcome, marked interrupted, with exit 130.
 #[cfg(unix)]

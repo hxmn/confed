@@ -118,7 +118,7 @@ quietly rather than failing.
 | 8 | `PARTIAL` | Some operations succeeded and some failed; the details are in `result`. |
 | 9 | `UNSUPPORTED` | The operation does not exist on this Confluence flavor or release: a Data Center older than an `admin` command needs, creating a user on Cloud, `--role` on a site without space roles. |
 | 10 | `DIFFERENCES` | Differences exist. Only ever produced by `--exit-code`, and deliberately outside the error range. |
-| 130 | `INTERRUPTED` | Stopped by Ctrl-C. The first Ctrl-C lets the page in hand finish and be recorded, then stops: the result lists what was done and says `"interrupted": true`. A second quits at once. Run the command again to carry on. |
+| 130 | `INTERRUPTED` | Stopped by Ctrl-C. `fetch`, `pull`, `push`, `clone`, the `instance` fetch, pull, push and clone, and commands with `--push` stop between pages: the first Ctrl-C lets the page in hand finish and be recorded, the result lists what was done and says `"interrupted": true`, and a second Ctrl-C quits at once. Every other command quits on the first. Run the command again to carry on. |
 
 Two behaviours are worth knowing because they are not obvious from the table:
 
