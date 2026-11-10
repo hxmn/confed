@@ -21,6 +21,7 @@ pub mod open;
 pub mod resolve;
 pub mod rm;
 pub mod search;
+pub mod space;
 pub mod spaces;
 pub mod status;
 pub mod sync_cmds;

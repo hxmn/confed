@@ -44,6 +44,31 @@ pub trait ConfluenceClient: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The space with this key, whatever its status — current, archived or
+    /// personal — or `None` when there is none this account can see.
+    async fn find_space(&self, key: &str) -> ApiResult<Option<Space>> {
+        match self.get_space(key).await {
+            Ok(space) => Ok(Some(space)),
+            Err(crate::error::ApiError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Create a space, with its home page, and return it as the server now
+    /// has it. A refusal confed can name is
+    /// [`crate::error::ApiError::SpaceRefused`].
+    async fn create_space(&self, new: &NewSpace) -> ApiResult<Space> {
+        let _ = new;
+        Err(crate::error::ApiError::unsupported(self.flavor(), "create a space"))
+    }
+
+    /// Whether this account may create spaces, asked without creating one:
+    /// [`Probe::Available`] yes, [`Probe::Unavailable`] no, [`Probe::Unknown`]
+    /// when the server would not say.
+    async fn probe_create_space(&self) -> ApiResult<Probe> {
+        Ok(Probe::Unknown)
+    }
+
     /// Every page in the space, bodies excluded.
     async fn list_pages(&self, space: &SpaceId) -> ApiResult<Vec<PageSummary>>;
 

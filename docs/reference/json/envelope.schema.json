@@ -54,6 +54,7 @@
             "open",
             "search",
             "spaces",
+            "space",
             "user",
             "admin",
             "whoami",
@@ -131,6 +132,10 @@
             "UNSUPPORTED",
             "DIFFERENCES"
           ]
+        },
+        "kind": {
+          "type": "string",
+          "description": "What was refused, when confed names it: `key_taken`, `invalid_key`, `no_permission`, `name_required`, `dir_not_empty`, `clone_failed` (from `space create` and `instance create`). Absent otherwise; `code` still gives the exit code's name."
         },
         "message": {
           "type": "string"

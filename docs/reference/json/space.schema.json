@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/space.schema.json",
+  "title": "confed space result",
+  "description": "The `result` of `confed space create … --json`, which creates a space and its home page and nothing else. A refusal is in the envelope's `errors`, with a `kind`: `invalid_key` and `name_required` (exit 2), `key_taken` and `no_permission` (exit 7). `confed instance create` gives the same `space`, `checks` and `planned`, in instance.schema.json.",
+  "type": "object",
+  "required": [
+    "action"
+  ],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "create"
+      ]
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "True: nothing that changes the server was sent."
+    },
+    "cancelled": {
+      "type": "boolean",
+      "description": "The confirmation was declined; nothing was created."
+    },
+    "space": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/created_space"
+        },
+        {
+          "$ref": "#/$defs/planned_space"
+        }
+      ]
+    },
+    "checks": {
+      "$ref": "#/$defs/checks"
+    },
+    "planned": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "With `dry_run`: what would be done, one sentence per step."
+    }
+  },
+  "$defs": {
+    "created_space": {
+      "type": "object",
+      "description": "A space as the server has it after the create.",
+      "required": [
+        "key",
+        "id",
+        "name",
+        "home_page_id",
+        "url"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The server's numeric id, as a string like every confed id."
+        },
+        "name": {
+          "type": "string"
+        },
+        "home_page_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The home page the server made with the space."
+        },
+        "url": {
+          "type": "string",
+          "description": "The space in the browser: `…/display/KEY` on Data Center, `…/spaces/KEY` on Cloud."
+        }
+      }
+    },
+    "planned_space": {
+      "type": "object",
+      "description": "`--dry-run`: the space that would be created.",
+      "required": [
+        "key",
+        "name",
+        "private"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "private": {
+          "type": "boolean"
+        }
+      }
+    },
+    "checks": {
+      "type": "object",
+      "description": "`--dry-run`: what the server said before anything was created. Each check that fails is also an entry in the envelope's `errors`, with its `kind`, and the exit code is 7.",
+      "required": [
+        "key_free",
+        "may_create"
+      ],
+      "properties": {
+        "key_free": {
+          "type": "boolean",
+          "description": "False when a space has the key: current, archived or personal (`kind: key_taken`). A space this account cannot see is only found by the create itself."
+        },
+        "taken_by": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "may_create": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether this account may create spaces (`kind: no_permission` when false); null when the server would not say. Data Center has no API for it, so confed sends a create with the key `!`, which no server accepts, and reads whether it was refused for the permission or for the key."
+        }
+      }
+    }
+  }
+}

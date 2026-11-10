@@ -164,6 +164,11 @@ pub enum Command {
     /// List spaces visible to you.
     Spaces(SpacesArgs),
 
+    /// Create a space on the server. `confed instance create` also clones it
+    /// into an instance root.
+    #[command(subcommand)]
+    Space(SpaceCommand),
+
     /// Find people, for writing mentions.
     #[command(subcommand)]
     User(UserCommand),
@@ -228,6 +233,7 @@ impl Command {
             Command::Open(_) => "open",
             Command::Search(_) => "search",
             Command::Spaces(_) => "spaces",
+            Command::Space(_) => "space",
             Command::User(_) => "user",
             Command::Admin(_) => "admin",
             Command::Whoami(_) => "whoami",
@@ -890,6 +896,45 @@ pub struct SpacesArgs {
     pub limit: usize,
 }
 
+#[derive(Subcommand, Debug)]
+pub enum SpaceCommand {
+    /// Create a space, with its home page, and nothing else: no workspace is
+    /// made (`confed clone KEY` makes one).
+    Create(SpaceCreateArgs),
+}
+
+impl SpaceCommand {
+    pub fn action(&self) -> &'static str {
+        match self {
+            SpaceCommand::Create(_) => "create",
+        }
+    }
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SpaceCreateArgs {
+    /// The new space's key: uppercase letters A-Z and digits, up to 255.
+    #[arg(value_name = "KEY")]
+    pub key: String,
+
+    /// The space's name. Asked for on a terminal; required otherwise.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// A plain-text description.
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// Only you can see the space.
+    #[arg(long)]
+    pub private: bool,
+
+    /// Check the key is free and that you may create spaces, then say what
+    /// would be done, changing nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 #[derive(Args, Debug)]
 pub struct ConfigArgs {
     /// Show every resolved value and where it came from.
@@ -996,6 +1041,9 @@ pub enum InstanceCommand {
     /// Clone the spaces that are not cloned yet, in parallel, into ROOT/KEY.
     Clone(InstanceCloneArgs),
 
+    /// Create a space on the server and clone it into ROOT/KEY.
+    Create(InstanceCreateArgs),
+
     /// Register one space's workspace.
     Add(InstanceAddArgs),
 
@@ -1044,6 +1092,7 @@ impl InstanceCommand {
             InstanceCommand::Adopt(_) => "adopt",
             InstanceCommand::Spaces(_) => "spaces",
             InstanceCommand::Clone(_) => "clone",
+            InstanceCommand::Create(_) => "create",
             InstanceCommand::Add(_) => "add",
             InstanceCommand::Remove(_) => "remove",
             InstanceCommand::Status(_) => "status",
@@ -1159,6 +1208,20 @@ pub struct InstanceCloneArgs {
     /// Skip writing comment sidecars.
     #[arg(long)]
     pub no_comments: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstanceCreateArgs {
+    #[command(flatten)]
+    pub space: SpaceCreateArgs,
+
+    /// Only create the space; `confed instance clone KEY` clones it later.
+    #[arg(long)]
+    pub no_clone: bool,
+
+    /// Do not generate CLAUDE.md and AGENTS.md in the new workspace.
+    #[arg(long)]
+    pub no_agent_docs: bool,
 }
 
 #[derive(Args, Debug)]

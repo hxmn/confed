@@ -1,8 +1,12 @@
 //! Errors and the exit-code contract. Agents script against these numbers, so
 //! the mapping is part of the public interface and is covered by tests.
 
-use confed_api::ApiError;
+use confed_api::{ApiError, SpaceRefusal};
 use thiserror::Error;
+
+/// What a space key may be, on both flavors: said by every refusal of one.
+pub const SPACE_KEY_RULE: &str =
+    "a space key is 1 to 255 characters, uppercase letters A-Z and digits 0-9 only (DOCS, ENG2)";
 
 pub type Result<T> = std::result::Result<T, ConfedError>;
 
@@ -78,6 +82,11 @@ pub enum ConfedError {
     #[error("{0}")]
     Unsupported(String),
 
+    /// A refusal confed names, for `errors[].kind` in `--json`: a space key
+    /// that is taken, a missing permission. Its exit code is one of the above.
+    #[error("{message}")]
+    Refused { kind: &'static str, exit: ExitCode, message: String, hint: Option<String> },
+
     #[error("{0}")]
     Other(String),
 
@@ -112,6 +121,7 @@ impl ConfedError {
             ConfedError::State { .. } => ExitCode::State,
             ConfedError::Partial(_) => ExitCode::Partial,
             ConfedError::Unsupported(_) => ExitCode::Unsupported,
+            ConfedError::Refused { exit, .. } => *exit,
             ConfedError::Other(_)
             | ConfedError::Sqlite(_)
             | ConfedError::Io { .. }
@@ -129,13 +139,32 @@ impl ConfedError {
     /// The actionable next step, when there is one.
     pub fn hint(&self) -> Option<&str> {
         match self {
-            ConfedError::Usage { hint, .. } | ConfedError::State { hint, .. } => hint.as_deref(),
+            ConfedError::Usage { hint, .. }
+            | ConfedError::State { hint, .. }
+            | ConfedError::Refused { hint, .. } => hint.as_deref(),
             ConfedError::Conflict(_) => Some("run `confed pull` to merge, then retry"),
             ConfedError::Auth(_) => {
                 Some("run `confed init` to refresh credentials, or check CONFED_TOKEN")
             }
             _ => None,
         }
+    }
+
+    /// The name of this refusal, when it has one (`key_taken`).
+    pub fn kind(&self) -> Option<&'static str> {
+        match self {
+            ConfedError::Refused { kind, .. } => Some(kind),
+            _ => None,
+        }
+    }
+
+    pub fn refused(
+        kind: &'static str,
+        exit: ExitCode,
+        message: impl Into<String>,
+        hint: Option<String>,
+    ) -> Self {
+        ConfedError::Refused { kind, exit, message: message.into(), hint }
     }
 
     pub fn usage(message: impl Into<String>) -> Self {
@@ -196,6 +225,23 @@ impl From<ApiError> for ConfedError {
                         .into(),
                 ),
             },
+            ApiError::SpaceRefused { reason, message } => {
+                let (exit, hint) = match reason {
+                    SpaceRefusal::InvalidKey => (ExitCode::Usage, Some(SPACE_KEY_RULE.to_string())),
+                    SpaceRefusal::KeyTaken => (
+                        ExitCode::State,
+                        Some("choose another key; archived and personal spaces keep theirs".into()),
+                    ),
+                    SpaceRefusal::NoPermission => (
+                        ExitCode::State,
+                        Some(
+                            "ask a Confluence administrator for the permission to create spaces"
+                                .into(),
+                        ),
+                    ),
+                };
+                ConfedError::Refused { kind: reason.as_str(), exit, message, hint }
+            }
             ApiError::Server { status, body } => {
                 ConfedError::Other(format!("server returned {status}: {body}"))
             }

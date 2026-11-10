@@ -7,6 +7,7 @@
 //! the single-space command in each workspace, in this process, over one
 //! client: one credential, and one request ceiling for all of them.
 
+mod create;
 mod fanout;
 mod locate;
 mod mv;
@@ -154,6 +155,7 @@ pub async fn run(
         I::Init(_) | I::Adopt(_) => unreachable!("handled above"),
         I::Spaces(args) => setup::spaces(ctx, args, connection).await?,
         I::Clone(args) => setup::clone(ctx, args, need(connection)?).await?,
+        I::Create(args) => create::run(ctx, args, need(connection)?).await?,
         I::Add(args) => setup::add(ctx, args)?,
         I::Remove(args) => setup::remove(ctx, args)?,
         I::Status(args) => fanout::status(ctx, args, connection).await?,
@@ -415,6 +417,7 @@ pub fn report(ctx: &Context, runs: Vec<SpaceRun>, extra: Value) -> Output {
                 if !ok && space_errors.is_empty() {
                     space_errors.push(ErrorEntry {
                         code: output.exit.name(),
+                        kind: None,
                         message: format!("finished with exit code {}", output.exit.as_i32()),
                         hint: None,
                     });

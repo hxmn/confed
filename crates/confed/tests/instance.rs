@@ -56,6 +56,12 @@ struct World {
     move_requests: usize,
     /// Background move tasks: page, target, position, polls until done.
     tasks: BTreeMap<String, (String, String, String, u32)>,
+    /// Spaces that are archived: only `status=archived` lists them.
+    archived: Vec<String>,
+    /// The token lacks the global "Create Space" permission.
+    no_create_permission: bool,
+    /// Spaces created through the REST API, private ones marked.
+    created: Vec<(String, bool)>,
 }
 
 /// Confluence's check against forged form submissions.
@@ -194,8 +200,9 @@ impl World {
     fn space(&self, key: &str) -> Value {
         let (numeric, name, home) = &self.spaces[key];
         let kind = if key.starts_with('~') { "personal" } else { "global" };
+        let status = if self.archived.iter().any(|a| a == key) { "archived" } else { "current" };
         json!({
-            "id": numeric, "key": key, "name": name, "type": kind, "status": "current",
+            "id": numeric, "key": key, "name": name, "type": kind, "status": status,
             "homepage": home.as_ref().map(|h| json!({ "id": h, "type": "page", "title": self.pages[h].title })),
         })
     }
@@ -237,8 +244,10 @@ impl Respond for Confluence {
         }
         // A probe names a page or target that cannot exist: it cannot write.
         let form = if method == "POST" { parse_form(&req.body) } else { BTreeMap::new() };
-        let probe =
-            path.ends_with("/move/append/0") || form.get("pageId").is_some_and(|p| p == "0");
+        let sent: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        let probe = path.ends_with("/move/append/0")
+            || form.get("pageId").is_some_and(|p| p == "0")
+            || (path.starts_with("/rest/api/space") && sent["key"] == "!");
         if method != "GET" && !probe {
             world.writes.push(format!("{method} {path}"));
         }
@@ -256,15 +265,63 @@ impl Respond for Confluence {
                 _ => error(404, "No user found"),
             },
             ("GET", ["rest", "api", "space"]) => {
-                if query.get("status").map(String::as_str) == Some("archived") {
-                    return ok(listing(vec![]));
-                }
+                let archived = query.get("status").map(String::as_str) == Some("archived");
+                let listed = |k: &String| world.archived.contains(k) == archived;
                 let spaces = match query.get("spaceKey") {
-                    Some(key) if world.spaces.contains_key(key) => vec![world.space(key)],
+                    Some(key) if world.spaces.contains_key(key) && listed(key) => {
+                        vec![world.space(key)]
+                    }
                     Some(_) => vec![],
-                    None => world.spaces.keys().map(|k| world.space(k)).collect(),
+                    None => world.spaces.keys().filter(|k| listed(k)).map(|k| world.space(k)).collect(),
                 };
                 ok(listing(spaces))
+            }
+            ("GET", ["rest", "api", "space", key]) => match world.spaces.contains_key(*key) {
+                true => ok(world.space(key)),
+                false => error(404, &format!("No space with key : {key}")),
+            },
+            // As a 9.5 server checks a new space: permission, then key, then name.
+            ("POST", ["rest", "api", "space"] | ["rest", "api", "space", "_private"]) => {
+                let refuse = |status: u16, authorized: bool, message: &str| {
+                    ResponseTemplate::new(status).set_body_json(json!({
+                        "statusCode": status,
+                        "data": { "authorized": authorized, "valid": false, "allowedInReadOnlyMode": true,
+                                  "errors": [{ "message": { "translation": message, "args": [] } }],
+                                  "successful": false },
+                        "message": "com.atlassian.confluence.api.service.exceptions.ServiceException",
+                    }))
+                };
+                if world.no_create_permission {
+                    return refuse(403, false, "No permission to create spaces");
+                }
+                let key = sent["key"].as_str().unwrap_or_default().to_string();
+                if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric()) {
+                    return refuse(400, true, "Invalid space key");
+                }
+                if world.spaces.keys().any(|k| k.eq_ignore_ascii_case(&key)) {
+                    return refuse(400, true, &format!("A space already exists with key {key}"));
+                }
+                let name = sent["name"].as_str().unwrap_or_default().to_string();
+                if name.is_empty() {
+                    return refuse(400, true, "Space name is required");
+                }
+                let numeric = 600 + world.created.len() as u64;
+                let home = format!("{}", 9001 + world.created.len());
+                world.spaces.insert(key.clone(), (numeric, name.clone(), Some(home.clone())));
+                world.pages.insert(
+                    home,
+                    Page {
+                        title: format!("{name} Home"),
+                        space: key.clone(),
+                        parent: None,
+                        version: 1,
+                        body: "<p>Welcome to your new space.</p>".into(),
+                    },
+                );
+                world.created.push((key.clone(), segments.len() == 4));
+                // The answer names the home page only as a link to it.
+                ok(json!({ "id": numeric, "key": key, "name": name, "type": "global",
+                           "status": "current", "_expandable": { "homepage": "/rest/api/content/x" } }))
             }
             ("GET", ["rest", "api", "content"]) => {
                 let key = query.get("spaceKey").cloned().unwrap_or_default();
@@ -1522,4 +1579,217 @@ async fn several_trees_move_one_after_the_other_through_the_web_action() {
     for id in ["1002", "1003", "1004"] {
         assert_eq!(world.pages[id].space, "ENG", "{id}");
     }
+}
+
+// -------------------------------------------------------- creating spaces ---
+
+/// The kinds in an envelope's `errors`, in order.
+fn kinds(env: &Value) -> Vec<String> {
+    env["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap_or("-").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_new_space_is_created_cloned_registered_and_listed_after_a_dry_run() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let writes = confluence.world().writes.len();
+
+    let create =
+        ["instance", "create", "NOTES", "--name", "Заметки", "--description", "Shared notes"];
+    let out = run(root.path(), &[&create[..], &["--dry-run", "--json"]].concat());
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let result = &env["result"];
+    assert_eq!(result["action"], "create");
+    assert_eq!(result["dry_run"], true);
+    assert_eq!(result["checks"]["key_free"], true);
+    assert_eq!(result["checks"]["may_create"], true, "the probe tells a key refusal from a 403");
+    assert_eq!(result["dir"], "NOTES");
+    assert_eq!(result["planned"].as_array().unwrap().len(), 3);
+    assert!(!root.path().join("NOTES").exists());
+    assert!(confluence.world().created.is_empty());
+    assert_eq!(confluence.world().writes.len(), writes, "a dry run writes nothing");
+
+    let out = run(root.path(), &[&create[..], &["-y", "--json"]].concat());
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let result = &env["result"];
+    assert_eq!(result["space"]["key"], "NOTES");
+    assert_eq!(result["space"]["id"], "600");
+    assert_eq!(result["space"]["name"], "Заметки");
+    assert_eq!(result["space"]["home_page_id"], "9001", "read back: the create answer omits it");
+    assert_eq!(result["space"]["url"], format!("{}/display/NOTES", server.uri()));
+    assert_eq!(result["cloned"], json!({ "dir": "NOTES", "pages": 1 }));
+    assert_eq!(confluence.world().created, [("NOTES".to_string(), false)]);
+    assert!(root.path().join("NOTES/Заметки Home.md").exists());
+    assert!(read(root.path(), "CLAUDE.md").contains("| `NOTES` | `NOTES/` |"));
+    assert!(read(root.path(), "NOTES/CLAUDE.md").contains("**NOTES**"));
+
+    let out = run(root.path(), &["instance", "status", "--space", "NOTES", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let notes = &env["result"]["spaces"][0];
+    assert_eq!(notes["space_key"], "NOTES");
+    assert_eq!(notes["result"]["clean"], true, "{notes}");
+
+    // A private space goes to `_private`; --no-clone leaves the root alone.
+    let out = run(
+        root.path(),
+        &["instance", "create", "PRIV", "--name", "Private", "--private", "--no-clone", "--json"],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(env["result"]["cloned"], Value::Null);
+    assert_eq!(confluence.world().created[1], ("PRIV".to_string(), true));
+    assert!(!root.path().join("PRIV").exists());
+    assert!(!read(root.path(), "CLAUDE.md").contains("PRIV"));
+}
+
+#[tokio::test]
+async fn a_taken_key_and_a_missing_permission_are_exit_7_each_with_its_kind() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    {
+        let mut world = confluence.world();
+        world.spaces.insert("OLD".into(), (504, "Old Notes".into(), None));
+        world.archived.push("OLD".into());
+    }
+    let writes = confluence.world().writes.len();
+
+    for (key, taken_by) in [("OLD", "archived space"), ("DOCS", "space"), (PERSONAL, "personal")] {
+        let out =
+            run(root.path(), &["instance", "create", key, "--name", "X", "--dry-run", "--json"]);
+        assert_eq!(code(&out), 7, "{key}: {}", stderr(&out));
+        let env = envelope(&out, "instance");
+        assert_eq!(kinds(&env), ["key_taken"], "{key}");
+        assert_eq!(env["errors"][0]["code"], "STATE");
+        assert!(env["errors"][0]["message"].as_str().unwrap().contains(taken_by), "{env}");
+        assert_eq!(env["result"]["checks"]["key_free"], false, "the plan is still shown");
+    }
+
+    confluence.world().no_create_permission = true;
+    let out =
+        run(root.path(), &["instance", "create", "NEW", "--name", "X", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 7, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(kinds(&env), ["no_permission"]);
+    assert_eq!(env["result"]["checks"]["may_create"], false);
+
+    let out =
+        run(root.path(), &["instance", "create", "OLD", "--name", "X", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 7);
+    assert_eq!(kinds(&envelope(&out, "instance")), ["key_taken", "no_permission"]);
+    assert_eq!(confluence.world().writes.len(), writes, "dry runs write nothing");
+
+    // For real, the server's refusal is read the same way.
+    let out = run(root.path(), &["instance", "create", "NEW", "--name", "X", "-y", "--json"]);
+    assert_eq!(code(&out), 7, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(kinds(&env), ["no_permission"]);
+    assert!(env["errors"][0]["message"].as_str().unwrap().contains("Create Space"));
+    assert!(!root.path().join("NEW").exists());
+
+    // A taken key is refused before anything is sent.
+    confluence.world().no_create_permission = false;
+    let out = run(root.path(), &["instance", "create", "OLD", "--name", "X", "-y", "--json"]);
+    assert_eq!(code(&out), 7);
+    assert_eq!(kinds(&envelope(&out, "instance")), ["key_taken"]);
+    assert!(confluence.world().created.is_empty());
+}
+
+#[tokio::test]
+async fn a_bad_key_or_a_missing_name_is_exit_2_before_the_server_is_asked() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let requests = confluence.world().requests;
+
+    for (args, kind, says) in [
+        (&["NO-TES", "--name", "X"][..], "invalid_key", "A-Z"),
+        (&["notes", "--name", "X"], "invalid_key", "did you mean NOTES"),
+        (&["NOTES"], "name_required", "--name"),
+        (&["NOTES", "--name", " "], "name_required", "--name"),
+    ] {
+        let out = run(root.path(), &[&["instance", "create"][..], args, &["--json"]].concat());
+        assert_eq!(code(&out), 2, "{args:?}: {}", stderr(&out));
+        let env = envelope(&out, "instance");
+        assert_eq!(kinds(&env), [kind], "{args:?}");
+        assert_eq!(env["errors"][0]["code"], "USAGE");
+        let text = format!("{} {}", env["errors"][0]["message"], env["errors"][0]["hint"]);
+        assert!(text.contains(says), "{args:?}: {text}");
+    }
+    // A long key is refused with the flavor's limit.
+    let long = "A".repeat(256);
+    let out = run(root.path(), &["instance", "create", &long, "--name", "X", "--json"]);
+    assert_eq!(code(&out), 2);
+    assert!(envelope(&out, "instance")["errors"][0]["message"].as_str().unwrap().contains("255"));
+    assert_eq!(confluence.world().requests, requests, "nothing was asked of the server");
+}
+
+#[tokio::test]
+async fn a_clone_that_fails_after_the_create_says_so_and_instance_clone_finishes_it() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    // The new space's content refuses this token, so the clone fails.
+    confluence.world().locked_out.push("NOTES".into());
+
+    let out = run(root.path(), &["instance", "create", "NOTES", "--name", "Notes", "-y", "--json"]);
+    assert_eq!(code(&out), 8, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(kinds(&env), ["clone_failed"]);
+    assert_eq!(env["result"]["space"]["key"], "NOTES", "the space is reported");
+    assert_eq!(env["result"]["cloned"], Value::Null);
+    let error = &env["errors"][0];
+    assert!(error["message"].as_str().unwrap().contains("was created on the server"), "{error}");
+    assert!(error["hint"].as_str().unwrap().contains("confed instance clone NOTES"), "{error}");
+    assert_eq!(confluence.world().created.len(), 1);
+
+    // Asked again, the create refuses: the key is now taken.
+    let out = run(root.path(), &["instance", "create", "NOTES", "--name", "Notes", "--json"]);
+    assert_eq!(code(&out), 7);
+
+    confluence.world().locked_out.clear();
+    let out = run(root.path(), &["instance", "clone", "NOTES", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(env["result"]["spaces"][0]["status"], "cloned", "{env}");
+    assert_eq!(env["result"]["spaces"][0]["pages"], 1);
+    assert!(root.path().join("NOTES/Notes Home.md").exists());
+    let out = run(root.path(), &["instance", "status", "--space", "NOTES", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(confluence.world().created.len(), 1, "never created twice");
+}
+
+#[tokio::test]
+async fn space_create_only_creates_the_space() {
+    let (server, confluence) = server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let flags = ["--base-url", &server.uri(), "--flavor", "dc", "--token", TOKEN, "--json"];
+
+    let out = run(
+        dir.path(),
+        &[&["space", "create", "SOLO", "--name", "Solo", "--dry-run"][..], &flags].concat(),
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "space");
+    assert_eq!(env["result"]["dry_run"], true);
+    assert!(confluence.world().created.is_empty());
+
+    let out =
+        run(dir.path(), &[&["space", "create", "SOLO", "--name", "Solo"][..], &flags].concat());
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "space");
+    assert_eq!(env["result"]["action"], "create");
+    assert_eq!(env["result"]["space"]["key"], "SOLO");
+    assert_eq!(env["result"]["space"]["home_page_id"], "9001");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "no workspace is made");
+
+    let out =
+        run(dir.path(), &[&["space", "create", "SOLO", "--name", "Solo"][..], &flags].concat());
+    assert_eq!(code(&out), 7);
+    assert_eq!(kinds(&envelope(&out, "space")), ["key_taken"]);
 }

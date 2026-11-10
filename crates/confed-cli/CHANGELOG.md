@@ -20,6 +20,42 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-10
+
+Starting a space used to mean leaving confed: the browser, or `POST /rest/api/space`
+with a token of your own. An agent in an instance root could do neither, since it must
+not read the root's credential. `confed instance create` does it with that credential,
+and clones the new space as well.
+
+### Added
+
+- **`confed instance create KEY --name …`** creates a space with the root's shared
+  credential, clones it into `ROOT/KEY` with its home page as `instance clone KEY` does,
+  registers it and lists it in the root's `CLAUDE.md`. `--description` is plain text,
+  `--private` makes a space only its creator sees, `--no-clone` only creates it. The
+  result is `space` (`key`, `id`, `name`, `home_page_id`, `url`) and `cloned` (`dir`,
+  `pages`). On a terminal it asks first, unless `--yes`.
+- **`confed space create KEY --name …`** creates the space and nothing else, with a
+  workspace's credential or `--base-url`/`--token`. `docs/reference/json/space.schema.json`
+  describes its result.
+- **`--dry-run`** checks the key, asks whether a space has it (archived and personal
+  spaces included) and whether you may create spaces, prints the plan and writes nothing.
+  Cloud says whether you may in `user/current?expand=operations`. Data Center has no API
+  for it, so confed sends a create with the key `!`, which no server accepts, and tells a
+  refused permission (403) from a refused key (400).
+- **Errors can name what was refused**: `errors[].kind`, beside `code`. The space
+  commands use `invalid_key` and `name_required` (exit 2), `key_taken`, `no_permission`
+  and `dir_not_empty` (exit 7), and `clone_failed` (exit 8). The JSON envelope schema
+  lists the field. A refused permission is 7, not 3, which is still a rejected credential.
+  The generated `CLAUDE.md` says so.
+
+### Fixed
+
+- **A clone that stopped before its first fetch could not be finished.** `instance clone`
+  skipped the workspace it had left as "already cloned", with no pages in it. A workspace
+  that was made but never fetched is now cloned again. This is what finishes an
+  `instance create` whose clone failed after the space was created.
+
 ## [0.16.0] - 2026-11-02
 
 Who may work in a space used to be set in Confluence's administration screens, one
@@ -1103,7 +1139,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/hxmn/confed/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/hxmn/confed/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/hxmn/confed/compare/v0.14.1...v0.15.0
 [0.14.1]: https://github.com/hxmn/confed/compare/v0.14.0...v0.14.1

@@ -395,6 +395,31 @@ impl Http {
         self.send_json(reqwest::Method::POST, path, body, false).await
     }
 
+    /// POST JSON once and keep whatever came back, success or not: for a
+    /// write that must not be repeated (a retry after a lost answer would
+    /// find its own space and call the key taken) and whose refusals the
+    /// caller reads itself.
+    pub async fn post_json_answer<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> ApiResult<WebAnswer> {
+        let url = self.url(path)?;
+        let ctx = format!("POST {path}");
+        let payload = serde_json::to_vec(body)
+            .map_err(|e| ApiError::Decode { context: ctx.clone(), source: e })?;
+        tracing::trace!(target: "confed::http", context = %ctx,
+            body = %String::from_utf8_lossy(&payload), "request");
+        self.send_web(|| {
+            self.request(reqwest::Method::POST, url.clone())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::ACCEPT, "application/json")
+                .header("X-Atlassian-Token", "no-check")
+                .body(payload.clone())
+        })
+        .await
+    }
+
     /// PUT with no body, as Data Center's state-changing admin endpoints take it
     /// (`…/disable`, a group membership).
     pub async fn put_empty(&self, path: &str) -> ApiResult<()> {

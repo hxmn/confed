@@ -161,3 +161,90 @@ mod tests {
         assert_eq!(space_key_from_display_url(""), None);
     }
 }
+
+// ------------------------------------------------------- space creation ---
+
+/// What a refusal to create a space says, in the server's words: the
+/// validation messages Data Center lists (`data.errors[].message.translation`),
+/// else `message` or `errors[].title`, else the body as it came.
+pub fn server_message(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.trim().chars().take(400).collect();
+    };
+    let listed: Vec<String> = value["data"]["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(value["errors"].as_array().into_iter().flatten())
+        .filter_map(|e| {
+            e["message"]["translation"]
+                .as_str()
+                .or_else(|| e["message"].as_str())
+                .or_else(|| e["title"].as_str())
+                .or_else(|| e["detail"].as_str())
+        })
+        .map(str::to_string)
+        .collect();
+    if !listed.is_empty() {
+        return listed.join("; ");
+    }
+    value["message"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| body.trim().chars().take(400).collect())
+}
+
+/// Why a server refused to create a space, when its answer says: 403 is a
+/// missing permission on both flavors, 409 a taken key, and a 400 says which
+/// in its message. `None` for a refusal of another kind (a name too long, a
+/// server problem), which the caller reports as the server put it.
+pub fn space_refusal(status: u16, body: &str) -> Option<crate::types::SpaceRefusal> {
+    use crate::types::SpaceRefusal as R;
+    let said = server_message(body).to_ascii_lowercase();
+    let unauthorized = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v["data"]["authorized"].as_bool())
+        == Some(false);
+    match status {
+        403 => Some(R::NoPermission),
+        409 => Some(R::KeyTaken),
+        400 if unauthorized || said.contains("permission") => Some(R::NoPermission),
+        400 if ["already exist", "exists", "taken", "in use", "not unique"]
+            .iter()
+            .any(|w| said.contains(w)) =>
+        {
+            Some(R::KeyTaken)
+        }
+        400 if said.contains("key") => Some(R::InvalidKey),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod space_tests {
+    use super::*;
+    use crate::types::SpaceRefusal as R;
+
+    #[test]
+    fn refusals_are_read_from_status_and_message() {
+        let dc = |m: &str| {
+            format!(
+                r#"{{"statusCode":400,"data":{{"authorized":true,"valid":false,
+                "errors":[{{"message":{{"translation":"{m}","args":[]}}}}]}},
+                "message":"com.atlassian.confluence.api.service.exceptions.BadRequestException"}}"#
+            )
+        };
+        assert_eq!(
+            space_refusal(400, &dc("A space with key DOCS already exists")),
+            Some(R::KeyTaken)
+        );
+        assert_eq!(space_refusal(400, &dc("Invalid space key")), Some(R::InvalidKey));
+        assert_eq!(space_refusal(403, "{}"), Some(R::NoPermission));
+        assert_eq!(space_refusal(409, "{}"), Some(R::KeyTaken));
+        assert_eq!(space_refusal(400, &dc("Space name is too long")), None);
+        assert_eq!(server_message(&dc("Invalid space key")), "Invalid space key");
+        let unauthorized =
+            r#"{"statusCode":400,"data":{"authorized":false,"valid":false,"errors":[]}}"#;
+        assert_eq!(space_refusal(400, unauthorized), Some(R::NoPermission));
+    }
+}

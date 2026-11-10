@@ -21,6 +21,7 @@ use futures::StreamExt;
 use serde_json::{json, Value};
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 // ---------------------------------------------------------------- init ---
 
@@ -803,8 +804,6 @@ pub async fn clone(
     args: &InstanceCloneArgs,
     connection: Connection,
 ) -> Result<Output> {
-    let instance = ctx.instance()?;
-    let root = instance.root().to_path_buf();
     let client = connection.client(ctx)?;
     // One check up front: a rejected credential fails before any folder exists.
     client.whoami().await.map_err(|e| match e {
@@ -838,6 +837,21 @@ pub async fn clone(
         .filter(|k| !listed.iter().any(|s| s.id.key.eq_ignore_ascii_case(k)))
         .cloned()
         .collect();
+    clone_spaces(ctx, args, &connection, client, chosen, unknown).await
+}
+
+/// Clone `chosen` into the root, and report `unknown` keys as not found: the
+/// second half of `instance clone`, also what `instance create` ends with.
+pub(crate) async fn clone_spaces(
+    ctx: &mut Context,
+    args: &InstanceCloneArgs,
+    connection: &Connection,
+    client: Arc<dyn confed_api::ConfluenceClient>,
+    chosen: Vec<Space>,
+    unknown: Vec<String>,
+) -> Result<Output> {
+    let instance = ctx.instance()?;
+    let root = instance.root().to_path_buf();
 
     // Decide every space before touching any.
     let mut decided: Vec<(Space, String, Plan)> = Vec::new();
@@ -849,16 +863,22 @@ pub async fn clone(
         };
         let dir = root.join(&rel);
         let plan = if dir.join(STATE_DB_FILENAME).exists() {
-            match Workspace::open(&dir).and_then(|ws| Ok((ws.space_key()?, ws.base_url()?))) {
-                Ok((bound, _)) if !bound.eq_ignore_ascii_case(&key) => {
+            let opened = Workspace::open(&dir).and_then(|ws| {
+                let fetched = ws.state().get_meta("last_fetch_at")?.is_some();
+                Ok((ws.space_key()?, ws.base_url()?, fetched))
+            });
+            match opened {
+                Ok((bound, _, _)) if !bound.eq_ignore_ascii_case(&key) => {
                     Plan::Fail(ConfedError::state_with_hint(
                         format!("{rel} is already a workspace for space {bound}"),
                         format!("move it, or leave the space out with --exclude {key}"),
                     ))
                 }
-                Ok((_, Some(url))) if !instance::same_instance(&url, &connection.base_url) => {
+                Ok((_, Some(url), _)) if !instance::same_instance(&url, &connection.base_url) => {
                     Plan::Fail(ConfedError::state(format!("{rel} is a workspace on {url}")))
                 }
+                // Bound but never fetched: a clone that stopped part-way.
+                Ok((_, _, false)) => Plan::Clone { reinit: true },
                 Ok(_) if args.force => Plan::Clone { reinit: true },
                 Ok(_) => Plan::Skip("already cloned"),
                 Err(e) => Plan::Fail(e),
@@ -920,8 +940,8 @@ pub async fn clone(
                     "status": format!("would_{}", if reinit { "reinit" } else { "clone" }),
                 }));
             }
-            Plan::Clone { .. } => match bind(&root.join(&rel), &connection, &space)
-                .and_then(|ws| give_credential(&root, &ws, &connection).map(|own| (ws, own)))
+            Plan::Clone { .. } => match bind(&root.join(&rel), connection, &space)
+                .and_then(|ws| give_credential(&root, &ws, connection).map(|own| (ws, own)))
             {
                 Ok((ws, own)) => {
                     own_credentials |= own;

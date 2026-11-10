@@ -12,6 +12,7 @@
 pub mod v2;
 
 mod admin;
+mod space;
 
 use async_trait::async_trait;
 use confed_api::client::ConfluenceClient;
@@ -268,6 +269,18 @@ impl ConfluenceClient for CloudClient {
             space.status.get_or_insert_with(|| "archived".to_string());
         }
         Ok(spaces)
+    }
+
+    async fn find_space(&self, key: &str) -> ApiResult<Option<Space>> {
+        self.cloud_find_space(key).await
+    }
+
+    async fn create_space(&self, new: &NewSpace) -> ApiResult<Space> {
+        self.cloud_create_space(new).await
+    }
+
+    async fn probe_create_space(&self) -> ApiResult<Probe> {
+        self.cloud_probe_create_space().await
     }
 
     async fn list_pages(&self, space: &SpaceId) -> ApiResult<Vec<PageSummary>> {

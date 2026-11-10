@@ -1904,3 +1904,119 @@ async fn granting_to_a_user_puts_by_their_userkey() {
         .unwrap();
     c.revoke_space_permissions("DOCS", &confed_api::Subject::Anonymous, &ops[..1]).await.unwrap();
 }
+
+// -------------------------------------------------------- creating spaces ---
+
+#[tokio::test]
+async fn a_space_is_created_with_a_plain_description_and_read_back_for_its_home_page() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/api/space"))
+        .and(header("x-atlassian-token", "no-check"))
+        .and(body_json(json!({
+            "key": "NOTES", "name": "Заметки",
+            "description": { "plain": { "value": "Shared notes", "representation": "plain" } },
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 600, "key": "NOTES", "name": "Заметки", "type": "global",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/space/NOTES"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 600, "key": "NOTES", "name": "Заметки", "type": "global", "status": "current",
+            "homepage": { "id": "9001", "type": "page", "title": "Заметки Home" },
+        })))
+        .mount(&server)
+        .await;
+
+    let new = confed_api::NewSpace {
+        key: "NOTES".into(),
+        name: "Заметки".into(),
+        description: Some("Shared notes".into()),
+        private: false,
+    };
+    let space = client(&server).create_space(&new).await.unwrap();
+    assert_eq!(space.id.numeric.as_deref(), Some("600"));
+    assert_eq!(space.homepage_id.as_ref().map(|p| p.as_str()), Some("9001"));
+}
+
+#[tokio::test]
+async fn a_private_space_goes_to_the_private_endpoint_and_refusals_are_named() {
+    use confed_api::SpaceRefusal;
+    let server = MockServer::start().await;
+    let refusal = |status: u16, message: &str| {
+        ResponseTemplate::new(status).set_body_json(json!({
+            "statusCode": status,
+            "data": { "authorized": status != 403, "valid": false,
+                      "errors": [{ "message": { "translation": message, "args": [] } }] },
+            "message": "com.atlassian.confluence.api.service.exceptions.BadRequestException",
+        }))
+    };
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/api/space/_private"))
+        .respond_with(refusal(400, "A space already exists with key DOCS"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/api/space"))
+        .respond_with(refusal(403, "No permission to create spaces"))
+        .mount(&server)
+        .await;
+
+    let mut new = confed_api::NewSpace {
+        key: "DOCS".into(),
+        name: "Docs".into(),
+        description: None,
+        private: true,
+    };
+    let reason = |e: ApiError| match e {
+        ApiError::SpaceRefused { reason, .. } => reason,
+        other => panic!("not a named refusal: {other:?}"),
+    };
+    let e = client(&server).create_space(&new).await.unwrap_err();
+    assert!(e.to_string().contains("already exists"), "{e}");
+    assert_eq!(reason(e), SpaceRefusal::KeyTaken);
+    new.private = false;
+    let e = client(&server).create_space(&new).await.unwrap_err();
+    assert_eq!(reason(e), SpaceRefusal::NoPermission);
+    // The probe sends a key no server takes, and reads the same 403.
+    assert_eq!(client(&server).probe_create_space().await.unwrap(), confed_api::Probe::Unavailable);
+}
+
+#[tokio::test]
+async fn the_permission_probe_reads_a_refused_key_as_allowed_and_an_archived_space_is_found() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/api/space"))
+        .and(body_json(json!({ "key": "!", "name": "confed permission check" })))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "statusCode": 400,
+            "data": { "authorized": true, "valid": false,
+                      "errors": [{ "message": { "translation": "Invalid space key", "args": [] } }] },
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/space/OLD"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": 504, "key": "OLD", "name": "Old Notes", "type": "global", "status": "ARCHIVED",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/space/NEW"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({ "statusCode": 404 })))
+        .mount(&server)
+        .await;
+
+    let dc = client(&server);
+    assert_eq!(dc.probe_create_space().await.unwrap(), confed_api::Probe::Available);
+    let old = dc.find_space("OLD").await.unwrap().unwrap();
+    assert_eq!(old.status.as_deref(), Some("archived"));
+    assert!(dc.find_space("NEW").await.unwrap().is_none());
+}

@@ -370,6 +370,7 @@ confed instance doctor --json
 confed instance search "text" --json     # results name their space, dir and path
 confed instance spaces --remote          # what is cloned, and what is not
 confed instance clone KEY                # clone a missing space; --all for every one
+confed instance create KEY --name "…"    # a new space on the server, cloned into KEY/
 ```
 
 Each prints the usual envelope, with one entry per space in `result.spaces`:
@@ -387,6 +388,34 @@ code when every space failed the same way, and 8 otherwise.
 `--select spaces.*.result.clean`, `--select moved.*.to.path,renamed`. A long command
 shows its progress as JSON lines on stderr with `--progress jsonl`, each with
 `elapsed_ms`. `| head` and the like are safe: confed stops quietly when the pipe closes.
+
+## Creating a space
+
+```bash
+confed instance create NOTES --name "Team Notes" --description "…" --dry-run --json
+confed instance create NOTES --name "Team Notes" --description "…" -y --json
+```
+
+This creates the space with the root's shared credential (never read
+`.confed-instance-session.db` for it), clones it into `NOTES/` with its home page,
+registers it and lists it in this file. `--private` makes a space only you can see;
+`--no-clone` only creates it. `--dry-run` checks the key, that no space has it
+(archived and personal spaces included) and that you may create spaces, and writes
+nothing. The result is `space` (`key`, `id`, `name`, `home_page_id`, `url`) and
+`cloned` (`dir`, `pages`).
+
+A refusal is in `errors`, with a `kind`:
+
+| `kind` | Exit | Meaning |
+|---|---|---|
+| `invalid_key` | 2 | the key is not uppercase letters A-Z and digits, 1 to 255 long |
+| `name_required` | 2 | no `--name` (nothing is prompted under `--json`) |
+| `key_taken` | 7 | a space has the key: current, archived or personal |
+| `no_permission` | 7 | you lack the global permission to create spaces: ask an administrator |
+| `dir_not_empty` | 7 | `KEY/` exists here already |
+| `clone_failed` | 8 | the space **was created**; `confed instance clone KEY` finishes the clone |
+
+After `clone_failed`, never run `instance create` again for that key: the space exists.
 
 ## Moving pages between spaces
 
@@ -446,7 +475,9 @@ After the server has moved the pages, the way back is another `confed instance m
 ## Exit codes
 
 As in every workspace (see its `CLAUDE.md`), plus: 8 when some spaces failed and others
-did not, and 9 when the server cannot move pages between spaces.
+did not, or a new space was created and its clone failed, and 9 when the server cannot
+move pages between spaces. A refused permission (`no_permission`) is 7, never 3: 3 means
+the credential itself was rejected.
 "#,
         flavor = flavor,
     )
@@ -597,12 +628,18 @@ confed user search "name" --json      # people, with the mention to paste
 confed log <page> --json              # server version history
 confed log --json                     # what changed lately anywhere in the space
 confed version --json                 # this build, its schemas, its changelog
+confed space create KEY --name "…" --dry-run --json   # a new space, and nothing else
 ```
 
 Page arguments are paths relative to the current directory, like git's, page ids,
 or the page's URL as the browser shows it; a path that names nothing there is read
 from the workspace root. `--select PATH` prints only part of a `--json` result
 (`--select pages.*.path`), so no script is needed to read it.
+
+`confed space create` makes a space on the server and does not clone it (`confed clone
+KEY` does). From an instance root, use `confed instance create`, which clones it too.
+Its refusals have a `kind` in `errors`: `invalid_key` and `name_required` (exit 2),
+`key_taken` and `no_permission` (exit 7).
 
 `--json` implies `--non-interactive`: confed never prompts and never hangs. Missing
 values fail immediately with exit code 2 and a message naming the flag and the
@@ -641,7 +678,7 @@ binary: reading them needs no network access and no repository checkout.
 | 4 | conflict | run `confed pull`, resolve, then push |
 | 5 | network | retry later |
 | 6 | not found | check the page path or id |
-| 7 | local state problem | dirty files, tampered frontmatter, lock held |
+| 7 | local state problem, or refused as things stand | dirty files, tampered frontmatter, lock held; a taken space key, or no permission to create spaces (`errors[].kind` says which) |
 | 8 | partial success | inspect `result` and `errors` in the JSON |
 | 9 | unsupported on this server | e.g. resolving a page comment on Data Center, or a server without the inline-comment API |
 | 10 | differences exist | only from `--exit-code` |
@@ -907,6 +944,30 @@ mod tests {
             ".state.db",
         ] {
             assert!(doc.contains(required), "agent contract is missing: {required}");
+        }
+    }
+
+    #[test]
+    fn both_contracts_say_how_to_create_a_space_and_what_a_refusal_exits() {
+        let root = render_instance("https://wiki.corp", Flavor::DataCenter, &[]);
+        for required in [
+            "confed instance create NOTES",
+            "--dry-run",
+            "| `key_taken` | 7 |",
+            "| `no_permission` | 7 |",
+            "| `clone_failed` | 8 |",
+            "confed instance clone KEY` finishes",
+            "is 7, never 3",
+        ] {
+            assert!(root.contains(required), "root contract is missing: {required}");
+        }
+        let workspace = render("https://wiki.corp", Flavor::Cloud, "DOCS");
+        for required in [
+            "confed space create KEY",
+            "`no_permission` (exit 7)",
+            "no permission to create spaces",
+        ] {
+            assert!(workspace.contains(required), "workspace contract is missing: {required}");
         }
     }
 

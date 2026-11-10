@@ -333,6 +333,7 @@ pub async fn run(
         output.exit = confed_core::ExitCode::Unsupported;
         return Ok(with_pulled(output.with_errors(vec![crate::output::ErrorEntry {
             code: confed_core::ExitCode::Unsupported.name(),
+            kind: None,
             message: reason,
             hint: Some(
                 "move the pages in the browser instead; then `confed instance pull` brings both \

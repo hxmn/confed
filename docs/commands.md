@@ -19,9 +19,10 @@ same list from the binary itself.
 - Maintenance: [`whoami`](#confed-whoami), [`config`](#confed-config),
   [`doctor`](#confed-doctor), [`export`](#confed-export),
   [`version`](#confed-version), [`completion`](#confed-completion)
-- Administration: [`admin`](#confed-admin) — users, groups, space permissions
+- Administration: [`space create`](#confed-space-create), [`admin`](#confed-admin) —
+  users, groups, space permissions
 - Interactive: [`tui`](#confed-tui)
-- Several spaces: [`instance`](#confed-instance) — init, adopt, spaces, clone, add,
+- Several spaces: [`instance`](#confed-instance) — init, adopt, spaces, clone, create, add,
   remove, status, fetch, pull, push, doctor, mv, locate, tree, search, resume, abort
 
 ## Global flags
@@ -113,7 +114,7 @@ quietly rather than failing.
 | 4 | `CONFLICT` | A version conflict, or an unresolved merge conflict. |
 | 5 | `NETWORK` | Connectivity, TLS, timeout, or rate limiting that survived the retries. |
 | 6 | `NOT_FOUND` | No such page, space, attachment, or comment. |
-| 7 | `STATE` | A local precondition failed: not a workspace, local edits would be clobbered, tool-managed frontmatter was edited, the lock is held, `.session.db` is too permissive. |
+| 7 | `STATE` | A local precondition failed: not a workspace, local edits would be clobbered, tool-managed frontmatter was edited, the lock is held, `.session.db` is too permissive. Also a refusal as things stand on the server: a space key that is taken, no permission to create spaces. |
 | 8 | `PARTIAL` | Some operations succeeded and some failed; the details are in `result`. |
 | 9 | `UNSUPPORTED` | The operation does not exist on this Confluence flavor or release: a Data Center older than an `admin` command needs, creating a user on Cloud, `--role` on a site without space roles. |
 | 10 | `DIFFERENCES` | Differences exist. Only ever produced by `--exit-code`, and deliberately outside the error range. |
@@ -123,6 +124,9 @@ Two behaviours are worth knowing because they are not obvious from the table:
 - **`status` and `pull` exit 4 whenever a page is conflicted**, with or without
   `--exit-code`. A conflict is not a difference to be reported, it is a state that blocks
   pushing.
+- **A refused permission is 7, not 3.** 3 means the credential itself was rejected and
+  `confed init` would fix it; `no_permission` from `space create` means it was accepted
+  and lacks a permission, which a new token would not change.
 - **`resolve` exits 7, not 4, when markers remain.** The file is a local state problem at
   that point: you were asked to edit it and it still has markers in it.
 
@@ -657,6 +661,41 @@ confed spaces
 confed spaces --limit 200 --json | jq -r '.result.spaces[] | "\(.key)\t\(.name)"'
 ```
 
+## confed space create
+
+```bash
+confed space create NOTES --name "Team Notes" --description "…" --dry-run --json
+confed space create NOTES --name "Team Notes" --private
+```
+
+Creates a space, which the server gives a home page, and nothing else: no workspace is
+made (`confed clone NOTES` makes one; from an instance root,
+[`confed instance create`](#confed-instance-create) does both). `--name` is asked for on
+a terminal and required otherwise; `--description` is plain text; `--private` makes a
+space only you can see (Data Center `rest/api/space/_private`, Cloud
+`createPrivateSpace`). On a terminal it asks first, unless `--yes`.
+
+The key must be uppercase letters A-Z and digits, 1 to 255 characters, on both flavors.
+Before anything is created confed asks whether a space has the key, archived and
+personal spaces included. `--dry-run` also asks whether you may create spaces, and
+changes nothing. Cloud says so in `user/current?expand=operations`; Data Center has no API
+for it, so confed sends a create with the key `!`, which no server accepts, and
+reads whether it was refused for the permission (403) or for the key (400).
+
+The result is `space` (`key`, `id`, `name`, `home_page_id`, `url`); a dry run has
+`space`, `checks` (`key_free`, `taken_by`, `may_create`) and `planned`. A refusal is in
+`errors` with a `kind`, beside its `code`:
+
+| `kind` | Exit | |
+|---|---|---|
+| `invalid_key` | 2 | not uppercase letters and digits, or longer than 255; the message says what is allowed |
+| `name_required` | 2 | `--name` missing without a terminal |
+| `key_taken` | 7 | a space has the key: current, archived, or a personal `~user` space |
+| `no_permission` | 7 | the account lacks the global "Create Space" permission (Cloud: the site's) |
+
+A dry run lists every problem it finds, with the plan, and exits with the first one's
+code. `docs/reference/json/space.schema.json` describes the result.
+
 ## confed admin
 
 Administer the instance: users, groups, and who may do what in a space. It needs an
@@ -1062,10 +1101,38 @@ Clones the spaces that are not cloned yet, in parallel, into `<root>/<KEY>`. The
 the root's shared credential. When the root has none, because it was adopted without
 `--move-credentials`, each new workspace gets its own copy of the credential used,
 stored the way its source stores it. A space already cloned is skipped (`--force` initializes it
-again), so a second run does nothing and exits 0. A space that fails is reported and the
+again), so a second run does nothing and exits 0. A workspace that was made but never
+fetched, left by a clone that stopped, is cloned again rather than skipped. A space that fails is reported and the
 rest still run; any failure exits 8. Clone flags pass through: `--no-agent-docs`,
 `--no-attachments`, `--no-comments`, plus `--type`, `--include-archived` and
 `--dry-run`.
+
+### confed instance create
+
+```bash
+confed instance create NOTES --name "Team Notes" --description "…" --dry-run --json
+confed instance create NOTES --name "Team Notes" --description "…" -y --json
+```
+
+[`space create`](#confed-space-create) with the root's shared credential, then
+`instance clone NOTES`: the new space is cloned into `<root>/NOTES` with its home page,
+registered, and listed in the root's `CLAUDE.md` and `AGENTS.md`. An agent in the root
+can do it all without reading the root's session database. `--no-clone` only creates the
+space; `--no-agent-docs` passes through to the clone. Before the space is created
+confed also checks that `NOTES/` is free (`kind: dir_not_empty`, exit 7). The result
+adds `cloned` (`dir`, `pages`):
+
+```json
+{ "action": "create", "dry_run": false,
+  "space": { "key": "NOTES", "id": "600", "name": "Team Notes", "home_page_id": "9001",
+             "url": "https://wiki.example.test/display/NOTES" },
+  "cloned": { "dir": "NOTES", "pages": 1 } }
+```
+
+If the clone fails after the space was created, the result still has `space`, `cloned`
+is null, and `errors` has `kind: clone_failed` (exit 8), saying the space exists.
+`confed instance clone NOTES` then finishes the job: it clones a workspace that
+was made but never fetched again, rather than skipping it as already cloned.
 
 ### confed instance add / remove
 

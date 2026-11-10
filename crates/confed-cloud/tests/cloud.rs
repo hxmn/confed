@@ -985,3 +985,87 @@ async fn cloud_users_are_the_organizations_to_create() {
     assert!(matches!(err, ApiError::Unsupported { .. }), "{err}");
     assert!(err.to_string().contains("admin.atlassian.com"), "{err}");
 }
+
+// -------------------------------------------------------- creating spaces ---
+
+#[tokio::test]
+async fn a_space_is_created_through_v2_and_a_404_is_a_missing_permission() {
+    use confed_api::{NewSpace, Probe, SpaceRefusal};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/wiki/api/v2/spaces"))
+        .and(body_json(json!({
+            "key": "NOTES", "name": "Notes",
+            "description": { "value": "Shared notes", "representation": "plain" },
+            "createPrivateSpace": true,
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "600", "key": "NOTES", "name": "Notes", "type": "global", "status": "current",
+            "homepageId": "9001",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/wiki/api/v2/spaces"))
+        .and(body_json(json!({ "key": "PRIV", "name": "Private" })))
+        .respond_with(ResponseTemplate::new(404).set_body_string(""))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/wiki/rest/api/user/current"))
+        .and(query_param("expand", "operations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accountId": "9000000aaa",
+            "operations": [{ "operation": "use", "targetType": "application" },
+                           { "operation": "create", "targetType": "space" }],
+        })))
+        .mount(&server)
+        .await;
+
+    let cloud = client(&server);
+    let space = cloud
+        .create_space(&NewSpace {
+            key: "NOTES".into(),
+            name: "Notes".into(),
+            description: Some("Shared notes".into()),
+            private: true,
+        })
+        .await
+        .unwrap();
+    assert_eq!(space.homepage_id.as_ref().map(|p| p.as_str()), Some("9001"));
+    let e = cloud
+        .create_space(&NewSpace {
+            key: "PRIV".into(),
+            name: "Private".into(),
+            description: None,
+            private: false,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(e, ApiError::SpaceRefused { reason: SpaceRefusal::NoPermission, .. }),
+        "{e:?}"
+    );
+    assert_eq!(cloud.probe_create_space().await.unwrap(), Probe::Available);
+}
+
+#[tokio::test]
+async fn an_archived_space_is_found_by_its_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wiki/api/v2/spaces"))
+        .and(query_param("status", "archived"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "results": [
+            { "id": "504", "key": "OLD", "name": "Old Notes", "status": "archived" }
+        ] })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/wiki/api/v2/spaces"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "results": [] })))
+        .mount(&server)
+        .await;
+    let found = client(&server).find_space("OLD").await.unwrap().unwrap();
+    assert_eq!(found.status.as_deref(), Some("archived"));
+}

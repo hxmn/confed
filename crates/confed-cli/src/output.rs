@@ -71,6 +71,9 @@ impl Output {
 #[derive(Clone, Debug, Serialize)]
 pub struct ErrorEntry {
     pub code: &'static str,
+    /// What was refused, when confed names it (`key_taken`, `no_permission`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
@@ -80,6 +83,7 @@ impl ErrorEntry {
     pub fn from_error(error: &ConfedError) -> Self {
         Self {
             code: error.code(),
+            kind: error.kind(),
             message: error.to_string(),
             hint: error.hint().map(str::to_string),
         }

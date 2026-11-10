@@ -8,7 +8,7 @@
   "properties": {
     "action": {
       "type": "string",
-      "enum": ["init", "adopt", "spaces", "clone", "add", "remove", "status", "fetch", "pull", "push", "doctor", "mv", "locate", "tree", "search", "resume", "abort"]
+      "enum": ["init", "adopt", "spaces", "clone", "create", "add", "remove", "status", "fetch", "pull", "push", "doctor", "mv", "locate", "tree", "search", "resume", "abort"]
     },
     "spaces": {
       "type": "array",
@@ -162,6 +162,28 @@
       "type": "array",
       "description": "`locate`: one entry per page named, in order; `found` is false for one that was not, and its error is in the envelope's `errors`. `tree`: the pages under the page named (or the whole space), parent first, `depth` 0 for its children. `mv`: the plan's pages."
     },
+    "space": {
+      "anyOf": [{ "$ref": "#/$defs/created_space" }, { "$ref": "#/$defs/planned_space" }, { "type": "string" }],
+      "description": "`create`: the space created, or with `dry_run` the one that would be. `tree`: the key of the space listed."
+    },
+    "checks": { "$ref": "#/$defs/checks" },
+    "planned": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "`create --dry-run`: what would be done, one sentence per step."
+    },
+    "dir": { "type": ["string", "null"], "description": "`create --dry-run`: the workspace the space would be cloned into, relative to the root; null with `--no-clone`." },
+    "cloned": {
+      "type": ["object", "null"],
+      "description": "`create`: where the new space was cloned, as `instance clone KEY` does it. Null with `--no-clone`, or when the clone failed: then `errors` has `kind: clone_failed`, the exit code is 8, and `confed instance clone KEY` finishes it.",
+      "required": ["dir", "pages"],
+      "properties": {
+        "dir": { "type": "string" },
+        "pages": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "clone": { "type": ["object", "null"], "description": "`create`, when the clone failed: the space's entry as `instance clone` reports it." },
+    "cancelled": { "type": "boolean", "description": "`create`: the confirmation was declined; nothing was created." },
     "dry_run": { "type": "boolean" },
     "blocked": {
       "type": "string",
@@ -169,6 +191,116 @@
     }
   },
   "$defs": {
+    "created_space": {
+      "type": "object",
+      "description": "A space as the server has it after the create.",
+      "required": [
+        "key",
+        "id",
+        "name",
+        "home_page_id",
+        "url"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The server's numeric id, as a string like every confed id."
+        },
+        "name": {
+          "type": "string"
+        },
+        "home_page_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The home page the server made with the space."
+        },
+        "url": {
+          "type": "string",
+          "description": "The space in the browser: `…/display/KEY` on Data Center, `…/spaces/KEY` on Cloud."
+        }
+      }
+    },
+    "planned_space": {
+      "type": "object",
+      "description": "`--dry-run`: the space that would be created.",
+      "required": [
+        "key",
+        "name",
+        "private"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "private": {
+          "type": "boolean"
+        }
+      }
+    },
+    "checks": {
+      "type": "object",
+      "description": "`--dry-run`: what the server said before anything was created. Each check that fails is also an entry in the envelope's `errors`, with its `kind`, and the exit code is 7.",
+      "required": [
+        "key_free",
+        "may_create"
+      ],
+      "properties": {
+        "key_free": {
+          "type": "boolean",
+          "description": "False when a space has the key: current, archived or personal (`kind: key_taken`). A space this account cannot see is only found by the create itself."
+        },
+        "taken_by": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "may_create": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether this account may create spaces (`kind: no_permission` when false); null when the server would not say. Data Center has no API for it, so confed sends a create with the key `!`, which no server accepts, and reads whether it was refused for the permission or for the key."
+        }
+      }
+    },
     "location": {
       "type": "object",
       "required": ["space", "path"],

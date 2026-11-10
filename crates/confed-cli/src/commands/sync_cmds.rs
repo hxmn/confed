@@ -354,6 +354,7 @@ pub mod push {
                     .iter()
                     .map(|blocked| crate::output::ErrorEntry {
                         code: ExitCode::State.name(),
+                        kind: None,
                         message: format!("{}: {}", blocked.path, blocked.reason),
                         hint: Some(
                             "pages move between spaces only with `confed instance mv`, which \

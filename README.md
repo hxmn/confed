@@ -94,6 +94,7 @@ overwritten. Read [docs/sync.md](https://github.com/hxmn/confed/blob/main/docs/s
 | CQL search, recent activity, open in browser | ✅ | ✅ |
 | HTML export and an MkDocs site over the space | ✅ | ✅ |
 | Interactive terminal UI | ✅ | ✅ |
+| Create a space, and clone it into an instance root | ✅ | ✅ |
 | Groups, members and space permissions (`admin`) | ✅ | ✅ ² |
 | Users: create, change, disable, delete (`admin`) | — ³ | ✅ ² |
 
@@ -160,7 +161,7 @@ keyring, or a `0600` file).
 
 | Sync | Authoring | Discussion | Explore | Workspace | Admin |
 |---|---|---|---|---|---|
-| `clone` · `fetch` · `pull` · `push` · `status` · `tree` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `completion` | `admin user · group · perms` |
+| `clone` · `fetch` · `pull` · `push` · `status` · `tree` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `completion` | `space create` · `admin user · group · perms` |
 
 Every command, flag and exit code is in [docs/commands.md](https://github.com/hxmn/confed/blob/main/docs/commands.md).
 
@@ -174,6 +175,7 @@ comments and attachments:
 ```bash
 confed instance init ~/wiki --base-url https://wiki.example.test   # authenticate once
 cd ~/wiki && confed instance clone DOCS ENG                        # or: clone --all
+confed instance create NOTES --name "Team Notes" --dry-run         # a new space, cloned
 confed instance status --json                                      # every space, one envelope
 confed instance pull
 confed instance push -m "Quarterly review" --dry-run

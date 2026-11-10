@@ -35,6 +35,10 @@ pub enum ApiError {
     #[error("{0}")]
     Rejected(String),
 
+    /// The server refused to create a space, for a reason confed names.
+    #[error("{message}")]
+    SpaceRefused { reason: crate::types::SpaceRefusal, message: String },
+
     /// Any other non-success status.
     #[error("server returned {status}: {body}")]
     Server { status: u16, body: String },

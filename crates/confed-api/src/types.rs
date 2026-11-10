@@ -418,6 +418,39 @@ pub struct SearchResult {
     pub when: Option<String>,
 }
 
+/// A space for [`crate::ConfluenceClient::create_space`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewSpace {
+    pub key: String,
+    pub name: String,
+    /// Plain text: the only representation both flavors take.
+    pub description: Option<String>,
+    /// Visible to its creator only.
+    pub private: bool,
+}
+
+/// Why a server refused to create a space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceRefusal {
+    /// A space has the key already — current, archived or personal.
+    KeyTaken,
+    /// The server does not take the key as a space key.
+    InvalidKey,
+    /// The account may not create spaces.
+    NoPermission,
+}
+
+impl SpaceRefusal {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SpaceRefusal::KeyTaken => "key_taken",
+            SpaceRefusal::InvalidKey => "invalid_key",
+            SpaceRefusal::NoPermission => "no_permission",
+        }
+    }
+}
+
 /// A user for [`crate::ConfluenceClient::create_user`]. Without a password
 /// the server mails the person a link to set one, which `notify` asks for.
 #[derive(Clone, Debug)]

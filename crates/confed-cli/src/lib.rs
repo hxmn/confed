@@ -216,6 +216,7 @@ async fn dispatch(
         Command::Open(args) => commands::open::run(&mut ctx, &args).await,
         Command::Search(args) => commands::search::run(&mut ctx, &args).await,
         Command::Spaces(args) => commands::spaces::run(&mut ctx, &args).await,
+        Command::Space(args) => commands::space::run(&mut ctx, &args).await,
         Command::User(args) => commands::user::run(&mut ctx, &args).await,
         Command::Admin(args) => commands::admin::run(&mut ctx, &args).await,
         Command::Whoami(args) => commands::whoami::run(&mut ctx, &args).await,
