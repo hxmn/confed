@@ -106,6 +106,58 @@ impl From<reqwest::Error> for ApiError {
     }
 }
 
+/// Whether a refused write says the version it was based on is stale — the
+/// one refusal a pull and a retry fix. A 409 always does. Some servers send
+/// a 400 instead, and then it is the server's own messages, read from its
+/// JSON error body, that say so: a 400 that merely mentions a version (a
+/// macro's, the API's) is some other refusal, and calling it a conflict
+/// would send the user to pull for nothing.
+pub fn is_stale_version(status: u16, body: &str) -> bool {
+    match status {
+        409 => true,
+        400 => error_messages(body).iter().any(|m| names_stale_version(m)),
+        _ => false,
+    }
+}
+
+fn names_stale_version(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("version must be incremented")
+        || m.contains("current version")
+        || (m.contains("version") && (m.contains("stale") || m.contains("conflict")))
+}
+
+/// The human-readable messages in a Confluence error body: `message` on Data
+/// Center, `errors[].title` and `detail` on Cloud, `message.translation`
+/// inside `data.errors[]` on both. A body that is not JSON is its own message.
+fn error_messages(body: &str) -> Vec<String> {
+    fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    match (key.as_str(), value) {
+                        (
+                            "message" | "title" | "detail" | "translation",
+                            serde_json::Value::String(s),
+                        ) => out.push(s.clone()),
+                        _ => walk(value, out),
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(value) => {
+            let mut out = Vec::new();
+            walk(&value, &mut out);
+            out
+        }
+        Err(_) => vec![body.to_string()],
+    }
+}
+
 /// An error's message followed by each cause beneath it that adds something.
 pub fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
     let mut out = e.to_string();
@@ -199,6 +251,28 @@ mod tests {
         );
         assert!(is_certificate_error(&message));
         assert!(!is_certificate_error("could not connect: connection refused"));
+    }
+
+    #[test]
+    fn only_a_stale_version_is_a_conflict() {
+        assert!(is_stale_version(409, "anything"));
+        // Data Center's words for it.
+        assert!(is_stale_version(
+            400,
+            r#"{"statusCode":400,"message":"Version must be incremented when updating a page. Current Version is: 5. Version in request: 5"}"#
+        ));
+        // Cloud's.
+        assert!(is_stale_version(
+            400,
+            r#"{"errors":[{"status":400,"code":"INVALID_REQUEST_PARAMETER","title":"Version number must be greater than the current version"}]}"#
+        ));
+        // A 400 that mentions a version and is about something else.
+        assert!(!is_stale_version(
+            400,
+            r#"{"statusCode":400,"message":"Unsupported macro version for macro 'code'"}"#
+        ));
+        assert!(!is_stale_version(400, r#"{"message":"API version 1 is not supported here"}"#));
+        assert!(!is_stale_version(500, r#"{"message":"Version must be incremented"}"#));
     }
 
     #[test]

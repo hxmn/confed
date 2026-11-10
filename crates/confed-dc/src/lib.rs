@@ -382,13 +382,10 @@ fn now_millis() -> String {
 }
 
 /// Data Center answers a stale `version.number` with 409, and some versions with a
-/// 400 whose message only mentions the version.
+/// 400 that says so in its message. Both are conflicts; any other 400 is not.
 fn as_conflict(err: ApiError) -> ApiError {
     match err {
-        ApiError::Server { status, body }
-            if status == 409
-                || (status == 400 && body.to_ascii_lowercase().contains("version")) =>
-        {
+        ApiError::Server { status, body } if confed_api::error::is_stale_version(status, &body) => {
             ApiError::Conflict(body)
         }
         other => other,
