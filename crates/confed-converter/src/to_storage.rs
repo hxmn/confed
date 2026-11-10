@@ -324,10 +324,11 @@ impl<'a> Generator<'a> {
             return Ok(());
         }
         // Hand-written HTML: pass it through when it is well-formed. Otherwise
-        // it was never markup — a line that only looked like a tag — so it is
-        // read again as the Markdown it is, with its first `<` escaped so it
-        // cannot start an HTML block twice. Its stray tags become text, and
-        // the Markdown on the lines CommonMark swept in with it is not lost.
+        // it was never markup — lines that only looked like tags — so it is
+        // read again as the Markdown it is, with the `<` that starts each line
+        // escaped so no line of it can start an HTML block again. Its stray
+        // tags become text, and the Markdown on the lines CommonMark swept in
+        // with it is not lost.
         match dom::check_well_formed(literal) {
             Ok(()) => out.push_str(literal),
             Err(_) => out.push_str(&self.as_markdown(literal)?),
@@ -336,8 +337,22 @@ impl<'a> Generator<'a> {
     }
 
     /// [`Self::html_block`]'s fallback: `literal` read as Markdown.
+    ///
+    /// Every line is escaped, not only the first: a line such as `<div>` can
+    /// start an HTML block of its own, which would come back here one level
+    /// deeper — once per line, until the stack runs out.
     fn as_markdown(&self, literal: &str) -> ConvertResult<String> {
-        let escaped = format!("\\{}\n", literal.trim_start());
+        let mut escaped = String::with_capacity(literal.len() + 16);
+        for line in literal.split_inclusive('\n') {
+            let body = line.trim_start_matches(' ');
+            let indent = &line[..line.len() - body.len()];
+            escaped.push_str(indent);
+            if body.starts_with('<') {
+                escaped.push('\\');
+            }
+            escaped.push_str(body);
+        }
+        escaped.push('\n');
         generate_at(&escaped, self.opts, self.line_offset)
     }
 

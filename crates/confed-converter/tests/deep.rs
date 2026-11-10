@@ -74,3 +74,15 @@ fn deeply_nested_markdown_is_refused_with_its_line() {
     let quotes = format!("{}x\n", "> ".repeat(MAX_DEPTH / 2));
     assert!(markdown_to_storage(&quotes, &opts()).is_ok(), "within the limit");
 }
+
+/// Each line that starts with a block tag starts an HTML block of its own,
+/// and one that is not well-formed is read again as Markdown. That must not
+/// take a level of recursion per line.
+#[test]
+fn many_lines_of_unclosed_block_tags_convert() {
+    for count in [200, 5_000] {
+        let md = "<div>\n".repeat(count);
+        let storage = markdown_to_storage(&md, &opts()).unwrap();
+        assert_eq!(storage.matches("&lt;div&gt;").count(), count, "every tag kept as text");
+    }
+}
