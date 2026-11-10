@@ -3,8 +3,23 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Build the binaries, and run the checks a release waits for, without
+  # releasing or publishing anything: to try this workflow before a tag.
+  workflow_dispatch:
 
 jobs:
+  # What CI checks, again for the tagged commit itself: nothing irrevocable
+  # happens unless it passes.
+  verify:
+    name: tests and package check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --workspace
+      - run: cargo publish --locked --workspace --dry-run
+
   binaries:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -58,7 +73,8 @@ jobs:
 
   github-release:
     name: GitHub release
-    needs: binaries
+    needs: [verify, binaries]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -88,7 +104,10 @@ jobs:
     # (it can only be set up once a crate exists, so the first release is
     # published by hand). Turn on with the repository variable
     # PUBLISH_CRATES=true — see "Releasing" in AGENTS.md.
-    if: vars.PUBLISH_CRATES == 'true'
+    # Irrevocable, so last: only once the tagged commit passed its checks, every
+    # binary built, and the GitHub release exists.
+    needs: [verify, binaries, github-release]
+    if: vars.PUBLISH_CRATES == 'true' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
