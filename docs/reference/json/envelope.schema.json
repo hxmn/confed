@@ -75,8 +75,7 @@
         },
         "exit_code": {
           "type": "integer",
-          "minimum": 0,
-          "maximum": 10,
+          "enum": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 130],
           "description": "The process exit status. See docs/troubleshooting.md."
         },
         "duration_ms": {

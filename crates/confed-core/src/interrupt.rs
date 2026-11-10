@@ -4,10 +4,10 @@
 //! written from out of step — a file newer than what `.state.db` says it came
 //! from, which reads as a local edit nobody made. So the binary catches the
 //! first Ctrl-C and only raises this flag, and the engine looks at it between
-//! pages: the page in hand is finished and recorded, and nothing after it is
-//! started.
+//! pages: the page in hand is finished and recorded, nothing after it is
+//! started, and the outcome — what was done — comes back marked
+//! `interrupted`, for the binary to exit 130 with.
 
-use crate::error::{ConfedError, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -26,15 +26,4 @@ pub fn requested() -> bool {
 /// honoured one and goes on.
 pub fn clear() {
     REQUESTED.store(false, Ordering::SeqCst);
-}
-
-/// `Err(Interrupted)` once a stop has been asked for, saying what was done.
-pub fn check(done: impl FnOnce() -> String) -> Result<()> {
-    if requested() {
-        return Err(ConfedError::Interrupted(format!(
-            "interrupted: {}; the rest is left for the next run",
-            done()
-        )));
-    }
-    Ok(())
 }

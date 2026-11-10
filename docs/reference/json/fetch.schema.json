@@ -6,6 +6,7 @@
   "type": "object",
   "required": ["fetched", "unchanged", "deleted_on_remote", "failed", "resumed", "comments_refreshed", "comments_changed", "attachments_refreshed", "attachments_changed"],
   "properties": {
+    "interrupted": { "type": "boolean", "description": "Stopped by Ctrl-C (exit 130): the counts say what was read before it stopped; what was not stays queued for the next fetch. Present only when true." },
     "fetched": { "type": "integer", "minimum": 0, "description": "Pages whose body was downloaded." },
     "unchanged": { "type": "integer", "minimum": 0, "description": "Pages already at the server's version." },
     "deleted_on_remote": {

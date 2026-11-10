@@ -95,7 +95,8 @@
             }
           }
         },
-        "dry_run": { "type": "boolean" }
+        "dry_run": { "type": "boolean" },
+        "interrupted": { "type": "boolean", "description": "Stopped by Ctrl-C (exit 130): the lists say what was done before it stopped, and running the command again finishes the rest. Present only when true." }
       }
     },
     "cancelled": {

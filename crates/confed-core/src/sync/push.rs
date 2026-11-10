@@ -130,6 +130,10 @@ impl PushPlan {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PushOutcome {
+    /// Stopped by Ctrl-C: what is listed was done, and the rest is left for
+    /// the next run. Only in the JSON when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
     pub pushed: Vec<PageChange>,
     pub created: Vec<PageChange>,
     pub deleted: Vec<PageChange>,
@@ -529,10 +533,11 @@ impl SyncEngine {
         let mut created_ids: HashMap<String, String> = HashMap::new();
         self.progress.stage("Pushing", Some(plan.ops.len()));
 
-        for (done, op) in plan.ops.iter().enumerate() {
-            crate::interrupt::check(|| {
-                format!("{done} of {} page(s) pushed, nothing after them", plan.ops.len())
-            })?;
+        for op in &plan.ops {
+            if crate::interrupt::requested() {
+                outcome.interrupted = true;
+                break;
+            }
             self.progress.item(&op.path);
             let result = self.apply_push_op(ws, op, opts, &mut created_ids).await;
             match result {
@@ -548,6 +553,13 @@ impl SyncEngine {
                     error: e.to_string(),
                 }),
             }
+        }
+
+        if outcome.interrupted {
+            // Pages already pushed are recorded; attachments and comments wait
+            // for the next push, which plans them afresh.
+            self.progress.finish();
+            return Ok(outcome);
         }
 
         // Attachments after page bodies: a body that references a new file is

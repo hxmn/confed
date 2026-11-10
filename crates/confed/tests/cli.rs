@@ -2524,3 +2524,53 @@ async fn local_moves_and_removals_need_no_credentials() {
         "the next push has a deletion to send: {status}"
     );
 }
+
+/// Send Ctrl-C (SIGINT) to a running confed once `after` has passed, and wait
+/// for it to exit.
+#[cfg(unix)]
+fn interrupt_after(mut cmd: Command, after: std::time::Duration) -> (Output, std::time::Duration) {
+    let child = cmd.spawn().expect("starting confed");
+    std::thread::sleep(after);
+    let sent = std::time::Instant::now();
+    let status = Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
+    assert!(status.success(), "kill -INT");
+    let output = child.wait_with_output().unwrap();
+    (output, sent.elapsed())
+}
+
+/// A pull stops after the page in hand, and says what it did: the envelope
+/// carries the outcome, marked interrupted, with exit 130.
+#[cfg(unix)]
+#[tokio::test]
+async fn ctrl_c_stops_a_pull_between_pages_and_keeps_its_outcome() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    // The child page's body is slow, so the Ctrl-C lands while it is read.
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{CHILD_PAGE}")))
+        .respond_with({
+            let mut page = summary(CHILD_PAGE, "Onboarding", Some(ROOT_PAGE), 1);
+            page["body"] =
+                json!({ "storage": { "value": "<p>Slow.</p>", "representation": "storage" } });
+            ResponseTemplate::new(200)
+                .set_body_json(page)
+                .set_delay(std::time::Duration::from_secs(2))
+        })
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let cmd = confed_authed(dir.path(), &["pull", "--json"]);
+    let (output, _) = interrupt_after(cmd, std::time::Duration::from_millis(700));
+    assert_eq!(exit_code(&output), 130, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "pull");
+    assert_eq!(value["confed"]["exit_code"], json!(130), "{value}");
+    assert_eq!(value["result"]["interrupted"], json!(true), "{value}");
+    assert!(value["warnings"].to_string().contains("interrupted"), "{value}");
+
+    // The next pull finishes the job.
+    let output = run(confed_authed(dir.path(), &["pull", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    assert!(dir.path().join(CHILD_FILE).exists());
+}

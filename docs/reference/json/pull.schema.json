@@ -59,7 +59,8 @@
       "minimum": 0,
       "description": "Local copies removed because the attachment was deleted on the server. A copy changed locally is kept, with a warning."
     },
-    "dry_run": { "type": "boolean" }
+    "dry_run": { "type": "boolean" },
+    "interrupted": { "type": "boolean", "description": "Stopped by Ctrl-C (exit 130): the lists say what was done before it stopped, and running the command again finishes the rest. Present only when true." }
   },
   "$defs": {
     "page_change": {

@@ -55,6 +55,10 @@ pub struct FetchOptions {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct FetchOutcome {
+    /// Stopped by Ctrl-C: what is listed was done, and the rest is left for
+    /// the next run. Only in the JSON when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
     pub fetched: usize,
     pub unchanged: usize,
     /// Pages whose content came from `.pages.db` instead of the network.
@@ -174,6 +178,8 @@ pub(super) struct ExtrasRead {
 /// What a round of fetch work did, on top of what it stored.
 #[derive(Default)]
 pub(super) struct FetchTally {
+    /// Stopped by Ctrl-C before every item was read; the rest stays queued.
+    pub(super) interrupted: bool,
     pub(super) fetched: usize,
     /// Pages whose attachments and comments are now as the server has them.
     pub(super) read: ExtrasRead,
@@ -628,6 +634,12 @@ impl SyncEngine {
         let [attachments, comments] = checks;
         outcome.attachment_check_failed = attachments.failed;
         outcome.comment_check_failed = comments.failed;
+        if tally.interrupted {
+            // What was not read stays queued; the next fetch picks it up.
+            outcome.interrupted = true;
+            self.progress.finish();
+            return Ok((outcome, tally.read));
+        }
 
         self.resolve_mentioned_users(ws).await?;
         ws.state().set_meta("last_fetch_at", &now())?;
@@ -753,7 +765,7 @@ impl SyncEngine {
                 }
             }
         }
-        crate::interrupt::check(|| format!("{} page(s) fetched", tally.fetched))?;
+        tally.interrupted = crate::interrupt::requested();
         tally.attachments_changed.sort();
         tally.comments_changed.sort();
         Ok(tally)

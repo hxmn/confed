@@ -31,6 +31,10 @@ impl PullOptions {
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PullOutcome {
+    /// Stopped by Ctrl-C: what is listed was done, and the rest is left for
+    /// the next run. Only in the JSON when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
     pub created: Vec<PageChange>,
     pub updated: Vec<PageChange>,
     pub merged: Vec<PageChange>,
@@ -283,8 +287,12 @@ pub(super) fn move_sidecar(old: &Path, new: &Path) {
 impl SyncEngine {
     /// Materialize the fetched state into working files.
     pub async fn pull(&self, ws: &mut Workspace, opts: &PullOptions) -> Result<PullOutcome> {
-        let (warnings, read) = self.fetch_before_pull(ws, opts).await?;
-        let mut outcome = PullOutcome { dry_run: opts.dry_run, warnings, ..Default::default() };
+        let (warnings, read, interrupted) = self.fetch_before_pull(ws, opts).await?;
+        let mut outcome =
+            PullOutcome { dry_run: opts.dry_run, warnings, interrupted, ..Default::default() };
+        if interrupted {
+            return Ok(outcome);
+        }
 
         let (files, _) = worktree::read_working_files(ws)?;
         self.reconcile_paths(ws, &files)?;
@@ -332,20 +340,31 @@ impl SyncEngine {
 
         if view.insist {
             self.reread_extras(ws, opts, &view, &read, &mut outcome).await?;
+            if outcome.interrupted {
+                self.progress.finish();
+                return Ok(outcome);
+            }
         }
 
         // Pass two: apply.
         self.progress.stage(if opts.dry_run { "Checking" } else { "Writing" }, Some(plan.len()));
         let mut handled: Vec<String> = Vec::new();
-        let planned = plan.len();
-        for (done, (remote_page, action)) in plan.into_iter().enumerate() {
-            crate::interrupt::check(|| format!("{done} of {planned} page(s) pulled"))?;
+        for (remote_page, action) in plan {
+            if crate::interrupt::requested() {
+                outcome.interrupted = true;
+                break;
+            }
             handled.push(remote_page.page_id.clone());
             self.pull_one(ws, opts, &view, remote_page, action, &mut outcome).await?;
         }
 
-        self.tend_unpulled_sidecars(ws, opts, &view, &handled, &mut outcome).await?;
-        self.warn_missing_comment_attachments(ws, opts, &view, &mut outcome)?;
+        // Each page written is whole; the ones after it wait for the next pull.
+        if !outcome.interrupted {
+            self.tend_unpulled_sidecars(ws, opts, &view, &handled, &mut outcome).await?;
+        }
+        if !outcome.interrupted {
+            self.warn_missing_comment_attachments(ws, opts, &view, &mut outcome)?;
+        }
 
         self.progress.finish();
         Ok(outcome)
@@ -357,13 +376,15 @@ impl SyncEngine {
         &self,
         ws: &mut Workspace,
         opts: &PullOptions,
-    ) -> Result<(Vec<String>, ExtrasRead)> {
+    ) -> Result<(Vec<String>, ExtrasRead, bool)> {
         let mut warnings: Vec<String> = Vec::new();
         // What this run has already read from the server, beside page bodies.
         let mut read = ExtrasRead::default();
+        let mut interrupted = false;
         if !opts.no_fetch {
             let (fetch, fetched) = self.fetch_tracking(ws, &FetchOptions::default()).await?;
             read = fetched;
+            interrupted = fetch.interrupted;
             // A page that could not be fetched is pulled as it was last seen;
             // say which, rather than only that there were some.
             warnings.extend(fetch.failed.iter().map(|f| {
@@ -372,7 +393,7 @@ impl SyncEngine {
             }));
             warnings.extend(fetch.check_warnings());
         }
-        Ok((warnings, read))
+        Ok((warnings, read, interrupted))
     }
 
     /// Pass one: what to do with each page in scope. A page whose local work
@@ -479,6 +500,7 @@ impl SyncEngine {
                 view.remote.iter().map(|r| (r.page_id.clone(), r.title.clone())).collect();
             self.progress.stage("Reading attachments and comments", Some(work.len()));
             let tally = self.run_fetches(ws, work, &titles).await?;
+            outcome.interrupted = tally.interrupted;
             outcome.warnings.extend(tally.failed.iter().map(|f| {
                 let path = view.placements.get(&f.page_id).map_or(f.page_id.as_str(), |p| &p.path);
                 format!("{path}: {}", f.error)
@@ -685,9 +707,10 @@ impl SyncEngine {
         // comments added, edited and deleted, on the server without the page
         // itself changing.
         for record in ws.state().all_pages()? {
-            crate::interrupt::check(|| {
-                "every page was pulled; some sidecars were not checked".into()
-            })?;
+            if crate::interrupt::requested() {
+                outcome.interrupted = true;
+                break;
+            }
             if handled.contains(&record.page_id)
                 || !self.in_scope(&opts.scope, view.placements, &record.page_id)
             {

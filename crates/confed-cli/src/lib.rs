@@ -187,10 +187,21 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
         .build()
         .map_err(|e| ConfedError::io("starting the async runtime", e))?;
 
-    runtime.block_on(async {
+    let output = runtime.block_on(async {
         watch_interrupts();
         dispatch(ctx, command, prepared_init, prepared_instance).await
-    })
+    })?;
+    // Stopped by Ctrl-C between pages: the outcome lists what was done, and
+    // the exit code says it is not all.
+    if confed_core::interrupt::requested() {
+        let mut output = output.warn(
+            "interrupted: stopped after the page in hand; what is listed was done, and running \
+             the command again finishes the rest",
+        );
+        output.exit = confed_core::ExitCode::Interrupted;
+        return Ok(output);
+    }
+    Ok(output)
 }
 
 /// The first Ctrl-C asks the running command to stop at the next page

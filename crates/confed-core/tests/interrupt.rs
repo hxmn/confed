@@ -2,14 +2,14 @@
 //! and no other test may run while it is raised.
 
 use confed_api::{Flavor, MockClient, SpaceId};
+use confed_core::interrupt;
 use confed_core::sync::{PullOptions, PushOptions, SyncEngine};
 use confed_core::workspace::Workspace;
 use confed_core::worktree::{self, PageState};
-use confed_core::{interrupt, ExitCode};
 use std::sync::Arc;
 
 #[tokio::test]
-async fn an_interrupt_stops_between_pages_and_leaves_each_page_consistent() {
+async fn an_interrupt_stops_between_pages_and_keeps_the_outcome() {
     let dir = tempfile::tempdir().unwrap();
     let mut ws = Workspace::create(dir.path()).unwrap();
     ws.state().set_meta("space_key", "DOCS").unwrap();
@@ -32,24 +32,27 @@ async fn an_interrupt_stops_between_pages_and_leaves_each_page_consistent() {
         std::fs::write(&path, format!("{text}\nФраза 1.\n")).unwrap();
     }
     interrupt::request();
-    let err = engine.push(&mut ws, &PushOptions::default()).await.unwrap_err();
-    assert_eq!(err.exit_code(), ExitCode::Interrupted);
-    assert_eq!(err.exit_code().as_i32(), 130);
-    assert!(err.to_string().contains("0 of 2"), "{err}");
+    let outcome = engine.push(&mut ws, &PushOptions::default()).await.unwrap();
+    assert!(outcome.interrupted);
+    assert!(outcome.pushed.is_empty());
     assert!(mock.mutating_calls().is_empty(), "nothing was sent: {:?}", mock.mutating_calls());
+    let json = serde_json::to_value(&outcome).unwrap();
+    assert_eq!(json["interrupted"], true, "the JSON says so");
 
-    // The same for a pull: nothing is half-written, and the next run goes on.
+    // The same for a pull: the outcome comes back, nothing is half-written.
     mock.remote_edit("1001", "<p>Changed on the server.</p>");
-    let err = engine.pull(&mut ws, &PullOptions::everything()).await.unwrap_err();
-    assert_eq!(err.exit_code(), ExitCode::Interrupted);
+    let outcome = engine.pull(&mut ws, &PullOptions::everything()).await.unwrap();
+    assert!(outcome.interrupted);
+    assert!(outcome.updated.is_empty());
     interrupt::clear();
 
     let scan = worktree::scan(&ws).unwrap();
-    assert_eq!(
-        scan.find("1002").unwrap().state,
-        PageState::Modified,
-        "edit kept, not taken as pushed"
-    );
+    assert_eq!(scan.find("1002").unwrap().state, PageState::Modified, "edit kept");
     let outcome = engine.push(&mut ws, &PushOptions::default()).await.unwrap();
-    assert_eq!(outcome.pushed.len(), 1, "the unchanged-on-server page goes up: {outcome:?}");
+    assert!(!outcome.interrupted);
+    assert_eq!(outcome.pushed.len(), 1, "the page unchanged on the server goes up: {outcome:?}");
+    assert!(
+        serde_json::to_value(&outcome).unwrap().get("interrupted").is_none(),
+        "only there when true"
+    );
 }
