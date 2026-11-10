@@ -20,6 +20,18 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-11-10
+
+### Fixed
+
+- **A pull no longer spends seconds on inline comments it cannot place.** Every pull
+  re-checks where each inline comment sits in the page, and a comment whose text is
+  gone from the page fell back to a similarity search that cost about half a second
+  per comment on a long page — so a space with many orphaned comments took minutes
+  over a pull with nothing to do. The search now reads the page once per position
+  instead of diffing every window, about a hundred times faster, and finds and
+  orphans exactly the comments it did before.
+
 ## [0.21.0] - 2026-11-10
 
 The problems found in 0.20, and the rest of the first review's list.
@@ -1402,7 +1414,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/hxmn/confed/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/hxmn/confed/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/hxmn/confed/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/hxmn/confed/compare/v0.19.0...v0.20.0
