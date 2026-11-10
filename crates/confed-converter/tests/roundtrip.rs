@@ -2,7 +2,7 @@
 
 mod corpus;
 
-use confed_converter::blockmap::{slice_lines, BlockKind};
+use confed_converter::BlockKind;
 use confed_converter::{
     markdown_to_storage, pretty, storage_to_markdown, ConvertError, ConvertOptions,
 };
@@ -97,7 +97,7 @@ fn deleting_a_fence_deletes_the_macro() {
         if i == victim {
             continue;
         }
-        new_md.push_str(&slice_lines(&c.markdown, b.md_span.0, b.md_span.1));
+        new_md.push_str(&corpus::block_text(&c.markdown, b));
     }
     let out = confed_converter::markdown_to_storage_patched(
         &f.storage,

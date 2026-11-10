@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use confed_converter::ConvertOptions;
+use confed_converter::{BlockEntry, ConvertOptions};
 
 pub struct Fixture {
     pub name: String,
@@ -64,4 +64,12 @@ pub fn options() -> ConvertOptions {
         page_titles: Default::default(),
         links_by_title: false,
     }
+}
+
+/// The Markdown of one block: its lines from `md_span`, as the block map
+/// counts them.
+#[allow(dead_code)]
+pub fn block_text(markdown: &str, block: &BlockEntry) -> String {
+    let (start, end) = block.md_span;
+    markdown.split_inclusive('\n').skip(start).take(end.saturating_sub(start)).collect()
 }

@@ -19,7 +19,7 @@
 //! throws away.
 //!
 //! [`minify`] is that rule run the other way — it deletes exactly the whitespace
-//! [`format`] is allowed to insert. The pair defines the equivalence class the
+//! [`format()`] is allowed to insert. The pair defines the equivalence class the
 //! printer moves within, and `minify(format(x)) == minify(x)` is the invariant
 //! the tests hold it to.
 
@@ -147,7 +147,7 @@ pub fn format(src: &str) -> String {
     out
 }
 
-/// Delete the whitespace [`format`] is allowed to add, leaving everything else
+/// Delete the whitespace [`format()`] is allowed to add, leaving everything else
 /// byte for byte.
 ///
 /// Two fragments with the same `minify` differ only in ways no renderer can

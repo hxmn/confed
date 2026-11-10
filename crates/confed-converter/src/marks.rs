@@ -18,7 +18,7 @@ use similar::{Algorithm, DiffOp, TextDiff};
 
 /// Longest preview a mark carries. Long enough to act on, short enough to read
 /// past.
-pub const PREVIEW_CHARS: usize = 60;
+pub(crate) const PREVIEW_CHARS: usize = 60;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MarkId {
@@ -183,7 +183,7 @@ fn parse_id(s: &str) -> Option<MarkId> {
     }
 }
 
-pub fn open_marker(id: &MarkId, note: &str) -> String {
+pub(crate) fn open_marker(id: &MarkId, note: &str) -> String {
     let note = sanitize_note(note);
     if note.is_empty() {
         format!("<!--c {}-->", id.as_str())
@@ -192,7 +192,7 @@ pub fn open_marker(id: &MarkId, note: &str) -> String {
     }
 }
 
-pub fn close_marker(id: &MarkId) -> String {
+pub(crate) fn close_marker(id: &MarkId) -> String {
     format!("<!--/c {}-->", id.as_str())
 }
 
@@ -201,7 +201,7 @@ pub fn close_marker(id: &MarkId) -> String {
 /// `--` is not allowed inside a CommonMark HTML comment (and would end it early
 /// as `-->`), a leading `>` or `-` would be read as part of the delimiter, and a
 /// newline would break the "marks never move lines" invariant.
-pub fn sanitize_note(note: &str) -> String {
+pub(crate) fn sanitize_note(note: &str) -> String {
     let collapsed: String = note.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut out = collapsed.replace("--", "\u{2013}").replace('\\', "");
     while out.starts_with('>') || out.starts_with('-') {
@@ -568,7 +568,7 @@ fn inline_opaque(line: &str, base: usize, out: &mut Vec<Opaque>) {
 /// and the identity on text with no marker in that position — so a body a user
 /// wrote with a `new` mark at a line start is repaired the same way before push
 /// parses it.
-pub fn normalize_line_starts(body: &str) -> String {
+pub(crate) fn normalize_line_starts(body: &str) -> String {
     let lines: Vec<&str> = body.split_inclusive('\n').collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut in_fence: Option<(char, usize)> = None;
@@ -627,7 +627,7 @@ pub fn normalize_line_starts(body: &str) -> String {
     out.concat()
 }
 
-/// Undo [`normalize_line_starts`] for an opener at `start`: when it sits exactly
+/// Undo the line-start repair (`normalize_line_starts`) for an opener at `start`: when it sits exactly
 /// where a marker written at the start of the line's content is moved to, the
 /// span it opens begins at that line start. A mark written to cover `Welcome`
 /// at a paragraph's start reads `W<!--c …-->elcome`, and still means `Welcome`.
@@ -745,17 +745,17 @@ fn balanced_link(s: &str) -> Option<usize> {
 // ---------------------------------------------------------------------------
 
 /// First code point of the private-use range the renderer uses for sentinels.
-pub const SENTINEL_BASE: u32 = 0xE000;
+pub(crate) const SENTINEL_BASE: u32 = 0xE000;
 
 /// Which mark a sentinel stands for.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Sentinel {
+pub(crate) struct Sentinel {
     pub id: MarkId,
     pub open: bool,
     pub note: String,
 }
 
-pub fn sentinel_char(index: usize) -> char {
+pub(crate) fn sentinel_char(index: usize) -> char {
     char::from_u32(SENTINEL_BASE + index as u32).unwrap_or('\u{E000}')
 }
 
@@ -773,7 +773,7 @@ fn sentinel_index(c: char) -> Option<usize> {
 /// canonical text by aligning the two. The result always strips back to
 /// `canonical` exactly; marks that would change how the block parses are
 /// nudged outside emphasis delimiters, and dropped if that does not help.
-pub fn place(canonical: &str, with_sentinels: &str, table: &[Sentinel]) -> String {
+pub(crate) fn place(canonical: &str, with_sentinels: &str, table: &[Sentinel]) -> String {
     // 1. Take the sentinels out, remembering where each one was.
     let mut plain = String::with_capacity(with_sentinels.len());
     let mut found: Vec<(usize, usize)> = Vec::new(); // (offset in `plain`, sentinel index)

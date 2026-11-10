@@ -65,12 +65,12 @@ const SEPARATOR: char = '\n';
 /// The selectable text of a page, plus whether it has any text inside macro
 /// parameters or code bodies (for a better "not found" message).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PageText {
+pub(crate) struct PageText {
     pub text: String,
     pub hidden: String,
 }
 
-pub fn page_text(storage: &str) -> ConvertResult<PageText> {
+pub(crate) fn page_text(storage: &str) -> ConvertResult<PageText> {
     let nodes = dom::parse_fragment(storage)?;
     let mut out = PageText::default();
     walk(&nodes, false, &mut out);
@@ -151,7 +151,7 @@ pub fn select(
     Ok(select_in(&page, needle, occurrence))
 }
 
-pub fn select_in(
+pub(crate) fn select_in(
     page: &PageText,
     needle: &str,
     occurrence: Option<usize>,

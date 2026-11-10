@@ -6,10 +6,10 @@
 //! as churn in the page history and still drops whatever the converter cannot
 //! model.
 
-mod corpus;
+use crate::corpus;
 
-use confed_converter::blockmap::{slice_lines, BlockKind, BlockMap};
-use confed_converter::{markdown_to_storage_patched, storage_to_markdown, ConvertError, Converted};
+use crate::blockmap::{slice_lines, BlockKind, BlockMap};
+use crate::{markdown_to_storage_patched, storage_to_markdown, ConvertError, Converted};
 
 const MARK: &str = "ZZQEDITED";
 
@@ -223,7 +223,7 @@ fn deleting_a_block_removes_only_that_block() {
             // count as edited. This is the one documented case where deleting
             // a block regenerates more than itself (see README, "Fusion").
             let mut changed = vec![victim];
-            if confed_converter::mdblock::split_blocks(&new_md).len() < c.block_map.len() - 1 {
+            if crate::mdblock::split_blocks(&new_md).len() < c.block_map.len() - 1 {
                 if victim > 0 {
                     changed.push(victim - 1);
                 }

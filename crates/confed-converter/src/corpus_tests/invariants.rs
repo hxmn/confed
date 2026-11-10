@@ -3,10 +3,10 @@
 //! These are not "does it look right" tests — they are the properties the rest
 //! of confed is allowed to rely on.
 
-mod corpus;
+use crate::corpus;
 
-use confed_converter::blockmap::{hash_text, BlockKind};
-use confed_converter::{mdblock, pretty, storage_parse, storage_to_markdown};
+use crate::blockmap::{hash_text, BlockKind};
+use crate::{mdblock, pretty, storage_parse, storage_to_markdown};
 
 #[test]
 fn parser_survives_the_corpus_and_spans_reproduce_the_source() {

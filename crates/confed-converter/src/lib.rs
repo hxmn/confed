@@ -16,19 +16,31 @@
 /// waiting for each page to change on the server.
 pub const CONVERTER_VERSION: u32 = 8;
 
-pub mod blockmap;
-pub mod dom;
-pub mod error;
-pub mod macros;
+// What confed-core needs and nothing else is public: each public item is a
+// semver commitment once the crate is on crates.io. The modules below the
+// three public ones are how conversion works, not what it offers.
+mod blockmap;
+mod dom;
+mod error;
+mod macros;
 pub mod marks;
-pub mod mdblock;
+mod mdblock;
 pub mod pretty;
 pub mod selection;
-pub mod storage_parse;
-pub mod to_markdown;
-pub mod to_storage;
+mod storage_parse;
+mod to_markdown;
+mod to_storage;
+
+#[cfg(test)]
+extern crate self as confed_converter;
+#[cfg(test)]
+#[path = "../tests/corpus.rs"]
+mod corpus;
+#[cfg(test)]
+mod corpus_tests;
 
 pub use blockmap::{BlockEntry, BlockKind, BlockMap};
+pub use dom::MAX_DEPTH;
 pub use error::{ConvertError, ConvertResult};
 pub use marks::{Mark, MarkId, MarkIssue, PlacedMark, Stripped};
 

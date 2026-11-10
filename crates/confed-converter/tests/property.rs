@@ -6,7 +6,7 @@
 
 mod corpus;
 
-use confed_converter::blockmap::{slice_lines, BlockKind};
+use confed_converter::BlockKind;
 use confed_converter::{markdown_to_storage_patched, storage_to_markdown, Converted};
 use proptest::prelude::*;
 
@@ -62,7 +62,7 @@ proptest! {
 
         let mut new_md = String::new();
         for (i, b) in case.converted.block_map.blocks.iter().enumerate() {
-            let text = slice_lines(&case.converted.markdown, b.md_span.0, b.md_span.1);
+            let text = corpus::block_text(&case.converted.markdown, b);
             if chosen.contains(&i) {
                 let nl = text.find('\n').unwrap_or(text.len());
                 new_md.push_str(&text[..nl]);

@@ -2,9 +2,8 @@
 //! hostile — must not overflow the stack. Each test runs on a test thread,
 //! whose stack (2 MiB) is no larger than the async runtime's workers.
 
-use confed_converter::blockmap::BlockKind;
-use confed_converter::dom::MAX_DEPTH;
 use confed_converter::{markdown_to_storage, pretty, storage_to_markdown, ConvertOptions};
+use confed_converter::{BlockKind, MAX_DEPTH};
 
 fn nested(open: &str, close: &str, depth: usize, inner: &str) -> String {
     format!("{}{inner}{}", open.repeat(depth), close.repeat(depth))

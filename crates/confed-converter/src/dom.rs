@@ -107,11 +107,6 @@ impl Element {
         self.children.iter().filter_map(Node::as_element)
     }
 
-    /// First descendant-of-depth-1 element with the given qualified name.
-    pub fn child(&self, name: &str) -> Option<&Element> {
-        self.child_elements().find(|e| e.name == name)
-    }
-
     pub fn child_local(&self, local: &str) -> Option<&Element> {
         self.child_elements().find(|e| e.local() == local)
     }
