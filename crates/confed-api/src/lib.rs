@@ -10,6 +10,9 @@
 pub mod client;
 pub mod error;
 pub mod http;
+/// A stateful in-memory Confluence for tests, behind the `mock` feature: it is
+/// not part of the published API, and release builds do not compile it.
+#[cfg(any(test, feature = "mock"))]
 pub mod mock;
 pub mod paginate;
 pub mod secret;
@@ -19,6 +22,7 @@ pub mod wire;
 pub use client::ConfluenceClient;
 pub use error::{ApiError, ApiResult};
 pub use http::{partial_path, Auth, Http, RetryPolicy, Timeouts, WebAnswer, PARTIAL_SUFFIX};
+#[cfg(any(test, feature = "mock"))]
 pub use mock::MockClient;
 pub use secret::Secret;
 pub use types::*;

@@ -11,6 +11,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# The in-memory MockClient, for the tests of crates built on this one.
+mock = []
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true

@@ -24,6 +24,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+confed-api = { workspace = true, features = ["mock"] }
 tempfile.workspace = true
 
 [lints]
