@@ -874,6 +874,8 @@ impl SyncEngine {
         let body = body_override.unwrap_or(converted.markdown);
         let file = self.build_file(ws, remote, placement, local, body)?;
         let rendered = file.render()?;
+        // Read before the base moves: afterwards it is the new version.
+        let from_version = ws.state().get_page(&remote.page_id)?.map(|p| p.version);
 
         if !opts.dry_run {
             write_atomic(&ws.absolute(&placement.path), &rendered)?;
@@ -893,7 +895,7 @@ impl SyncEngine {
             page_id: remote.page_id.clone(),
             path: placement.path.clone(),
             title: remote.title.clone(),
-            from_version: ws.state().get_page(&remote.page_id)?.map(|p| p.version),
+            from_version,
             to_version: Some(remote.version),
             ops: Vec::new(),
         })

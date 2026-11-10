@@ -171,9 +171,12 @@ both_flavors!(a_remote_edit_leaves_the_page_behind_until_pulled, |mut h: Harness
     h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
     assert_eq!(h.status("1001"), PageState::Behind);
 
-    h.pull().await;
+    let outcome = h.pull().await;
     assert!(h.read("Notes.md").contains("Two, added on the server"));
     assert_eq!(h.status("1001"), PageState::Unchanged);
+    // The outcome says where the page came from, not only where it went.
+    let change = &outcome.updated[0];
+    assert_eq!((change.from_version, change.to_version), (Some(1), Some(2)), "{change:?}");
 });
 
 both_flavors!(edits_on_both_sides_merge_when_they_do_not_overlap, |mut h: Harness| async move {
