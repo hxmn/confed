@@ -471,395 +471,31 @@ pub async fn draft(
         return Err(ConfedError::usage("there is nothing to move"));
     };
 
-    let mut blocking: Vec<Blocker> = Vec::new();
-    let mut warnings = Vec::new();
-    let src_key = req.source.key.as_str();
+    let mut checks =
+        Checks { client, spaces, req, src, dst, blocking: Vec::new(), warnings: Vec::new() };
 
-    let mut roots = Vec::new();
-    for id in &req.roots {
-        roots.push(src.state().get_page(id)?.ok_or_else(|| {
-            ConfedError::NotFound(format!(
-                "page {id} is not tracked in {}; `confed -C {} pull` it first",
-                req.source.dir, req.source.dir
-            ))
-        })?);
-    }
-
-    // Home pages stay where they are: a space without one is broken.
-    let source_space = client.get_space(&req.source.key).await?;
-    for root in &roots {
-        if source_space.homepage_id.as_ref().is_some_and(|h| h.0 == root.page_id) {
-            blocking.push(
-                Blocker::new(
-                    "home_page",
-                    format!("{} is the home page of space {}", root.local_path, req.source.key),
-                )
-                .page(&root.page_id, src_key, &root.local_path),
-            );
-        }
-    }
-
-    // The subtrees, as the server last listed them: each root, then the
-    // pages under it. A root under another one is already moved with it.
+    let roots = checks.roots()?;
+    checks.check_home_pages(&roots).await?;
     let remote = src.state().all_remote()?;
-    let mut children: HashMap<&str, Vec<&RemotePage>> = HashMap::new();
-    for page in remote.iter().filter(|r| !r.deleted) {
-        if let Some(parent) = &page.parent_id {
-            children.entry(parent.as_str()).or_default().push(page);
-        }
-    }
-    let mut subtree: Vec<(String, usize)> = Vec::new();
-    for root in &roots {
-        if subtree.iter().any(|(id, _)| id == &root.page_id) {
-            blocking.push(
-                Blocker::new(
-                    "nested_source",
-                    format!(
-                        "{} is named twice, or is under another page being moved; name only \
-                         the page above it",
-                        root.local_path
-                    ),
-                )
-                .page(&root.page_id, src_key, &root.local_path),
-            );
-            continue;
-        }
-        let start = subtree.len();
-        subtree.push((root.page_id.clone(), 0));
-        let mut index = start;
-        while index < subtree.len() {
-            let (id, depth) = subtree[index].clone();
-            let mut kids = children.get(id.as_str()).cloned().unwrap_or_default();
-            kids.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.title.cmp(&b.title)));
-            for kid in kids {
-                if let Some(at) =
-                    subtree[..start].iter().position(|(k, d)| k == &kid.page_id && *d == 0)
-                {
-                    // An earlier root is under this one.
-                    let path = src
-                        .state()
-                        .get_page(&kid.page_id)?
-                        .map(|p| p.local_path)
-                        .unwrap_or_default();
-                    blocking.push(
-                        Blocker::new(
-                            "nested_source",
-                            format!(
-                                "{path} is under {}, which is moved too; name only the page \
-                                 above it",
-                                root.local_path
-                            ),
-                        )
-                        .page(&subtree[at].0, src_key, &path),
-                    );
-                    continue;
-                }
-                subtree.push((kid.page_id.clone(), depth + 1));
-            }
-            index += 1;
-        }
-    }
+    let subtree = checks.subtree(&roots, &remote)?;
     let ids: HashSet<String> = subtree.iter().map(|(id, _)| id.clone()).collect();
-
-    // In sync: nothing local to lose, nothing remote not yet pulled.
-    let scan = worktree::scan(src)?;
-    let status_of = |id: &str| scan.pages.iter().find(|s| s.page_id.as_deref() == Some(id));
-    let mut pages = Vec::new();
-    for (id, depth) in &subtree {
-        let base = src.state().get_page(id)?;
-        let remote_page = remote.iter().find(|r| &r.page_id == id);
-        let title = base
-            .as_ref()
-            .map(|b| b.title.clone())
-            .or_else(|| remote_page.map(|r| r.title.clone()))
-            .unwrap_or_default();
-        let Some(base) = base else {
-            let mut blocker = Blocker::new(
-                "not_pulled",
-                format!(
-                    "\"{title}\" ({id}) has not been pulled into {}; run `confed -C {} pull`",
-                    req.source.dir, req.source.dir
-                ),
-            )
-            .page(id, src_key, "");
-            blocker.title = Some(title);
-            blocking.push(blocker);
-            continue;
-        };
-        match status_of(id) {
-            Some(status) if status.is_clean() => {}
-            Some(status) => blocking.push(
-                Blocker::new(
-                    "local_changes",
-                    format!(
-                        "{}: {}{}",
-                        base.local_path,
-                        describe_state(status.state),
-                        if status.tampering.is_empty() { "" } else { " (frontmatter edited)" }
-                    ),
-                )
-                .page(id, src_key, &base.local_path),
-            ),
-            None => {
-                blocking.push(
-                    Blocker::new("local_changes", format!("{}: not on disk", base.local_path))
-                        .page(id, src_key, &base.local_path),
-                );
-            }
-        }
-        let drafts = pending_comment_work(src, &base.local_path);
-        if drafts > 0 {
-            blocking.push(
-                Blocker::new(
-                    "comment_drafts",
-                    format!("{}: {drafts} comment draft(s) not pushed yet", base.local_path),
-                )
-                .page(id, src_key, &base.local_path),
-            );
-        }
-        pages.push(PlannedPage {
-            page_id: id.clone(),
-            title: base.title.clone(),
-            new_title: None,
-            rename_reason: None,
-            parent_id: base.parent_id.clone(),
-            depth: *depth,
-            from_path: base.local_path.clone(),
-            to_path: String::new(),
-            comments: src.state().page_comments(id)?.len(),
-            attachments: src.state().page_attachments(id)?.len(),
-            restricted: Vec::new(),
-        });
-    }
-
-    // New pages that were never pushed, filed under a moved page.
-    let dirs: Vec<String> = pages.iter().map(|p| paths::children_dir(&p.from_path)).collect();
-    for status in &scan.pages {
-        if status.state == PageState::LocalNew
-            && dirs.iter().any(|d| status.path.starts_with(&format!("{d}/")))
-        {
-            let mut blocker = Blocker::new(
-                "unpushed_page",
-                format!("{}: a new page, not pushed yet", status.path),
-            );
-            blocker.space = Some(src_key.to_string());
-            blocker.path = Some(status.path.clone());
-            blocking.push(blocker);
-        }
-    }
-
-    // Attachments added, replaced or removed locally.
-    let engine = SyncEngine::new(client.clone(), req.source.id(), 0);
-    let attachment_work = engine.plan_push(
-        src,
-        &PushOptions {
-            scope: ids.iter().cloned().collect(),
-            with_attachments: true,
-            with_comments: false,
-            dry_run: true,
-            ..Default::default()
-        },
-    )?;
-    for op in &attachment_work.attachment_ops {
-        let mut blocker = Blocker::new(
-            "attachment_changes",
-            format!("{}: attachment change not pushed yet", op.file),
-        );
-        blocker.space = Some(src_key.to_string());
-        blocker.path = Some(op.file.clone());
-        blocking.push(blocker);
-    }
-
-    // The new parent is in sync too.
-    if let Some(parent) = &req.new_parent_id {
-        match dst.state().get_page(parent)? {
-            None => blocking.push(
-                Blocker::new(
-                    "destination_parent_not_tracked",
-                    format!(
-                        "the destination parent ({parent}) is not tracked in {}; `confed -C {} \
-                         pull` first",
-                        req.dest.dir, req.dest.dir
-                    ),
-                )
-                .page(parent, &req.dest.key, ""),
-            ),
-            Some(record) => {
-                let dscan = worktree::scan(dst)?;
-                if let Some(status) = dscan
-                    .pages
-                    .iter()
-                    .find(|s| s.page_id.as_deref() == Some(parent.as_str()))
-                    .filter(|s| !s.is_clean())
-                {
-                    blocking.push(
-                        Blocker::new(
-                            "destination_parent_changed",
-                            format!(
-                                "{}:{}: {}",
-                                req.dest.key,
-                                record.local_path,
-                                describe_state(status.state)
-                            ),
-                        )
-                        .page(parent, &req.dest.key, &record.local_path),
-                    );
-                }
-            }
-        }
-    }
-
-    // Titles are unique per space: check against the server, not the mirror.
-    let taken: HashMap<String, String> = client
-        .list_pages(&req.dest.id())
-        .await?
-        .into_iter()
-        .map(|p| (p.title.to_lowercase(), p.id.0))
-        .collect();
-    let single = req.roots.len() == 1;
-    for page in &mut pages {
-        if page.depth == 0 && single {
-            page.new_title = req.new_title.clone().filter(|t| t != &page.title);
-            if page.new_title.is_some() {
-                page.rename_reason = Some("destination_path".into());
-            }
-        }
-        if let OnConflict::Map(map) = &req.on_conflict {
-            if let Some(title) = map.get(&page.page_id).or_else(|| map.get(&page.title)) {
-                page.new_title = Some(title.clone()).filter(|t| t != &page.title);
-                page.rename_reason = page.new_title.as_ref().map(|_| "title_map".into());
-            }
-        }
-        let wanted = page.final_title().to_string();
-        let Some(existing) = taken.get(&wanted.to_lowercase()) else { continue };
-        let suffixed = format!("{wanted} ({})", req.source.key);
-        let suffix_free = !taken.contains_key(&suffixed.to_lowercase());
-        match req.on_conflict {
-            OnConflict::Suffix => {
-                if !suffix_free {
-                    let mut blocker = Blocker::new(
-                        "title_taken",
-                        format!(
-                            "\"{wanted}\" and \"{suffixed}\" both exist in space {}",
-                            req.dest.key
-                        ),
-                    )
-                    .page(&page.page_id, src_key, &page.from_path);
-                    blocker.title = Some(wanted.clone());
-                    blocker.existing_page_id = Some(existing.clone());
-                    blocking.push(blocker);
-                }
-                page.new_title = Some(suffixed);
-                page.rename_reason = Some("conflict_suffix".into());
-            }
-            _ => {
-                let mut blocker = Blocker::new(
-                    "title_taken",
-                    format!(
-                        "title \"{wanted}\" ({}) is already used in space {}",
-                        page.from_path, req.dest.key
-                    ),
-                )
-                .page(&page.page_id, src_key, &page.from_path);
-                blocker.title = Some(wanted.clone());
-                blocker.existing_page_id = Some(existing.clone());
-                blocker.suggested_title = suffix_free.then_some(suffixed);
-                blocking.push(blocker);
-            }
-        }
-    }
-
-    // Permissions, where the server says.
-    let mut unchecked = false;
-    for root in &roots {
-        match client.page_operations(&PageId::new(&root.page_id)).await {
-            Ok(Some(ops)) => {
-                for needed in ["update", "delete"] {
-                    if !ops.iter().any(|o| o == needed) {
-                        blocking.push(
-                            Blocker::new(
-                                "no_permission",
-                                format!(
-                                    "you may not {needed} {} in space {}",
-                                    root.local_path, req.source.key
-                                ),
-                            )
-                            .page(
-                                &root.page_id,
-                                src_key,
-                                &root.local_path,
-                            ),
-                        );
-                    }
-                }
-            }
-            Ok(None) | Err(_) => unchecked = true,
-        }
-    }
-    let landing = req.new_parent_id.clone().unwrap_or_else(|| req.target_id.clone());
-    match client.page_operations(&PageId::new(&landing)).await {
-        Ok(Some(ops)) if !ops.iter().any(|o| o == "create") => blocking.push(
-            Blocker::new(
-                "no_permission",
-                format!("you may not add pages in space {}", req.dest.key),
-            )
-            .page(&landing, &req.dest.key, ""),
-        ),
-        Ok(Some(_)) => {}
-        Ok(None) | Err(_) => unchecked = true,
-    }
-    if unchecked {
-        warnings.push(
-            "the server did not say what you may do, so permissions were not checked; \
-             a refusal from the server stops the move before anything else changes"
-                .to_string(),
-        );
-    }
-
-    // Restrictions move with the pages; say so.
-    for page in &mut pages {
-        if let Ok(restricted) = client.page_restrictions(&PageId::new(&page.page_id)).await {
-            if !restricted.is_empty() {
-                warnings.push(format!(
-                    "{} has {} restrictions, which move with it",
-                    page.from_path,
-                    restricted.join(" and ")
-                ));
-                page.restricted = restricted;
-            }
-        }
-    }
-
+    let (mut pages, scan) = checks.check_in_sync(&subtree, &remote)?;
+    checks.check_unpushed(&pages, &scan, &ids)?;
+    checks.check_destination_parent()?;
+    checks.assign_titles(&mut pages).await?;
+    checks.check_permissions(&roots).await;
+    checks.note_restrictions(&mut pages).await;
     let rules_page = src.rules_page_id()?.filter(|id| ids.contains(id));
     if let Some(id) = &rules_page {
-        warnings.push(format!(
+        checks.warnings.push(format!(
             "page {id} is the rules page of {}; after the move it is in {}, and {} has none",
             req.source.key, req.dest.key, req.source.key
         ));
     }
 
-    // Where each page will be in the destination, and that nothing is in the way.
-    let placements = simulate_placements(src, dst, &pages, req)?;
-    for page in &mut pages {
-        let Some(placement) = placements.get(&page.page_id) else { continue };
-        page.to_path = placement.path.clone();
-        for path in [placement.path.clone(), placement.sidecar.clone()] {
-            if dst.absolute(&path).exists() {
-                let mut blocker = Blocker::new(
-                    "path_taken",
-                    format!(
-                        "{}:{path} already exists, and the move would put {} there",
-                        req.dest.key, page.from_path
-                    ),
-                );
-                blocker.page_id = Some(page.page_id.clone());
-                blocker.space = Some(req.dest.key.clone());
-                blocker.path = Some(path);
-                blocking.push(blocker);
-            }
-        }
-    }
+    checks.place(&mut pages)?;
 
+    let warnings = std::mem::take(&mut checks.warnings);
     // Links the move breaks, in every registered workspace.
     let mut plan = MovePlan {
         source: req.source.clone(),
@@ -888,103 +524,596 @@ pub async fn draft(
         links_broken: Vec::new(),
         verified: None,
     };
-    let moves = plan.moves();
-    let index = PageIndex::of(spaces, &plan)?;
-    let exists = |space: &str, title: &str| index.exists(space, title);
-    for (key, ws) in spaces {
-        // Read the working tree only for a space that has a page to check.
-        let mut scan: Option<worktree::Scan> = None;
-        for page in ws.state().all_pages()? {
-            let moved = key == &req.source.key && ids.contains(&page.page_id);
-            let ctx = LinkContext {
-                space_before: key,
-                space_after: if moved { &req.dest.key } else { key },
-                moves: &moves,
-                relativize: req.relativize,
-                exists: Some(&exists),
-            };
-            let (_, count) = rewrite_links(&page.storage_body, &ctx);
-            if count == 0 {
-                continue;
-            }
-            if req.rewrite_links && !moved {
-                if scan.is_none() {
-                    scan = Some(worktree::scan(ws)?);
-                }
-                let dirty = scan
-                    .as_ref()
-                    .expect("read above")
-                    .pages
-                    .iter()
-                    .find(|s| s.page_id.as_deref() == Some(page.page_id.as_str()))
-                    .is_some_and(|s| !s.is_clean());
-                if dirty {
-                    blocking.push(
-                        Blocker::new(
-                            "linking_page_changed",
-                            format!(
-                                "{key}:{} links to a moved page and has local changes; push \
-                                 them first, or pass --no-rewrite-links",
-                                page.local_path
-                            ),
-                        )
-                        .page(&page.page_id, key, &page.local_path),
-                    );
-                }
-            }
-            plan.links.push(LinkFix {
-                page_id: page.page_id.clone(),
-                space: key.clone(),
-                path: page.local_path.clone(),
-                title: page.title.clone(),
-                count,
-                moved,
-            });
-        }
-    }
-
+    checks.find_links(&mut plan, &ids)?;
     // Last, so that a server that cannot move does not hide everything else
-    // that is wrong with the move: can this server move a page between spaces
-    // at all? Asked about the first root, without moving it.
-    plan.blocked = match client.probe_move(&PageId::new(first)).await {
-        Ok(confed_api::Probe::Available) => None,
-        Ok(confed_api::Probe::WebAction) => {
-            plan.warnings.push(
-                "this Data Center has no REST move endpoint, so confed will move the pages \
-                 through the web UI's move action (pages/movepage.action), which is not a \
-                 documented API; it follows the server's background task, then waits up to \
-                 --wait seconds for every page to show in the new space, and stops (exit 7, \
-                 for `confed instance resume`) if they have not"
-                    .to_string(),
-            );
-            None
-        }
-        Ok(confed_api::Probe::WebActionRefused) => Some(
-            "this Data Center has no REST move endpoint, and its web UI's move action \
-             (pages/movepage.action) refuses scripted requests: its XSRF check answered 403 \
-             (\"Session Expired\", missing security token) to X-Atlassian-Token: no-check and \
-             to a session token. Pages can be moved in the browser only; confed will not copy \
-             and delete instead, which would lose ids and history"
-                .to_string(),
-        ),
-        Ok(confed_api::Probe::Unavailable) => Some(format!(
-            "this server cannot move pages between spaces: rest/api/content/{first}/move does \
-             not answer, and on Data Center the web UI's move action is missing or does not \
-             accept this credential; confed will not copy and delete instead, which would lose \
-             ids and history"
-        )),
-        Ok(confed_api::Probe::Unknown) | Err(_) => {
-            plan.warnings.push(
-                "could not tell whether this server can move pages between spaces; if it \
-                 cannot, the move stops with exit 9 before anything else changes"
-                    .to_string(),
-            );
-            None
-        }
-    };
+    // that is wrong with the move.
+    checks.probe_move(&mut plan, first).await;
+    let mut blocking = checks.blocking;
     blocking.dedup();
     plan.blocking = blocking;
     Ok(plan)
+}
+
+/// What [`draft`] checks a move against, and what the checks find. Each
+/// check is a method that adds to `blocking` and `warnings`.
+struct Checks<'a> {
+    client: &'a Arc<dyn ConfluenceClient>,
+    spaces: &'a BTreeMap<String, Workspace>,
+    req: &'a MoveRequest,
+    src: &'a Workspace,
+    dst: &'a Workspace,
+    blocking: Vec<Blocker>,
+    warnings: Vec<String>,
+}
+
+impl Checks<'_> {
+    /// The pages named to move, as the source workspace tracks them.
+    fn roots(&self) -> Result<Vec<PageRecord>> {
+        let req = self.req;
+        let src = self.src;
+        let mut roots = Vec::new();
+        for id in &req.roots {
+            roots.push(src.state().get_page(id)?.ok_or_else(|| {
+                ConfedError::NotFound(format!(
+                    "page {id} is not tracked in {}; `confed -C {} pull` it first",
+                    req.source.dir, req.source.dir
+                ))
+            })?);
+        }
+        Ok(roots)
+    }
+
+    /// Home pages stay where they are: a space without one is broken.
+    async fn check_home_pages(&mut self, roots: &[PageRecord]) -> Result<()> {
+        let client = self.client;
+        let req = self.req;
+        let src_key = self.req.source.key.as_str();
+        let blocking = &mut self.blocking;
+        let source_space = client.get_space(&req.source.key).await?;
+        for root in roots {
+            if source_space.homepage_id.as_ref().is_some_and(|h| h.0 == root.page_id) {
+                blocking.push(
+                    Blocker::new(
+                        "home_page",
+                        format!("{} is the home page of space {}", root.local_path, req.source.key),
+                    )
+                    .page(&root.page_id, src_key, &root.local_path),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The subtrees, as the server last listed them: each root, then the pages
+    /// under it, with their depth. A root under another one is already moved
+    /// with it.
+    fn subtree(
+        &mut self,
+        roots: &[PageRecord],
+        remote: &[RemotePage],
+    ) -> Result<Vec<(String, usize)>> {
+        let src = self.src;
+        let src_key = self.req.source.key.as_str();
+        let blocking = &mut self.blocking;
+        let mut children: HashMap<&str, Vec<&RemotePage>> = HashMap::new();
+        for page in remote.iter().filter(|r| !r.deleted) {
+            if let Some(parent) = &page.parent_id {
+                children.entry(parent.as_str()).or_default().push(page);
+            }
+        }
+        let mut subtree: Vec<(String, usize)> = Vec::new();
+        for root in roots {
+            if subtree.iter().any(|(id, _)| id == &root.page_id) {
+                blocking.push(
+                    Blocker::new(
+                        "nested_source",
+                        format!(
+                            "{} is named twice, or is under another page being moved; name only \
+                             the page above it",
+                            root.local_path
+                        ),
+                    )
+                    .page(&root.page_id, src_key, &root.local_path),
+                );
+                continue;
+            }
+            let start = subtree.len();
+            subtree.push((root.page_id.clone(), 0));
+            let mut index = start;
+            while index < subtree.len() {
+                let (id, depth) = subtree[index].clone();
+                let mut kids = children.get(id.as_str()).cloned().unwrap_or_default();
+                kids.sort_by(|a, b| {
+                    a.position.cmp(&b.position).then_with(|| a.title.cmp(&b.title))
+                });
+                for kid in kids {
+                    if let Some(at) =
+                        subtree[..start].iter().position(|(k, d)| k == &kid.page_id && *d == 0)
+                    {
+                        // An earlier root is under this one.
+                        let path = src
+                            .state()
+                            .get_page(&kid.page_id)?
+                            .map(|p| p.local_path)
+                            .unwrap_or_default();
+                        blocking.push(
+                            Blocker::new(
+                                "nested_source",
+                                format!(
+                                    "{path} is under {}, which is moved too; name only the page \
+                                     above it",
+                                    root.local_path
+                                ),
+                            )
+                            .page(&subtree[at].0, src_key, &path),
+                        );
+                        continue;
+                    }
+                    subtree.push((kid.page_id.clone(), depth + 1));
+                }
+                index += 1;
+            }
+        }
+        Ok(subtree)
+    }
+
+    /// Every page of the move in sync: nothing local to lose, nothing remote
+    /// not yet pulled. The planned pages, and the scan that said so.
+    fn check_in_sync(
+        &mut self,
+        subtree: &[(String, usize)],
+        remote: &[RemotePage],
+    ) -> Result<(Vec<PlannedPage>, worktree::Scan)> {
+        let req = self.req;
+        let src = self.src;
+        let src_key = self.req.source.key.as_str();
+        let blocking = &mut self.blocking;
+        let scan = worktree::scan(src)?;
+        let status_of = |id: &str| scan.pages.iter().find(|s| s.page_id.as_deref() == Some(id));
+        let mut pages = Vec::new();
+        for (id, depth) in subtree {
+            let base = src.state().get_page(id)?;
+            let remote_page = remote.iter().find(|r| &r.page_id == id);
+            let title = base
+                .as_ref()
+                .map(|b| b.title.clone())
+                .or_else(|| remote_page.map(|r| r.title.clone()))
+                .unwrap_or_default();
+            let Some(base) = base else {
+                let mut blocker = Blocker::new(
+                    "not_pulled",
+                    format!(
+                        "\"{title}\" ({id}) has not been pulled into {}; run `confed -C {} pull`",
+                        req.source.dir, req.source.dir
+                    ),
+                )
+                .page(id, src_key, "");
+                blocker.title = Some(title);
+                blocking.push(blocker);
+                continue;
+            };
+            match status_of(id) {
+                Some(status) if status.is_clean() => {}
+                Some(status) => blocking.push(
+                    Blocker::new(
+                        "local_changes",
+                        format!(
+                            "{}: {}{}",
+                            base.local_path,
+                            describe_state(status.state),
+                            if status.tampering.is_empty() { "" } else { " (frontmatter edited)" }
+                        ),
+                    )
+                    .page(id, src_key, &base.local_path),
+                ),
+                None => {
+                    blocking.push(
+                        Blocker::new("local_changes", format!("{}: not on disk", base.local_path))
+                            .page(id, src_key, &base.local_path),
+                    );
+                }
+            }
+            let drafts = pending_comment_work(src, &base.local_path);
+            if drafts > 0 {
+                blocking.push(
+                    Blocker::new(
+                        "comment_drafts",
+                        format!("{}: {drafts} comment draft(s) not pushed yet", base.local_path),
+                    )
+                    .page(id, src_key, &base.local_path),
+                );
+            }
+            pages.push(PlannedPage {
+                page_id: id.clone(),
+                title: base.title.clone(),
+                new_title: None,
+                rename_reason: None,
+                parent_id: base.parent_id.clone(),
+                depth: *depth,
+                from_path: base.local_path.clone(),
+                to_path: String::new(),
+                comments: src.state().page_comments(id)?.len(),
+                attachments: src.state().page_attachments(id)?.len(),
+                restricted: Vec::new(),
+            });
+        }
+        Ok((pages, scan))
+    }
+
+    /// Work under the moved pages that was never pushed: new pages filed under
+    /// them, and attachments added, replaced or removed.
+    fn check_unpushed(
+        &mut self,
+        pages: &[PlannedPage],
+        scan: &worktree::Scan,
+        ids: &HashSet<String>,
+    ) -> Result<()> {
+        let client = self.client;
+        let req = self.req;
+        let src = self.src;
+        let src_key = self.req.source.key.as_str();
+        let blocking = &mut self.blocking;
+        let dirs: Vec<String> = pages.iter().map(|p| paths::children_dir(&p.from_path)).collect();
+        for status in &scan.pages {
+            if status.state == PageState::LocalNew
+                && dirs.iter().any(|d| status.path.starts_with(&format!("{d}/")))
+            {
+                let mut blocker = Blocker::new(
+                    "unpushed_page",
+                    format!("{}: a new page, not pushed yet", status.path),
+                );
+                blocker.space = Some(src_key.to_string());
+                blocker.path = Some(status.path.clone());
+                blocking.push(blocker);
+            }
+        }
+
+        // Attachments added, replaced or removed locally.
+        let engine = SyncEngine::new(client.clone(), req.source.id(), 0);
+        let attachment_work = engine.plan_push(
+            src,
+            &PushOptions {
+                scope: ids.iter().cloned().collect(),
+                with_attachments: true,
+                with_comments: false,
+                dry_run: true,
+                ..Default::default()
+            },
+        )?;
+        for op in &attachment_work.attachment_ops {
+            let mut blocker = Blocker::new(
+                "attachment_changes",
+                format!("{}: attachment change not pushed yet", op.file),
+            );
+            blocker.space = Some(src_key.to_string());
+            blocker.path = Some(op.file.clone());
+            blocking.push(blocker);
+        }
+        Ok(())
+    }
+
+    /// The new parent is in sync too.
+    fn check_destination_parent(&mut self) -> Result<()> {
+        let req = self.req;
+        let dst = self.dst;
+        let blocking = &mut self.blocking;
+        if let Some(parent) = &req.new_parent_id {
+            match dst.state().get_page(parent)? {
+                None => blocking.push(
+                    Blocker::new(
+                        "destination_parent_not_tracked",
+                        format!(
+                            "the destination parent ({parent}) is not tracked in {}; `confed -C {} \
+                             pull` first",
+                            req.dest.dir, req.dest.dir
+                        ),
+                    )
+                    .page(parent, &req.dest.key, ""),
+                ),
+                Some(record) => {
+                    let dscan = worktree::scan(dst)?;
+                    if let Some(status) = dscan
+                        .pages
+                        .iter()
+                        .find(|s| s.page_id.as_deref() == Some(parent.as_str()))
+                        .filter(|s| !s.is_clean())
+                    {
+                        blocking.push(
+                            Blocker::new(
+                                "destination_parent_changed",
+                                format!(
+                                    "{}:{}: {}",
+                                    req.dest.key,
+                                    record.local_path,
+                                    describe_state(status.state)
+                                ),
+                            )
+                            .page(
+                                parent,
+                                &req.dest.key,
+                                &record.local_path,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The title each page will have in the destination. Titles are unique per
+    /// space, so they are checked against the server, not the mirror.
+    async fn assign_titles(&mut self, pages: &mut [PlannedPage]) -> Result<()> {
+        let client = self.client;
+        let req = self.req;
+        let src_key = self.req.source.key.as_str();
+        let blocking = &mut self.blocking;
+        let taken: HashMap<String, String> = client
+            .list_pages(&req.dest.id())
+            .await?
+            .into_iter()
+            .map(|p| (p.title.to_lowercase(), p.id.0))
+            .collect();
+        let single = req.roots.len() == 1;
+        for page in pages.iter_mut() {
+            if page.depth == 0 && single {
+                page.new_title = req.new_title.clone().filter(|t| t != &page.title);
+                if page.new_title.is_some() {
+                    page.rename_reason = Some("destination_path".into());
+                }
+            }
+            if let OnConflict::Map(map) = &req.on_conflict {
+                if let Some(title) = map.get(&page.page_id).or_else(|| map.get(&page.title)) {
+                    page.new_title = Some(title.clone()).filter(|t| t != &page.title);
+                    page.rename_reason = page.new_title.as_ref().map(|_| "title_map".into());
+                }
+            }
+            let wanted = page.final_title().to_string();
+            let Some(existing) = taken.get(&wanted.to_lowercase()) else { continue };
+            let suffixed = format!("{wanted} ({})", req.source.key);
+            let suffix_free = !taken.contains_key(&suffixed.to_lowercase());
+            match req.on_conflict {
+                OnConflict::Suffix => {
+                    if !suffix_free {
+                        let mut blocker = Blocker::new(
+                            "title_taken",
+                            format!(
+                                "\"{wanted}\" and \"{suffixed}\" both exist in space {}",
+                                req.dest.key
+                            ),
+                        )
+                        .page(&page.page_id, src_key, &page.from_path);
+                        blocker.title = Some(wanted.clone());
+                        blocker.existing_page_id = Some(existing.clone());
+                        blocking.push(blocker);
+                    }
+                    page.new_title = Some(suffixed);
+                    page.rename_reason = Some("conflict_suffix".into());
+                }
+                _ => {
+                    let mut blocker = Blocker::new(
+                        "title_taken",
+                        format!(
+                            "title \"{wanted}\" ({}) is already used in space {}",
+                            page.from_path, req.dest.key
+                        ),
+                    )
+                    .page(&page.page_id, src_key, &page.from_path);
+                    blocker.title = Some(wanted.clone());
+                    blocker.existing_page_id = Some(existing.clone());
+                    blocker.suggested_title = suffix_free.then_some(suffixed);
+                    blocking.push(blocker);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Permissions, where the server says.
+    async fn check_permissions(&mut self, roots: &[PageRecord]) {
+        let client = self.client;
+        let req = self.req;
+        let src_key = self.req.source.key.as_str();
+        let blocking = &mut self.blocking;
+        let warnings = &mut self.warnings;
+        let mut unchecked = false;
+        for root in roots {
+            match client.page_operations(&PageId::new(&root.page_id)).await {
+                Ok(Some(ops)) => {
+                    for needed in ["update", "delete"] {
+                        if !ops.iter().any(|o| o == needed) {
+                            blocking.push(
+                                Blocker::new(
+                                    "no_permission",
+                                    format!(
+                                        "you may not {needed} {} in space {}",
+                                        root.local_path, req.source.key
+                                    ),
+                                )
+                                .page(
+                                    &root.page_id,
+                                    src_key,
+                                    &root.local_path,
+                                ),
+                            );
+                        }
+                    }
+                }
+                Ok(None) | Err(_) => unchecked = true,
+            }
+        }
+        let landing = req.new_parent_id.clone().unwrap_or_else(|| req.target_id.clone());
+        match client.page_operations(&PageId::new(&landing)).await {
+            Ok(Some(ops)) if !ops.iter().any(|o| o == "create") => blocking.push(
+                Blocker::new(
+                    "no_permission",
+                    format!("you may not add pages in space {}", req.dest.key),
+                )
+                .page(&landing, &req.dest.key, ""),
+            ),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => unchecked = true,
+        }
+        if unchecked {
+            warnings.push(
+                "the server did not say what you may do, so permissions were not checked; \
+                 a refusal from the server stops the move before anything else changes"
+                    .to_string(),
+            );
+        }
+    }
+
+    /// Restrictions move with the pages; say so.
+    async fn note_restrictions(&mut self, pages: &mut [PlannedPage]) {
+        let client = self.client;
+        let warnings = &mut self.warnings;
+        for page in pages.iter_mut() {
+            if let Ok(restricted) = client.page_restrictions(&PageId::new(&page.page_id)).await {
+                if !restricted.is_empty() {
+                    warnings.push(format!(
+                        "{} has {} restrictions, which move with it",
+                        page.from_path,
+                        restricted.join(" and ")
+                    ));
+                    page.restricted = restricted;
+                }
+            }
+        }
+    }
+
+    /// Where each page will be in the destination, and that nothing is in the
+    /// way there.
+    fn place(&mut self, pages: &mut [PlannedPage]) -> Result<()> {
+        let req = self.req;
+        let src = self.src;
+        let dst = self.dst;
+        let blocking = &mut self.blocking;
+        let placements = simulate_placements(src, dst, pages, req)?;
+        for page in pages.iter_mut() {
+            let Some(placement) = placements.get(&page.page_id) else { continue };
+            page.to_path = placement.path.clone();
+            for path in [placement.path.clone(), placement.sidecar.clone()] {
+                if dst.absolute(&path).exists() {
+                    let mut blocker = Blocker::new(
+                        "path_taken",
+                        format!(
+                            "{}:{path} already exists, and the move would put {} there",
+                            req.dest.key, page.from_path
+                        ),
+                    );
+                    blocker.page_id = Some(page.page_id.clone());
+                    blocker.space = Some(req.dest.key.clone());
+                    blocker.path = Some(path);
+                    blocking.push(blocker);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Links the move breaks, in every registered workspace.
+    fn find_links(&mut self, plan: &mut MovePlan, ids: &HashSet<String>) -> Result<()> {
+        let spaces = self.spaces;
+        let req = self.req;
+        let blocking = &mut self.blocking;
+        let moves = plan.moves();
+        let index = PageIndex::of(spaces, plan)?;
+        let exists = |space: &str, title: &str| index.exists(space, title);
+        for (key, ws) in spaces {
+            // Read the working tree only for a space that has a page to check.
+            let mut scan: Option<worktree::Scan> = None;
+            for page in ws.state().all_pages()? {
+                let moved = key == &req.source.key && ids.contains(&page.page_id);
+                let ctx = LinkContext {
+                    space_before: key,
+                    space_after: if moved { &req.dest.key } else { key },
+                    moves: &moves,
+                    relativize: req.relativize,
+                    exists: Some(&exists),
+                };
+                let (_, count) = rewrite_links(&page.storage_body, &ctx);
+                if count == 0 {
+                    continue;
+                }
+                if req.rewrite_links && !moved {
+                    if scan.is_none() {
+                        scan = Some(worktree::scan(ws)?);
+                    }
+                    let dirty = scan
+                        .as_ref()
+                        .expect("read above")
+                        .pages
+                        .iter()
+                        .find(|s| s.page_id.as_deref() == Some(page.page_id.as_str()))
+                        .is_some_and(|s| !s.is_clean());
+                    if dirty {
+                        blocking.push(
+                            Blocker::new(
+                                "linking_page_changed",
+                                format!(
+                                    "{key}:{} links to a moved page and has local changes; push \
+                                     them first, or pass --no-rewrite-links",
+                                    page.local_path
+                                ),
+                            )
+                            .page(&page.page_id, key, &page.local_path),
+                        );
+                    }
+                }
+                plan.links.push(LinkFix {
+                    page_id: page.page_id.clone(),
+                    space: key.clone(),
+                    path: page.local_path.clone(),
+                    title: page.title.clone(),
+                    count,
+                    moved,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Can this server move a page between spaces at all? Asked about the
+    /// first root, without moving it.
+    async fn probe_move(&mut self, plan: &mut MovePlan, first: &str) {
+        let client = self.client;
+        plan.blocked = match client.probe_move(&PageId::new(first)).await {
+            Ok(confed_api::Probe::Available) => None,
+            Ok(confed_api::Probe::WebAction) => {
+                plan.warnings.push(
+                    "this Data Center has no REST move endpoint, so confed will move the pages \
+                     through the web UI's move action (pages/movepage.action), which is not a \
+                     documented API; it follows the server's background task, then waits up to \
+                     --wait seconds for every page to show in the new space, and stops (exit 7, \
+                     for `confed instance resume`) if they have not"
+                        .to_string(),
+                );
+                None
+            }
+            Ok(confed_api::Probe::WebActionRefused) => Some(
+                "this Data Center has no REST move endpoint, and its web UI's move action \
+                 (pages/movepage.action) refuses scripted requests: its XSRF check answered 403 \
+                 (\"Session Expired\", missing security token) to X-Atlassian-Token: no-check and \
+                 to a session token. Pages can be moved in the browser only; confed will not copy \
+                 and delete instead, which would lose ids and history"
+                    .to_string(),
+            ),
+            Ok(confed_api::Probe::Unavailable) => Some(format!(
+                "this server cannot move pages between spaces: rest/api/content/{first}/move does \
+                 not answer, and on Data Center the web UI's move action is missing or does not \
+                 accept this credential; confed will not copy and delete instead, which would lose \
+                 ids and history"
+            )),
+            Ok(confed_api::Probe::Unknown) | Err(_) => {
+                plan.warnings.push(
+                    "could not tell whether this server can move pages between spaces; if it \
+                     cannot, the move stops with exit 9 before anything else changes"
+                        .to_string(),
+                );
+                None
+            }
+        };
+    }
 }
 
 /// What a page's status means for a move, in a few words.
