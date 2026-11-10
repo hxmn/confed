@@ -419,6 +419,8 @@ impl Renderer<'_> {
     // -- inline ------------------------------------------------------------
 
     fn inline(&mut self, nodes: &[Node]) -> String {
+        let merged = merge_adjacent_emphasis(nodes);
+        let nodes = merged.as_deref().unwrap_or(nodes);
         let mut out = String::new();
         for n in nodes {
             self.inline_node(n, &mut out);
@@ -918,6 +920,51 @@ fn indent_item(content: &str, marker: &str) -> String {
     out
 }
 
+/// The delimiter an element is written with, for the ones that are written
+/// with one: those two of which side by side fuse into a single run.
+fn emphasis_kind(node: &Node) -> Option<&'static str> {
+    let el = node.as_element()?;
+    if el.name.contains(':') || !el.attrs.is_empty() {
+        return None;
+    }
+    match el.local() {
+        "strong" | "b" => Some("**"),
+        "em" | "i" => Some("*"),
+        "del" | "s" | "strike" => Some("~~"),
+        _ => None,
+    }
+}
+
+/// `nodes` with each run of adjacent same-kind emphasis made one element, or
+/// `None` when there is none. Confluence's editor writes
+/// `<strong>a</strong><strong>b</strong>`; rendered apart that is
+/// `**a****b**`, which CommonMark reads back as one bold `a****b`. Merged,
+/// it is `**ab**`, which looks the same and comes back the same.
+fn merge_adjacent_emphasis(nodes: &[Node]) -> Option<Vec<Node>> {
+    let adjacent = nodes.windows(2).any(|pair| {
+        emphasis_kind(&pair[0]).is_some() && emphasis_kind(&pair[0]) == emphasis_kind(&pair[1])
+    });
+    if !adjacent {
+        return None;
+    }
+    let mut out: Vec<Node> = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let kind = emphasis_kind(node);
+        if let (Some(kind), Some(Node::Element(prev))) = (kind, out.last_mut()) {
+            let same = emphasis_kind(&Node::Element(prev.clone())) == Some(kind);
+            if same {
+                if let Node::Element(el) = node {
+                    prev.children.extend(el.children.iter().cloned());
+                    prev.span.1 = el.span.1;
+                }
+                continue;
+            }
+        }
+        out.push(node.clone());
+    }
+    Some(out)
+}
+
 fn squeeze_blank_lines(text: &str) -> String {
     text.split('\n').filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
 }
@@ -1032,6 +1079,15 @@ mod tests {
     fn a_run_of_tildes_in_struck_text_stays_text() {
         assert_eq!(md("<p><del>a~~~~b</del></p>"), "~~a\\~\\~\\~\\~b~~\n");
         assert_eq!(md("<p>about ~5 min</p>"), "about ~5 min\n", "a lone tilde is left alone");
+    }
+
+    /// Trailing breaks go, however many; an escaped backslash before them
+    /// stays.
+    #[test]
+    fn adjacent_emphasis_of_one_kind_is_written_as_one() {
+        assert_eq!(md("<p><strong>a</strong><strong>b</strong></p>"), "**ab**\n");
+        assert_eq!(md("<p><em>a</em><em>b</em> <em>c</em></p>"), "*ab* *c*\n");
+        assert_eq!(md("<p><strong>a</strong><em>b</em></p>"), "**a***b*\n");
     }
 
     #[test]
