@@ -2608,7 +2608,7 @@ async fn ctrl_c_stops_a_pull_between_pages_and_keeps_its_outcome() {
 }
 
 /// A path typed on the command line names a place inside the workspace or
-/// is refused.
+/// is refused; an id that would climb through a URL is refused too.
 #[tokio::test]
 async fn paths_outside_the_workspace_and_ids_that_climb_are_refused() {
     let server = dc_server().await;
@@ -2628,5 +2628,9 @@ async fn paths_outside_the_workspace_and_ids_that_climb_are_refused() {
     let output = run(confed(dir.path(), &["mv", CHILD_FILE, "../Escaped.md", "--json"]));
     assert_eq!(exit_code(&output), 2, "{}", stderr(&output));
     assert!(dir.path().join(CHILD_FILE).exists());
+
+    let output = run(confed_authed(dir.path(), &["comment", "edit", "1/../../admin", "-m", "x"]));
+    assert_eq!(exit_code(&output), 2, "{}", stderr(&output));
+    assert!(stderr(&output).contains("is not a comment id"), "{}", stderr(&output));
     assert!(mutations(&server).await.is_empty());
 }

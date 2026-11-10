@@ -338,6 +338,15 @@ impl Http {
     /// is taken only when it is on the base's own origin: the API calls built
     /// from it carry the credential.
     pub fn url(&self, path: &str) -> ApiResult<Url> {
+        // Ids go into paths as they are; one that is `..`, or holds it, would
+        // name another endpoint of the same server, with the credential.
+        let route = path.split(['?', '#']).next().unwrap_or("");
+        if route.split('/').any(|segment| {
+            let segment = segment.to_ascii_lowercase().replace("%2e", ".");
+            segment == "." || segment == ".."
+        }) {
+            return Err(ApiError::Url(format!("{path}: a path with `.` or `..` segments")));
+        }
         let trimmed = path.trim_start_matches('/');
         let url = self.base.join(trimmed)?;
         if !self.same_origin(&url) {
@@ -1044,6 +1053,18 @@ mod tests {
             pacer.on_success();
         }
         assert_eq!(pacer.min_interval, Duration::ZERO, "back to the floor");
+    }
+
+    #[test]
+    fn a_path_that_climbs_is_refused() {
+        let http = Http::new("https://wiki.example.test/confluence", Auth::None, 4).unwrap();
+        for bad in
+            ["rest/api/content/1/../../admin", "rest/api/content/%2E%2E/x", "./rest", "a/./b"]
+        {
+            assert!(matches!(http.url(bad), Err(ApiError::Url(_))), "{bad}");
+        }
+        assert!(http.url("rest/api/content/1001?expand=a..b").is_ok(), "dots in a query are fine");
+        assert!(http.url("download/attachments/1001/v1.2.png").is_ok());
     }
 
     #[test]

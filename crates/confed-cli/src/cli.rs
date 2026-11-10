@@ -618,7 +618,7 @@ pub enum CommentCommand {
     },
     /// Reply to one or more comments with the same text.
     Reply {
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., value_parser = comment_id)]
         comment_ids: Vec<String>,
         #[arg(long, short = 'm')]
         body: String,
@@ -629,7 +629,7 @@ pub enum CommentCommand {
     /// inline threads only.
     Resolve {
         /// Thread ids to resolve.
-        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        #[arg(required_unless_present = "all", conflicts_with = "all", value_parser = comment_id)]
         comment_ids: Vec<String>,
         /// Resolve every open thread on this page (on Data Center, every open
         /// inline thread; page comments are listed as skipped).
@@ -640,6 +640,7 @@ pub enum CommentCommand {
     },
     /// Replace a posted comment's text on the server.
     Edit {
+        #[arg(value_parser = comment_id)]
         comment_id: String,
         #[arg(long, short = 'm')]
         body: String,
@@ -647,7 +648,7 @@ pub enum CommentCommand {
     /// Delete posted comments on the server, with their replies. Asks first
     /// when interactive, unless --yes.
     Rm {
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required = true, num_args = 1.., value_parser = comment_id)]
         comment_ids: Vec<String>,
     },
 }
@@ -1458,6 +1459,18 @@ pub struct InstanceJournalArgs {
 pub struct CompletionArgs {
     #[arg(value_parser = ["bash", "zsh", "fish", "powershell", "elvish"])]
     pub shell: String,
+}
+
+/// A comment id as both flavors write them: digits. Anything else would go
+/// into a URL path as it is, and `1/../..` names some other endpoint.
+fn comment_id(text: &str) -> std::result::Result<String, String> {
+    if !text.is_empty() && text.chars().all(|c| c.is_ascii_digit()) {
+        Ok(text.to_string())
+    } else {
+        Err(format!(
+            "`{text}` is not a comment id: comment ids are digits, as `comment list` shows them"
+        ))
+    }
 }
 
 #[cfg(test)]
