@@ -75,7 +75,11 @@ impl ApiError {
             400 if body.contains("content.doesnt.exist") => {
                 ApiError::NotFound(format!("{context}: {}", truncate(&body)))
             }
-            409 => ApiError::Conflict(format!("{context}: {}", truncate(&body))),
+            // A stale version, in the server's own words; judged from the body
+            // as it came, before it is prefixed and cut short for the message.
+            409 | 400 if is_stale_version(status, &body) => {
+                ApiError::Conflict(format!("{context}: {}", truncate(&body)))
+            }
             // A gateway that still cannot reach Confluence after the retries:
             // the network, from where confed stands, not a server answer.
             502..=504 => ApiError::network(format!(
@@ -263,6 +267,27 @@ mod tests {
         );
         assert!(is_certificate_error(&message));
         assert!(!is_certificate_error("could not connect: connection refused"));
+    }
+
+    /// What the clients see: the classification made from the body as the
+    /// server sent it, not from the message built around it.
+    #[test]
+    fn a_stale_version_400_is_classified_as_a_conflict() {
+        let stale = r#"{"statusCode":400,"message":"Version must be incremented when updating a page. Current Version is: 5. Version in request: 5"}"#;
+        let err = ApiError::from_status(400, stale.into(), "PUT rest/api/content/1001");
+        assert!(matches!(err, ApiError::Conflict(_)), "{err:?}");
+        // The same words inside a body too long to keep whole.
+        let long = format!(
+            r#"{{"statusCode":400,"data":{{"padding":"{}"}},"message":"Version must be incremented"}}"#,
+            "x".repeat(2000)
+        );
+        let err = ApiError::from_status(400, long, "PUT rest/api/content/1001");
+        assert!(matches!(err, ApiError::Conflict(_)), "{err:?}");
+        let other = r#"{"statusCode":400,"message":"Unsupported macro version for macro 'code'"}"#;
+        let err = ApiError::from_status(400, other.into(), "PUT rest/api/content/1001");
+        assert!(matches!(err, ApiError::Server { status: 400, .. }), "{err:?}");
+        let err = ApiError::from_status(409, "anything".into(), "PUT rest/api/content/1001");
+        assert!(matches!(err, ApiError::Conflict(_)), "{err:?}");
     }
 
     #[test]

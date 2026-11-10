@@ -382,17 +382,6 @@ fn now_millis() -> String {
     chrono::Utc::now().timestamp_millis().to_string()
 }
 
-/// Data Center answers a stale `version.number` with 409, and some versions with a
-/// 400 that says so in its message. Both are conflicts; any other 400 is not.
-fn as_conflict(err: ApiError) -> ApiError {
-    match err {
-        ApiError::Server { status, body } if confed_api::error::is_stale_version(status, &body) => {
-            ApiError::Conflict(body)
-        }
-        other => other,
-    }
-}
-
 /// A username is a path segment, so `/` and `?` must not survive, but the dots
 /// and hyphens usernames are full of should stay readable.
 pub(crate) fn encode_path(value: &str) -> String {
@@ -691,11 +680,8 @@ impl ConfluenceClient for DcClient {
         if let Some(status) = update.status {
             payload["status"] = json!(status.as_str());
         }
-        let updated: v1::Content = self
-            .http
-            .put_json(&format!("rest/api/content/{id}"), &payload)
-            .await
-            .map_err(as_conflict)?;
+        let updated: v1::Content =
+            self.http.put_json(&format!("rest/api/content/{id}"), &payload).await?;
 
         let mut page = updated.into_page("");
         if page.body_storage.is_empty() {
@@ -725,11 +711,8 @@ impl ConfluenceClient for DcClient {
                     "ancestors": ancestors(Some(parent)),
                     "version": { "number": next_version, "message": "moved by confed" },
                 });
-                let _: serde_json::Value = self
-                    .http
-                    .put_json(&format!("rest/api/content/{id}"), &payload)
-                    .await
-                    .map_err(as_conflict)?;
+                let _: serde_json::Value =
+                    self.http.put_json(&format!("rest/api/content/{id}"), &payload).await?;
                 Ok(())
             }
             // Sibling ordering needs a move endpoint: the REST one where there is
@@ -1058,11 +1041,8 @@ impl ConfluenceClient for DcClient {
         if let Some(page) = container {
             payload["container"] = json!({ "id": page, "type": "page" });
         }
-        let _: v1::Content = self
-            .http
-            .put_json(&format!("rest/api/content/{id}"), &payload)
-            .await
-            .map_err(as_conflict)?;
+        let _: v1::Content =
+            self.http.put_json(&format!("rest/api/content/{id}"), &payload).await?;
         Ok(())
     }
 
@@ -1299,17 +1279,6 @@ mod tests {
         assert!(c.capabilities().inline_comment_create, "through the inline-comment plugin API");
         assert!(c.capabilities().comment_resolve);
         assert!(!c.capabilities().adf);
-    }
-
-    #[test]
-    fn version_rejections_become_conflicts() {
-        let e = as_conflict(ApiError::Server {
-            status: 409,
-            body: "Version must be incremented".into(),
-        });
-        assert!(matches!(e, ApiError::Conflict(_)), "got {e:?}");
-        let e = as_conflict(ApiError::Server { status: 500, body: "boom".into() });
-        assert!(matches!(e, ApiError::Server { .. }), "got {e:?}");
     }
 
     #[test]

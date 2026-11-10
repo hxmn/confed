@@ -177,18 +177,6 @@ fn comment_collection(kind: CommentKind) -> &'static str {
     }
 }
 
-/// A stale `version.number` comes back as 409 on most Cloud tenants, but some
-/// reject it as a 400 that says so in its message. Both are conflicts; any other
-/// 400 is not.
-fn as_conflict(err: ApiError) -> ApiError {
-    match err {
-        ApiError::Server { status, body } if confed_api::error::is_stale_version(status, &body) => {
-            ApiError::Conflict(body)
-        }
-        other => other,
-    }
-}
-
 fn encode(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
@@ -357,11 +345,7 @@ impl ConfluenceClient for CloudClient {
         if let Some(parent) = &update.parent_id {
             payload["parentId"] = json!(parent.as_str());
         }
-        let updated: v2::Page = self
-            .http
-            .put_json(&format!("api/v2/pages/{id}"), &payload)
-            .await
-            .map_err(as_conflict)?;
+        let updated: v2::Page = self.http.put_json(&format!("api/v2/pages/{id}"), &payload).await?;
 
         let key = self.space_key_for(updated.space_numeric()).await;
         let mut page = updated.into_domain(&key);
@@ -607,8 +591,7 @@ impl ConfluenceClient for CloudClient {
             "version": { "number": version + 1, "message": "edited with confed" },
             "body": storage_body(body),
         });
-        let _: serde_json::Value =
-            self.http.put_json(&path, &payload).await.map_err(as_conflict)?;
+        let _: serde_json::Value = self.http.put_json(&path, &payload).await?;
         Ok(())
     }
 
@@ -799,21 +782,6 @@ mod tests {
         assert_eq!(c.numeric_space_id(&id).await.unwrap(), "500");
         // …and it seeded the cache for the key-only form.
         assert_eq!(c.numeric_space_id(&SpaceId::from_key("DOCS")).await.unwrap(), "500");
-    }
-
-    #[test]
-    fn version_rejections_become_conflicts() {
-        let e = as_conflict(ApiError::Server {
-            status: 400,
-            body: "PUT api/v2/pages/1: Version must be incremented".into(),
-        });
-        assert!(matches!(e, ApiError::Conflict(_)), "got {e:?}");
-
-        let e = as_conflict(ApiError::Server { status: 409, body: "conflict".into() });
-        assert!(matches!(e, ApiError::Conflict(_)), "got {e:?}");
-
-        let e = as_conflict(ApiError::Server { status: 500, body: "boom".into() });
-        assert!(matches!(e, ApiError::Server { .. }), "got {e:?}");
     }
 
     #[test]
