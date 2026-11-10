@@ -8,6 +8,7 @@
 //! `cli.rs`: a temp dir per test, no network, every `--json` envelope checked
 //! against the published schemas.
 
+mod env;
 mod schema;
 
 use serde_json::{json, Value};
@@ -503,25 +504,8 @@ async fn server() -> (MockServer, Confluence) {
 
 // ------------------------------------------------------- running the tool ---
 
-const ENV_VARS: &[&str] = &[
-    "CONFED_JSON",
-    "CONFED_NON_INTERACTIVE",
-    "CONFED_BASE_URL",
-    "CONFED_TOKEN",
-    "CONFED_USERNAME",
-    "CONFED_SPACE",
-    "CONFED_FLAVOR",
-    "CONFED_CONCURRENCY",
-    "CONFED_LOG",
-    "CONFED_EDITOR",
-];
-
 fn confed(dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_confed"));
-    for var in ENV_VARS {
-        cmd.env_remove(var);
-    }
-    cmd.env("NO_COLOR", "1");
+    let mut cmd = env::confed_command();
     cmd.arg("-C").arg(dir);
     cmd.args(args);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());

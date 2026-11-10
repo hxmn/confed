@@ -10,6 +10,7 @@
 //! The JSON envelope produced by each `--json` run is validated against the
 //! schemas in `docs/reference/json/`, so those files cannot drift from the code.
 
+mod env;
 mod schema;
 
 use serde_json::{json, Value};
@@ -194,30 +195,10 @@ async fn mount_whoami(server: &MockServer, status: u16, body: Value) {
 
 // ------------------------------------------------------- running the tool ---
 
-/// Every `CONFED_*` variable, cleared before each run so a developer's shell
-/// cannot change what the tests exercise.
-const ENV_VARS: &[&str] = &[
-    "CONFED_JSON",
-    "CONFED_NON_INTERACTIVE",
-    "CONFED_BASE_URL",
-    "CONFED_TOKEN",
-    "CONFED_USERNAME",
-    "CONFED_SPACE",
-    "CONFED_FLAVOR",
-    "CONFED_CONCURRENCY",
-    "CONFED_LOG",
-    "CONFED_EDITOR",
-    "CONFED_SILENT",
-];
-
 /// A `confed` invocation rooted at `dir`, with a clean environment and a closed
 /// stdin (so a stray prompt would fail rather than hang).
 fn confed(dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_confed"));
-    for var in ENV_VARS {
-        cmd.env_remove(var);
-    }
-    cmd.env("NO_COLOR", "1");
+    let mut cmd = env::confed_command();
     cmd.arg("-C").arg(dir);
     cmd.args(args);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -888,7 +869,7 @@ async fn help_and_a_bare_invocation_behave_like_a_normal_cli() {
     }
 
     // No subcommand at all is a usage error, and clap says so on stderr.
-    let output = run(Command::new(env!("CARGO_BIN_EXE_confed")));
+    let output = run(env::confed_command());
     assert_eq!(exit_code(&output), 2, "a bare invocation is a usage error");
     assert!(stderr(&output).contains("Usage"), "{}", stderr(&output));
 

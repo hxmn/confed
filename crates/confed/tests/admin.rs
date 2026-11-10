@@ -3,6 +3,7 @@
 //! workspace, only a base URL and a credential, so none is created. Every
 //! `--json` result is validated against `docs/reference/json/admin.schema.json`.
 
+mod env;
 mod schema;
 
 use serde_json::{json, Value};
@@ -12,27 +13,11 @@ use std::process::{Command, Output, Stdio};
 use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const ENV_VARS: &[&str] = &[
-    "CONFED_JSON",
-    "CONFED_NON_INTERACTIVE",
-    "CONFED_BASE_URL",
-    "CONFED_TOKEN",
-    "CONFED_USERNAME",
-    "CONFED_SPACE",
-    "CONFED_FLAVOR",
-    "CONFED_CONCURRENCY",
-    "CONFED_LOG",
-    "CONFED_EDITOR",
-];
-
 /// `confed admin …` against `server` as a Data Center administrator, with a
 /// closed stdin so a stray prompt fails instead of hanging.
 fn admin(dir: &Path, server: &MockServer, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_confed"));
-    for var in ENV_VARS {
-        cmd.env_remove(var);
-    }
-    cmd.env("NO_COLOR", "1").env("CONFED_TOKEN", "pat-token");
+    let mut cmd = env::confed_command();
+    cmd.env("CONFED_TOKEN", "pat-token");
     cmd.arg("-C").arg(dir);
     cmd.args(["--base-url", &server.uri(), "--flavor", "dc", "--space", "DOCS", "admin"]);
     cmd.args(args);
