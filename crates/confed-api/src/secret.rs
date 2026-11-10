@@ -1,10 +1,20 @@
-//! Secret wrapper: credentials must never reach logs or error messages.
+//! Secret wrapper: credentials must never reach logs or error messages, and
+//! do not outlive their use in memory.
 
 use std::fmt;
+use zeroize::Zeroize;
 
-/// A string that refuses to print itself.
+/// A string that refuses to print itself, and is overwritten when dropped —
+/// every clone of it too — so a token is not left in freed memory for a core
+/// dump or a swap file to keep.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(String);
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 impl Secret {
     pub fn new(value: impl Into<String>) -> Self {

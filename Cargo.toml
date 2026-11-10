@@ -98,6 +98,8 @@ unicode-normalization = "0.1"
 unicode-width = "0.2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+# Wipes credentials from memory when they are dropped.
+zeroize = "1"
 walkdir = "2"
 zstd = "0.13"
 

@@ -29,17 +29,34 @@ pub enum Auth {
 impl Auth {
     fn apply(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match self {
+            // The header is built in strings that are wiped once reqwest has
+            // its copy, which it marks sensitive and keeps out of its logs.
             Auth::Basic { user, secret } => {
-                let raw = format!("{}:{}", user, secret.expose());
-                let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
-                rb.header(reqwest::header::AUTHORIZATION, format!("Basic {encoded}"))
+                let raw = zeroize::Zeroizing::new(format!("{}:{}", user, secret.expose()));
+                let encoded = zeroize::Zeroizing::new(
+                    base64::engine::general_purpose::STANDARD.encode(&*raw),
+                );
+                rb.header(
+                    reqwest::header::AUTHORIZATION,
+                    sensitive(zeroize::Zeroizing::new(format!("Basic {}", *encoded))),
+                )
             }
-            Auth::Bearer(secret) => {
-                rb.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", secret.expose()))
-            }
+            Auth::Bearer(secret) => rb.header(
+                reqwest::header::AUTHORIZATION,
+                sensitive(zeroize::Zeroizing::new(format!("Bearer {}", secret.expose()))),
+            ),
             Auth::None => rb,
         }
     }
+}
+
+/// An Authorization value reqwest will not print, from a string that is
+/// wiped as soon as it has been copied.
+fn sensitive(value: zeroize::Zeroizing<String>) -> reqwest::header::HeaderValue {
+    let mut header = reqwest::header::HeaderValue::from_str(&value)
+        .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static(""));
+    header.set_sensitive(true);
+    header
 }
 
 #[derive(Clone, Debug)]
