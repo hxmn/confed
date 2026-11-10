@@ -767,7 +767,14 @@ impl Http {
         }
         let tmp = partial_path(dest);
         let mut file = tokio::fs::File::create(&tmp).await?;
-        let written = stream_to_file(resp, &mut file, self.timeouts.stall, &ctx).await;
+        let mut written = stream_to_file(resp, &mut file, self.timeouts.stall, &ctx).await;
+        // On disk before it takes the attachment's name, so a crash cannot
+        // leave a file of that name with nothing in it.
+        if written.is_ok() {
+            if let Err(e) = file.sync_all().await {
+                written = Err(e.into());
+            }
+        }
         drop(file);
 
         // A half-written download is confed's mess to clean up: leaving it in a
@@ -779,7 +786,11 @@ impl Http {
                 return Err(e);
             }
         };
-        tokio::fs::rename(&tmp, dest).await?;
+        if let Err(e) = tokio::fs::rename(&tmp, dest).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e.into());
+        }
+        sync_dir(dest.parent());
         Ok(written)
     }
 
@@ -822,6 +833,19 @@ impl Http {
 
 fn origin_of(url: &Url) -> String {
     url.origin().ascii_serialization()
+}
+
+/// Make a rename into `dir` durable; best effort, and nothing on Windows,
+/// which cannot open a directory to sync it.
+fn sync_dir(dir: Option<&Path>) {
+    #[cfg(unix)]
+    if let Some(dir) = dir.filter(|d| !d.as_os_str().is_empty()) {
+        if let Ok(handle) = std::fs::File::open(dir) {
+            let _ = handle.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
 }
 
 /// Where a download is staged before it is renamed into place.

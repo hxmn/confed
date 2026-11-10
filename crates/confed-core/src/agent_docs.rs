@@ -6,7 +6,7 @@
 //! directory — Claude Code reads `CLAUDE.md`, Codex reads `AGENTS.md` — starts
 //! with them.
 
-use crate::error::{ConfedError, Result};
+use crate::error::Result;
 use crate::workspace::Workspace;
 use crate::{paths, sync};
 use confed_api::Flavor;
@@ -65,9 +65,7 @@ pub fn write(
 }
 
 fn write_file(dir: &Path, name: &str, content: &str) -> Result<()> {
-    let path = dir.join(name);
-    std::fs::write(&path, content)
-        .map_err(|e| ConfedError::io(format!("writing {}", path.display()), e))
+    sync::write_atomic(&dir.join(name), content)
 }
 
 /// The rules this workspace asks for: `None` when it names no rules page, or
