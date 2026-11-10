@@ -20,6 +20,27 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-11-10
+
+### Fixed
+
+- **Markdown with many lines that start with a block tag crashed confed** with a stack
+  overflow: a run of lines such as `<div>`, which CommonMark reads as an HTML block that
+  is not well-formed, was read back as Markdown one line deeper at a time — 200 lines
+  converted, 2000 aborted the process. Every line is escaped at once now. `<details>`
+  nested thousands deep without blank lines, which overflowed the same way, is refused
+  with its line number, like any other block nested past the limit.
+- **The release workflow could not finish**: its x86_64 macOS build ran on a runner
+  image GitHub has retired, and the release waited for every build. Both macOS
+  binaries now build on Apple silicon.
+- **Publishing to crates.io waited for nothing**, so an irrevocable publish could go
+  through while the binaries or the tagged commit's tests failed. It now waits for a
+  verify job (tests and a publish dry run of the tagged commit), every binary, and the
+  GitHub release. The workflow can be run by hand to build and check without releasing.
+- **The fuzz targets** start from seeds (the converter's fixtures, and the input behind
+  each converter bug so far), the Markdown target checks what it writes the way storage
+  from the server is checked, and CI builds them.
+
 ## [0.20.0] - 2026-11-10
 
 Hygiene and maintainability: smaller units, a smaller public API, typed errors, a
@@ -1316,7 +1337,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/hxmn/confed/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/hxmn/confed/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/hxmn/confed/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/hxmn/confed/compare/v0.17.1...v0.18.0
