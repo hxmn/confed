@@ -393,36 +393,44 @@ impl StateDb {
         Ok(())
     }
 
+    /// Bring the schema up to this build's, as one transaction: a migration
+    /// stopped halfway — a crash, a disk filling up — leaves the database
+    /// as it was, not with some tables of the new schema and a version that
+    /// claims all of them. Taken with the write lock, so a second confed
+    /// opening the same database waits and then finds it done.
     fn migrate(&self) -> Result<()> {
-        let current: u32 = self
-            .conn
-            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()
-            .unwrap_or(None)
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        self.atomically(|db| {
+            let has_meta: bool = db.conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
+                [],
+                |r| r.get(0),
+            )?;
+            let current: u32 = if has_meta {
+                db.get_meta("schema_version")?.and_then(|v| v.parse().ok()).unwrap_or(0)
+            } else {
+                0
+            };
 
-        if current > SCHEMA_VERSION {
-            return Err(ConfedError::state_with_hint(
-                format!(
-                    "this .state.db was written by a newer confed (schema {current}, this build supports {SCHEMA_VERSION})"
-                ),
-                "upgrade confed, or delete .state.db and re-run `confed init` + `confed fetch`",
-            ));
-        }
-        if current == 0 {
-            self.conn.execute_batch(SCHEMA_V1)?;
-        }
-        if current < 2 {
-            self.conn.execute_batch(SCHEMA_V2)?;
-        }
-        if current != SCHEMA_VERSION {
-            self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
-        }
-        self.conn.execute_batch(SCHEMA_ADDITIONS)?;
-        Ok(())
+            if current > SCHEMA_VERSION {
+                return Err(ConfedError::state_with_hint(
+                    format!(
+                        "this .state.db was written by a newer confed (schema {current}, this build supports {SCHEMA_VERSION})"
+                    ),
+                    "upgrade confed, or delete .state.db and re-run `confed init` + `confed fetch`",
+                ));
+            }
+            if current == 0 {
+                db.conn.execute_batch(SCHEMA_V1)?;
+            }
+            if current < 2 {
+                db.conn.execute_batch(SCHEMA_V2)?;
+            }
+            if current != SCHEMA_VERSION {
+                db.set_meta("schema_version", &SCHEMA_VERSION.to_string())?;
+            }
+            db.conn.execute_batch(SCHEMA_ADDITIONS)?;
+            Ok(())
+        })
     }
 
     /// Cheap corruption check, used by `confed doctor`.
@@ -1445,6 +1453,37 @@ mod tests {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    /// A migration that fails partway leaves the database as it found it:
+    /// still version 1, with none of version 2 applied.
+    #[test]
+    fn a_failed_migration_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join(STATE_DB_FILENAME)).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '1')", [])
+                .unwrap();
+            // Version 2 creates `users`, then adds this column — which is
+            // already there, so its second step fails after its first worked.
+            conn.execute_batch("ALTER TABLE pages ADD COLUMN render_key TEXT").unwrap();
+        }
+        assert!(StateDb::open(dir.path()).is_err());
+
+        let conn = Connection::open(dir.path().join(STATE_DB_FILENAME)).unwrap();
+        let version: String = conn
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, "1");
+        let users: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'users')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!users, "the step that worked was rolled back with the one that did not");
+    }
 
     /// A database written by an older confed is migrated in place, keeping the
     /// pages it already knows about.
