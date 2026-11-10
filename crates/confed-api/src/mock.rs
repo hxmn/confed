@@ -78,6 +78,9 @@ struct MockState {
     /// Whether a create is stored and its answer then lost, as when a
     /// gateway times out after Confluence took the request.
     lose_create_answers: bool,
+    /// Whether a create fails with a network error before the page is
+    /// stored: a request that never reached the server.
+    drop_creates: bool,
     /// Every mutating call recorded, so tests can assert "--dry-run wrote nothing".
     calls: Vec<String>,
 }
@@ -399,6 +402,12 @@ impl MockClient {
     /// answer creates normally again.
     pub fn lose_create_answers(&self, lose: bool) {
         self.state.lock().expect("mock poisoned").lose_create_answers = lose;
+    }
+
+    /// Fail every create with a network error without storing the page, or
+    /// create normally again.
+    pub fn drop_creates(&self, drop: bool) {
+        self.state.lock().expect("mock poisoned").drop_creates = drop;
     }
 
     /// Make listing one page's comments fail, or work again.
@@ -763,6 +772,10 @@ impl ConfluenceClient for MockClient {
     }
 
     async fn create_page(&self, new: &NewPage) -> ApiResult<Page> {
+        if self.state.lock().expect("mock poisoned").drop_creates {
+            self.record(format!("create_page:{}", new.title));
+            return Err(ApiError::network("POST rest/api/content: connection reset"));
+        }
         let id = self.fresh_id();
         self.record(format!("create_page:{}", new.title));
         let summary = PageSummary {

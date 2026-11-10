@@ -13,6 +13,46 @@ pub(super) struct SentCreate {
     pub(super) parent_id: Option<String>,
     /// [`MarkdownFile::content_hash`] of the file as it was sent.
     pub(super) content_hash: String,
+    /// Hash of the storage body sent, laid out by `pretty::minify` so a
+    /// server that re-spaces it still matches. Absent in records written by
+    /// confed 0.18 and 0.19.
+    #[serde(default)]
+    pub(super) storage_hash: Option<String>,
+    /// When the create was sent.
+    #[serde(default)]
+    pub(super) sent_at: Option<String>,
+}
+
+/// How far a server's clock may trail confed's when telling a page created
+/// by the lost request from one that was there before it.
+const CLOCK_SKEW_MINUTES: i64 = 10;
+
+/// Whether `page`, found by title and parent where a lost create would
+/// have put it, is that create's page and not one somebody else made. Its
+/// body says so, or — for a server that rewrites bodies on save — it is
+/// untouched since it was made, by this user, no earlier than the request.
+fn is_the_lost_create(page: &Page, sent: &SentCreate, me: Option<&str>) -> bool {
+    if sent.storage_hash.as_deref()
+        == Some(hash_str(&confed_converter::pretty::minify(&page.body_storage)).as_str())
+    {
+        return true;
+    }
+    let summary = &page.summary;
+    let made_after = match (&sent.sent_at, &summary.created_at) {
+        (Some(sent), Some(created)) => {
+            match (
+                chrono::DateTime::parse_from_rfc3339(sent),
+                chrono::DateTime::parse_from_rfc3339(created),
+            ) {
+                (Ok(sent), Ok(created)) => {
+                    created >= sent - chrono::Duration::minutes(CLOCK_SKEW_MINUTES)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    summary.version == 1 && made_after && me.is_some() && summary.author.as_deref() == me
 }
 
 #[derive(Clone, Debug, Default)]
@@ -847,6 +887,8 @@ impl SyncEngine {
                     title: file.frontmatter.title.clone(),
                     parent_id: parent_id.clone(),
                     content_hash: file.content_hash(),
+                    storage_hash: Some(hash_str(&confed_converter::pretty::minify(&storage))),
+                    sent_at: Some(now()),
                 };
                 let record = serde_json::to_string(&sent).map_err(|e| {
                     ConfedError::state(format!("recording the create of {path}: {e}"))
@@ -1048,7 +1090,9 @@ impl SyncEngine {
 
     /// The page a push created without learning so — its answer lost, or
     /// confed stopped before writing the id down — when `journal` says one
-    /// was sent. Found by title, and taken only where the push put it.
+    /// was sent. Found by title where the push put it, and taken only when
+    /// it is that page ([`is_the_lost_create`]): a page somebody else made
+    /// with the same title is left alone, and the create is sent.
     pub(super) async fn find_lost_create(
         &self,
         ws: &Workspace,
@@ -1073,12 +1117,22 @@ impl SyncEngine {
             ws.state().delete_meta(journal)?;
             return Ok(None);
         };
+        let page = self.client.get_page(&summary.id, BodyFormat::Storage).await?;
+        let me = self.client.whoami().await.ok().map(|u| u.display_name);
+        if !is_the_lost_create(&page, &sent, me.as_deref()) {
+            tracing::info!(
+                target: "confed::sync",
+                page = %summary.id, title = %summary.title,
+                "a page with this title is there, but not the one the earlier push sent"
+            );
+            ws.state().delete_meta(journal)?;
+            return Ok(None);
+        }
         tracing::info!(
             target: "confed::sync",
             page = %summary.id, title = %summary.title,
             "an earlier push created this page without recording it; taking it up"
         );
-        let page = self.client.get_page(&summary.id, BodyFormat::Storage).await?;
         Ok(Some((page, sent)))
     }
 
@@ -1173,5 +1227,88 @@ impl SyncEngine {
                 deleted: false,
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod lost_create_tests {
+    use super::*;
+    use confed_api::{PageStatus, PageSummary};
+
+    fn page(body: &str, version: u32, author: &str, created: &str) -> Page {
+        Page {
+            summary: PageSummary {
+                id: PageId::new("1001"),
+                title: "Onboarding".into(),
+                space_key: "DOCS".into(),
+                parent_id: None,
+                position: None,
+                version,
+                status: PageStatus::Current,
+                labels: Vec::new(),
+                author: Some(author.into()),
+                created_at: Some(created.into()),
+                updated_at: Some(created.into()),
+            },
+            body_storage: body.into(),
+        }
+    }
+
+    fn sent(body: &str, at: &str) -> SentCreate {
+        SentCreate {
+            title: "Onboarding".into(),
+            parent_id: None,
+            content_hash: String::new(),
+            storage_hash: Some(hash_str(&confed_converter::pretty::minify(body))),
+            sent_at: Some(at.into()),
+        }
+    }
+
+    #[test]
+    fn the_body_it_was_sent_with_identifies_it() {
+        let sent = sent("<p>Фраза 1.</p>", "2026-11-10T10:00:00Z");
+        assert!(is_the_lost_create(
+            &page("<p>Фраза 1.</p>", 4, "Bob Lee", "2020-01-01T00:00:00Z"),
+            &sent,
+            Some("Alice Ng")
+        ));
+    }
+
+    /// A server that rewrites the body on save: a first version by this user,
+    /// made no earlier than the request, is the one.
+    #[test]
+    fn otherwise_a_fresh_untouched_page_of_ones_own_is_it() {
+        let sent = sent("<p>Фраза 1.</p>", "2026-11-10T10:00:00Z");
+        let rewritten = "<p local-id=\"x\">Фраза 1.</p>";
+        let me = Some("Alice Ng");
+        assert!(is_the_lost_create(
+            &page(rewritten, 1, "Alice Ng", "2026-11-10T10:00:02Z"),
+            &sent,
+            me
+        ));
+        assert!(
+            is_the_lost_create(&page(rewritten, 1, "Alice Ng", "2026-11-10T09:55:00Z"), &sent, me),
+            "within the clock skew"
+        );
+        assert!(
+            !is_the_lost_create(&page(rewritten, 2, "Alice Ng", "2026-11-10T10:00:02Z"), &sent, me),
+            "edited since"
+        );
+        assert!(
+            !is_the_lost_create(&page(rewritten, 1, "Bob Lee", "2026-11-10T10:00:02Z"), &sent, me),
+            "someone else's"
+        );
+        assert!(
+            !is_the_lost_create(&page(rewritten, 1, "Alice Ng", "2026-11-09T10:00:00Z"), &sent, me),
+            "there before"
+        );
+        assert!(
+            !is_the_lost_create(
+                &page(rewritten, 1, "Alice Ng", "2026-11-10T10:00:02Z"),
+                &sent,
+                None
+            ),
+            "who am I unknown"
+        );
     }
 }

@@ -312,6 +312,31 @@ both_flavors!(a_create_whose_answer_was_lost_is_not_made_twice, |mut h: Harness|
         .all(|(k, _)| !k.starts_with("pending_create:")));
 });
 
+// The create never reached the server, and somebody else's page with the
+// same title sits where it would have gone. It is not taken for ours: the
+// next push creates the page, and the other one is left alone.
+both_flavors!(a_lost_create_does_not_adopt_somebody_elses_page, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Parent", None, "<p>Parent page.</p>");
+    h.pull().await;
+    std::fs::create_dir_all(h.path("Parent")).unwrap();
+    h.write("Parent/Child.md", "---\ntitle: Child\nlabels: []\n---\n\nOur words.\n");
+
+    h.mock.drop_creates(true);
+    let _ = h.engine.push(&mut h.ws, &PushOptions::default()).await;
+    h.mock.drop_creates(false);
+    // Meanwhile, in the browser.
+    h.mock.seed_page("1500", "Child", Some("1001"), "<p>Their words.</p>");
+    h.mock.remote_edit("1500", "<p>Their words, edited.</p>");
+
+    let outcome = h.push().await;
+    assert_eq!(outcome.created.len(), 1, "{outcome:?}");
+    let ours = &outcome.created[0].page_id;
+    assert_ne!(ours, "1500", "their page was not taken over");
+    assert!(h.mock.page_body(ours).unwrap().contains("Our words"));
+    assert!(h.mock.page_body("1500").unwrap().contains("Their words, edited"));
+    assert!(h.read("Parent/Child.md").contains(ours.as_str()));
+});
+
 // The same, with the file edited before the push that finds the page: the
 // edit is not taken for what was sent, and goes up with the next push.
 both_flavors!(an_edit_after_a_lost_create_is_still_pushed, |mut h: Harness| async move {
