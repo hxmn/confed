@@ -75,7 +75,8 @@ keyring = { version = "3", default-features = false, features = [
 ] }
 percent-encoding = "2"
 quick-xml = "0.41"
-ratatui = "0.29"
+# Only the crossterm backend; the others would only grow the lockfile.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls", "rustls-tls-native-roots", "gzip"] }
 rusqlite = { version = "0.41", features = ["bundled", "blob"] }
 serde = { version = "1", features = ["derive"] }
