@@ -5,8 +5,6 @@
 //! live in `confed-tui` and build on the [`context`], [`output`] and
 //! [`commands`] here.
 
-#![forbid(unsafe_code)]
-
 pub mod changelog;
 pub mod cli;
 pub mod commands;

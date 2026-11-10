@@ -123,7 +123,7 @@ pub async fn locate(
 
     let ws = instance.open_workspace(&member)?;
     let with_md = if path.ends_with(".md") { path.clone() } else { format!("{path}.md") };
-    for candidate in [path.clone(), with_md.clone()] {
+    for candidate in [path, with_md.clone()] {
         if let Some(record) = ws.state().get_page_by_path(&candidate)? {
             return Ok(Found::Page { member, page_id: record.page_id });
         }

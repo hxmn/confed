@@ -258,7 +258,7 @@ impl Context {
         let auth = match auth_method {
             AuthMethod::Pat => Auth::Bearer(secret),
             AuthMethod::ApiToken | AuthMethod::Basic => Auth::Basic {
-                user: username.clone().ok_or_else(|| {
+                user: username.ok_or_else(|| {
                     ConfedError::missing_value(
                         "username or email (required for this auth method)",
                         "--user",

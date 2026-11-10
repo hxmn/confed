@@ -263,7 +263,7 @@ fn skip_subtree(reader: &mut Reader<&[u8]>, len: usize) -> usize {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) if !is_void(&String::from_utf8_lossy(e.name().as_ref())) => {
-                depth += 1
+                depth += 1;
             }
             Ok(Event::End(e)) if !is_void(&String::from_utf8_lossy(e.name().as_ref())) => {
                 depth -= 1;

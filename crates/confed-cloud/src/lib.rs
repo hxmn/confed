@@ -8,8 +8,6 @@
 //! attachment uploads, CQL search, page moves, or fetching a historical body — those
 //! fall back to `rest/api/*` (v1), which Cloud still serves.
 
-#![forbid(unsafe_code)]
-
 /// Serde DTOs for the Cloud REST v2 wire format.
 pub mod v2;
 

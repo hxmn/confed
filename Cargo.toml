@@ -21,6 +21,29 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/hxmn/confed"
 homepage = "https://github.com/hxmn/confed"
 
+# One lint policy for every crate; each opts in with `[lints] workspace = true`.
+# CI denies warnings, so a "warn" here fails the build there.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "allow"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+print_stderr = "allow"
+manual_let_else = "warn"
+semicolon_if_nothing_returned = "warn"
+needless_pass_by_value = "allow"
+redundant_clone = "warn"
+cloned_instead_of_copied = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+uninlined_format_args = "warn"
+
 [workspace.dependencies]
 confed-api = { path = "crates/confed-api", version = "0.19.0" }
 confed-cli = { path = "crates/confed-cli", version = "0.19.0" }

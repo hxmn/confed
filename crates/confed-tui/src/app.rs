@@ -350,7 +350,7 @@ impl App {
             KeyCode::Char('n') | KeyCode::Tab => resolver.next(),
             KeyCode::Char('N') | KeyCode::BackTab => resolver.previous(),
             KeyCode::Char('j') | KeyCode::Down => {
-                resolver.scroll = resolver.scroll.saturating_add(1)
+                resolver.scroll = resolver.scroll.saturating_add(1);
             }
             KeyCode::Char('k') | KeyCode::Up => resolver.scroll = resolver.scroll.saturating_sub(1),
             KeyCode::Char('w') | KeyCode::Enter => self.commit_resolution(),

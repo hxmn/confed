@@ -181,7 +181,7 @@ fn breakable(nodes: &[Node], container: bool) -> bool {
 fn write_node(node: &Node, src: &str, depth: usize, out: &mut String) {
     match node {
         Node::Element(el) if breakable(&el.children, is_block_container(&el.name)) => {
-            write_element(el, src, depth, out)
+            write_element(el, src, depth, out);
         }
         // Anything else — inline markup, text, CDATA, a container holding a
         // mix of the two — keeps the bytes it came with.

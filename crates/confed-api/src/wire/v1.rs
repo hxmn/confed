@@ -999,7 +999,7 @@ mod tests {
             "id": "att1", "title": "a.txt", "version": { "number": 2 },
             "extensions": { "fileSize": 3 }
         });
-        let wrapped = serde_json::json!({ "results": [one.clone()], "size": 1 });
+        let wrapped = serde_json::json!({ "results": [one], "size": 1 });
 
         let page = PageId::new("1001");
         let a = attachment_from_response(wrapped, &page).unwrap();

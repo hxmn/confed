@@ -6,8 +6,6 @@
 //! and the `.md` files are the working tree. Every page's status is derived by
 //! comparing those three.
 
-#![forbid(unsafe_code)]
-
 pub mod agent_docs;
 pub mod attachments;
 pub mod comments;

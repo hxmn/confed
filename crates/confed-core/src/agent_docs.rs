@@ -479,7 +479,6 @@ did not, or a new space was created and its clone failed, and 9 when the server 
 move pages between spaces. A refused permission (`no_permission`) is 7, never 3: 3 means
 the credential itself was rejected.
 "#,
-        flavor = flavor,
     )
 }
 

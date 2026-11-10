@@ -291,9 +291,8 @@ pub fn parse(content: &str, path: &str) -> Result<MarkdownFile> {
     } else {
         serde_norway::from_str(yaml)?
     };
-    let mut map = match value {
-        Value::Mapping(m) => m,
-        _ => return Err(ConfedError::state(format!("{path}: frontmatter must be a YAML mapping"))),
+    let Value::Mapping(mut map) = value else {
+        return Err(ConfedError::state(format!("{path}: frontmatter must be a YAML mapping")));
     };
 
     let title = match map.remove(Value::from("title")) {

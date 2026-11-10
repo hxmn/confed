@@ -913,7 +913,7 @@ impl SyncEngine {
                                 page_id: id.clone(),
                                 title: title.clone(),
                                 error,
-                            })
+                            });
                         };
                         match attachments {
                             Some(Ok(listed)) => {
@@ -925,7 +925,7 @@ impl SyncEngine {
                                 read.push(Extra::Attachments.name());
                             }
                             Some(Err(e)) => {
-                                failed(format!("its attachments could not be listed again: {e}"))
+                                failed(format!("its attachments could not be listed again: {e}"));
                             }
                             None => {}
                         }
@@ -939,7 +939,7 @@ impl SyncEngine {
                                 read.push(Extra::Comments.name());
                             }
                             Some(Err(e)) => {
-                                failed(format!("its comments could not be read again: {e}"))
+                                failed(format!("its comments could not be read again: {e}"));
                             }
                             None => {}
                         }
@@ -2544,10 +2544,10 @@ impl SyncEngine {
             for op in &plan.attachment_ops {
                 match op.kind {
                     AttachmentOpKind::Upload | AttachmentOpKind::Reupload => {
-                        outcome.attachments_uploaded.push(op.file.clone())
+                        outcome.attachments_uploaded.push(op.file.clone());
                     }
                     AttachmentOpKind::Delete if opts.deletes_attachments() => {
-                        outcome.attachments_deleted.push(op.file.clone())
+                        outcome.attachments_deleted.push(op.file.clone());
                     }
                     AttachmentOpKind::Delete => outcome.skipped.push(blocked_attachment(op)),
                 }
@@ -3708,7 +3708,7 @@ impl SyncEngine {
                     // Comment marks come from the render; drafts still
                     // waiting to be posted are carried over.
                     file.marks.retain(|m| m.id.is_new());
-                    file.set_body(converted.markdown.clone());
+                    file.set_body(converted.markdown);
                     updated.markdown_hash = file.content_hash();
                 }
                 write_atomic(&abs, &file.render()?)?;
@@ -4466,7 +4466,7 @@ pub fn inline_marks_for(ws: &Workspace, page_id: &str) -> Result<HashMap<String,
     let records = ws.state().page_comments(page_id)?;
     Ok(live_inline(&records)
         .filter_map(|(record, anchor)| {
-            let marker_ref = anchor.marker_ref.clone()?;
+            let marker_ref = anchor.marker_ref?;
             Some((
                 marker_ref,
                 InlineMark {

@@ -245,16 +245,16 @@ pub fn plan(ctx: &Context, new: &NewSpace, checks: &Checks, steps: Vec<String>) 
     }
     let _ = writeln!(human, "Checks:");
     let key_line = match &checks.taken_by {
-        None => style.green("yes").to_string(),
+        None => style.green("yes"),
         Some(space) => format!("{} — \"{}\" has it", style.red("no"), space.name),
     };
     let key_label = format!("key {} is free", new.key);
     let width = key_label.chars().count().max("may create spaces".len());
     let _ = writeln!(human, "  {key_label:<width$}  {key_line}");
     let may = match checks.permission {
-        Some(Probe::Available) => style.green("yes").to_string(),
-        Some(Probe::Unavailable) => style.red("no").to_string(),
-        _ => style.dim("the server would not say; the create itself will").to_string(),
+        Some(Probe::Available) => style.green("yes"),
+        Some(Probe::Unavailable) => style.red("no"),
+        _ => style.dim("the server would not say; the create itself will"),
     };
     let _ = writeln!(human, "  {:<width$}  {may}", "may create spaces");
     let mut output = Output::new(

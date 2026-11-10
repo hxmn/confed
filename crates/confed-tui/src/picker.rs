@@ -213,7 +213,7 @@ impl Picker<'static> {
 
 // ---- drawing ----------------------------------------------------------------
 
-pub fn draw(frame: &mut Frame, picker: &mut Picker) {
+pub fn draw(frame: &mut Frame<'_>, picker: &mut Picker<'_>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
@@ -256,7 +256,7 @@ pub fn draw(frame: &mut Frame, picker: &mut Picker) {
     frame.render_widget(Paragraph::new(Line::from(footer)), chunks[2]);
 }
 
-fn draw_search(frame: &mut Frame, picker: &Picker, area: Rect) {
+fn draw_search(frame: &mut Frame<'_>, picker: &Picker<'_>, area: Rect) {
     let query = Line::from(picker.query.as_str());
     // The terminal's own cursor marks where the next character goes.
     let column = area.x.saturating_add(1).saturating_add(query.width() as u16);
@@ -271,13 +271,13 @@ fn draw_search(frame: &mut Frame, picker: &Picker, area: Rect) {
     );
 }
 
-fn draw_list(frame: &mut Frame, picker: &mut Picker, area: Rect) {
+fn draw_list(frame: &mut Frame<'_>, picker: &mut Picker<'_>, area: Rect) {
     picker.list_height = area.height.saturating_sub(2);
 
     let rows = picker.rows();
     let searching = picker.searching();
     let dim = Style::default().fg(Color::DarkGray);
-    let items: Vec<ListItem> = rows
+    let items: Vec<ListItem<'_>> = rows
         .iter()
         .map(|row| {
             let node = &picker.tree.nodes[row.node];
@@ -317,7 +317,7 @@ fn draw_list(frame: &mut Frame, picker: &mut Picker, area: Rect) {
     );
 }
 
-fn draw_preview(frame: &mut Frame, picker: &Picker, area: Rect) {
+fn draw_preview(frame: &mut Frame<'_>, picker: &Picker<'_>, area: Rect) {
     let title = match picker.selected() {
         Some(row) => {
             let node = &picker.tree.nodes[row.node];
@@ -325,7 +325,7 @@ fn draw_preview(frame: &mut Frame, picker: &Picker, area: Rect) {
         }
         None => " Nothing selected ".to_string(),
     };
-    let lines: Vec<Line> = picker.content.iter().map(pane_line).collect();
+    let lines: Vec<Line<'_>> = picker.content.iter().map(pane_line).collect();
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
         area,
@@ -379,17 +379,17 @@ mod tests {
         }
     }
 
-    fn press(picker: &mut Picker, code: KeyCode) {
+    fn press(picker: &mut Picker<'_>, code: KeyCode) {
         picker.on_key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
-    fn type_text(picker: &mut Picker, text: &str) {
+    fn type_text(picker: &mut Picker<'_>, text: &str) {
         for c in text.chars() {
             press(picker, KeyCode::Char(c));
         }
     }
 
-    fn titles(picker: &Picker) -> Vec<String> {
+    fn titles(picker: &Picker<'_>) -> Vec<String> {
         picker.rows().iter().map(|row| picker.tree.nodes[row.node].label().to_string()).collect()
     }
 
@@ -476,7 +476,7 @@ mod tests {
         assert_eq!(picker.outcome, Some(Outcome::Chosen("1004".into())));
     }
 
-    fn frame(picker: &mut Picker, width: u16, height: u16) -> String {
+    fn frame(picker: &mut Picker<'_>, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal.draw(|f| draw(f, picker)).expect("draw");
         let buffer = terminal.backend().buffer();

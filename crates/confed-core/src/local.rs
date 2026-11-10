@@ -77,7 +77,7 @@ pub fn move_page(
         .map_err(|e| ConfedError::io(format!("reading {new_path}"), e))?;
     let mut file = crate::frontmatter::parse(&content, &new_path)?;
     if title_changed {
-        file.frontmatter.title = name.clone();
+        file.frontmatter.title = name;
     }
     if parent_changed {
         file.frontmatter.parent_id = match &dir {

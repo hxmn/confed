@@ -418,7 +418,7 @@ impl<'a> Generator<'a> {
             // An inline comment mark becomes the marker Confluence attaches
             // the thread to.
             NodeValue::HtmlInline(h) if marks::parse_marker(h.trim()).is_some() => {
-                self.mark(h, out)
+                self.mark(h, out);
             }
             // `<u>`, `<sub>`, `<sup>` come back through here; they are already
             // storage-legal XHTML.

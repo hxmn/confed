@@ -1168,7 +1168,7 @@ mod tests {
         assert_eq!(db.get_page_by_path("Handbook/163842.md").unwrap().unwrap(), page);
 
         // Upsert is idempotent and updates in place.
-        let mut updated = page.clone();
+        let mut updated = page;
         updated.version = 8;
         updated.storage_body = "<p>changed</p>".into();
         db.upsert_page(&updated).unwrap();

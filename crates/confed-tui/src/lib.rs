@@ -8,8 +8,6 @@
 //! [`run`] is `confed tui`; [`pick_page`] is the page picker a command opens
 //! when it needs the user to choose a page.
 
-#![forbid(unsafe_code)]
-
 mod app;
 mod conflict;
 mod pane;
@@ -87,7 +85,10 @@ pub fn pick_page(ws: &Workspace, current: Option<&str>) -> Result<Option<String>
 }
 
 /// Nothing runs in the background here, so the loop simply waits for a key.
-fn picker_loop(terminal: &mut term::Tui, picker: &mut picker::Picker) -> Result<Option<String>> {
+fn picker_loop(
+    terminal: &mut term::Tui,
+    picker: &mut picker::Picker<'_>,
+) -> Result<Option<String>> {
     loop {
         terminal
             .draw(|frame| picker::draw(frame, picker))

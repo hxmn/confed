@@ -17,7 +17,7 @@ pub fn run(args: &CompletionArgs) -> Result<Output> {
     clap_complete::generate(shell, &mut command, "confed", &mut buffer);
     let script = String::from_utf8_lossy(&buffer).to_string();
 
-    Ok(Output::new(json!({ "shell": args.shell, "script": script.clone() }), script))
+    Ok(Output::new(json!({ "shell": args.shell, "script": script }), script))
 }
 
 #[cfg(test)]

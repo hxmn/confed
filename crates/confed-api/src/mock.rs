@@ -1049,7 +1049,7 @@ impl ConfluenceClient for MockClient {
             download_url: format!("/download/attachments/{page}/{filename}"),
         };
         state.attachment_modified.insert(id.0.clone(), SystemTime::now());
-        state.attachments.insert(id.0.clone(), (attachment.clone(), bytes));
+        state.attachments.insert(id.0, (attachment.clone(), bytes));
         Ok(attachment)
     }
 

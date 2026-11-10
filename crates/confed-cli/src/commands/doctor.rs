@@ -64,7 +64,7 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
 
     match ctx.workspace()?.state().integrity_check() {
         Ok(result) if result == "ok" => {
-            checks.push(Check::pass("state database", "integrity check passed"))
+            checks.push(Check::pass("state database", "integrity check passed"));
         }
         Ok(other) => checks.push(Check::fail("state database", format!("corrupt: {other}"))),
         Err(e) => checks.push(Check::fail("state database", e.to_string())),

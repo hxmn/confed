@@ -405,7 +405,7 @@ impl Respond for Confluence {
                 {
                     let space = world.pages[&target].space.clone();
                     let parent = match position.as_str() {
-                        "append" => Some(target.clone()),
+                        "append" => Some(target),
                         _ => world.pages[&target].parent.clone(),
                     };
                     for moved in world.subtree(&id) {

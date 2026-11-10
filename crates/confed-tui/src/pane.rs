@@ -113,7 +113,7 @@ fn build_diff(ws: &Workspace, page_id: &str, path: &str, side: DiffSide) -> Resu
     let options = confed_core::sync::page_convert_options(ws, path)?;
 
     let storage = match side {
-        DiffSide::Base => Some(record.storage_body.clone()),
+        DiffSide::Base => Some(record.storage_body),
         DiffSide::Remote => ws.state().get_remote(page_id)?.and_then(|r| r.storage_body),
     };
     let Some(storage) = storage else {

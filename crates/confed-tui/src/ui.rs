@@ -14,7 +14,7 @@ use ratatui::Frame;
 
 const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
 
-pub fn draw(frame: &mut Frame, app: &mut App) {
+pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -36,7 +36,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let (outgoing, incoming, conflicted) = app.counts();
     let mut spans = vec![
         Span::styled(" confed ", Style::default().add_modifier(Modifier::BOLD)),
@@ -57,7 +57,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_body(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let panes = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -67,9 +67,9 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_content(frame, app, panes[1]);
 }
 
-fn draw_tree(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_tree(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let rows = app.rows();
-    let items: Vec<ListItem> = rows
+    let items: Vec<ListItem<'_>> = rows
         .iter()
         .map(|row| {
             let node = &app.tree.nodes[row.node];
@@ -111,7 +111,7 @@ fn draw_tree(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_content(frame: &mut Frame, app: &mut App, area: Rect) {
+fn draw_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.page_height = area.height.saturating_sub(2);
 
     let title = match (app.view, app.selected_node()) {
@@ -122,7 +122,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect) {
         (_, None) => " Nothing selected ".to_string(),
     };
 
-    let lines: Vec<Line> = app.content.iter().map(pane_line).collect();
+    let lines: Vec<Line<'_>> = app.content.iter().map(pane_line).collect();
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL).title(title))
@@ -131,7 +131,7 @@ fn draw_content(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
-fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mut spans = Vec::new();
     if app.busy() {
         let spinner = SPINNER[(app.frames as usize) % SPINNER.len()];
@@ -151,7 +151,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_help(frame: &mut Frame, area: Rect) {
+fn draw_help(frame: &mut Frame<'_>, area: Rect) {
     let text = vec![
         help_line("j / k / ↑ ↓", "move"),
         help_line("Enter, Space", "expand or collapse"),
@@ -184,9 +184,9 @@ fn help_line(keys: &'static str, what: &'static str) -> Line<'static> {
     ])
 }
 
-fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_plan(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(plan) = &app.plan else { return };
-    let mut lines: Vec<Line> = Vec::new();
+    let mut lines: Vec<Line<'_>> = Vec::new();
     for op in &plan.ops {
         lines.push(Line::from(vec![
             Span::styled(
@@ -219,7 +219,7 @@ fn draw_plan(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
-fn draw_resolver(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_resolver(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(resolver) = &app.resolver else { return };
 
     let rows = Layout::default()
@@ -261,7 +261,7 @@ fn draw_resolver(frame: &mut Frame, app: &App, area: Rect) {
         (" theirs (t) ", &hunk.theirs, Color::Blue),
     ];
     for (index, (title, text, color)) in sides.into_iter().enumerate() {
-        let lines: Vec<Line> = side_lines(text)
+        let lines: Vec<Line<'_>> = side_lines(text)
             .into_iter()
             .map(|line| Line::from(Span::styled(line, Style::default().fg(color))))
             .collect();

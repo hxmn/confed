@@ -7,8 +7,6 @@
 //! Capability differences are reported through [`types::Capabilities`] rather
 //! than by branching on the flavor.
 
-#![forbid(unsafe_code)]
-
 pub mod client;
 pub mod error;
 pub mod http;

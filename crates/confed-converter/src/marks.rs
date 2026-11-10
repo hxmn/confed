@@ -714,10 +714,7 @@ fn leading_markers(s: &str) -> (String, &str) {
 fn first_char_span(s: &str) -> usize {
     let delims = s.len() - s.trim_start_matches(['*', '_', '~']).len();
     let rest = &s[delims..];
-    let first = match rest.chars().next() {
-        Some(c) => c,
-        None => return 0,
-    };
+    let Some(first) = rest.chars().next() else { return 0 };
     let unit = match first {
         '`' => {
             let ticks = rest.chars().take_while(|&c| c == '`').count();

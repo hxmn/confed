@@ -629,7 +629,7 @@ mod runtime_safety_tests {
         // The keyring path is the one that used to panic; the fallback to
         // SQLite is what happens on a machine without one.
         let backend = store.save(&session, &Secret::new("token"), None).unwrap();
-        let mut stored = session.clone();
+        let mut stored = session;
         stored.secret_backend = backend;
         assert_eq!(store.load_secret(&stored).unwrap().unwrap().expose(), "token");
 

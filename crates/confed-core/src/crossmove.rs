@@ -604,7 +604,7 @@ pub async fn draft(
                 blocking.push(
                     Blocker::new("local_changes", format!("{}: not on disk", base.local_path))
                         .page(id, src_key, &base.local_path),
-                )
+                );
             }
         }
         let drafts = pending_comment_work(src, &base.local_path);
@@ -1374,12 +1374,9 @@ async fn write_destination(
     plan: &mut MovePlan,
 ) -> Result<()> {
     let mut src = spaces.remove(&plan.source.key).ok_or_else(|| missing_space(&plan.source.key))?;
-    let mut dst = match spaces.remove(&plan.dest.key) {
-        Some(dst) => dst,
-        None => {
-            spaces.insert(plan.source.key.clone(), src);
-            return Err(missing_space(&plan.dest.key));
-        }
+    let Some(mut dst) = spaces.remove(&plan.dest.key) else {
+        spaces.insert(plan.source.key.clone(), src);
+        return Err(missing_space(&plan.dest.key));
     };
     let result = transfer(client, &mut src, &mut dst, plan).await;
     spaces.insert(plan.source.key.clone(), src);
@@ -2227,11 +2224,11 @@ fn rewrite_tag(tag: &str, ctx: &LinkContext<'_>) -> Option<String> {
     let wanted_space: Option<String> = if target_space == ctx.space_after {
         match &named_space {
             Some(_) if ctx.relativize => None,
-            Some(_) => Some(target_space.clone()),
+            Some(_) => Some(target_space),
             None => None,
         }
     } else {
-        Some(target_space.clone())
+        Some(target_space)
     };
     if wanted_space == named_space && target_title == title {
         return None;

@@ -562,13 +562,12 @@ async fn placement(
         [(&args.before, MovePosition::Before), (&args.after, MovePosition::After)]
     {
         let Some(reference) = sibling else { continue };
-        let id = match locate(ctx, instance, Some(client), reference, false).await? {
-            Found::Page { page_id, .. } => page_id,
-            _ => {
-                return Err(ConfedError::NotFound(format!(
-                    "`{reference}` is no page of the destination"
-                )))
-            }
+        let Found::Page { page_id: id, .. } =
+            locate(ctx, instance, Some(client), reference, false).await?
+        else {
+            return Err(ConfedError::NotFound(format!(
+                "`{reference}` is no page of the destination"
+            )));
         };
         return Ok((position, id.clone(), parent_of(&id)?));
     }
@@ -644,7 +643,7 @@ fn move_local_file(
             format!("{}/{name}", paths::children_dir(&parent.local_path))
         }
         Found::NewPath { path, .. } => path.clone(),
-        Found::SpaceTop { .. } => name.clone(),
+        Found::SpaceTop { .. } => name,
         Found::LocalOnly { path, .. } => {
             return Err(ConfedError::state(format!("{path} has not been pushed; push it first")))
         }
