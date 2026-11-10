@@ -2657,3 +2657,20 @@ async fn usage_errors_come_back_in_the_envelope_under_json() {
     assert_eq!(exit_code(&output), 2);
     assert!(stdout(&output).is_empty() && stderr(&output).contains("nosuch"));
 }
+
+/// A workspace that is there but cannot be opened says why, rather than
+/// claiming there is no workspace — which would send its owner to `init`.
+#[tokio::test]
+async fn a_workspace_that_cannot_be_opened_says_why() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    std::fs::write(dir.path().join(".state.db"), "this is not a database").unwrap();
+
+    let output = run(confed(dir.path(), &["status", "--json"]));
+    let value = envelope(&output, "status");
+    let message = value["errors"][0]["message"].as_str().unwrap();
+    assert!(message.contains("could not be opened"), "{message}");
+    assert!(!message.contains("not a confed workspace"), "{message}");
+    assert_ne!(exit_code(&output), 0);
+}

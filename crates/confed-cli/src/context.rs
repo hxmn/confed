@@ -27,6 +27,10 @@ pub struct Context {
     pub resolver: ConfigResolver,
     pub style: Style,
     workspace: Option<Workspace>,
+    /// Why the workspace found here could not be opened — a database from a
+    /// newer confed, locked or damaged, unreadable — for every command that
+    /// asks for it to say, rather than "not initialized".
+    workspace_error: Option<(confed_core::ExitCode, String, Option<String>)>,
     /// The instance root above the current directory, if there is one.
     instance_root: Option<PathBuf>,
     /// Resolved once, before the async runtime starts: the OS keyring is a
@@ -46,7 +50,11 @@ impl Context {
                 .map_err(|e| ConfedError::io("resolving the current directory", e))?,
         };
 
-        let workspace = Workspace::discover(&cwd).ok();
+        let (workspace, workspace_error) = match Workspace::discover(&cwd) {
+            Ok(ws) => (Some(ws), None),
+            Err(e) if e.is_not_initialized() => (None, None),
+            Err(e) => (None, Some((e.exit_code(), e.to_string(), e.hint().map(str::to_string)))),
+        };
         let instance_root = match &workspace {
             Some(ws) => ws.root().parent().and_then(confed_core::instance::find_root),
             None => confed_core::instance::find_root(&cwd),
@@ -69,6 +77,7 @@ impl Context {
             resolver,
             style,
             workspace,
+            workspace_error,
             instance_root,
             secret: None,
             client: None,
@@ -94,6 +103,7 @@ impl Context {
             resolver,
             instance_root: parent.instance_root.clone(),
             workspace: Some(ws),
+            workspace_error: None,
             secret: parent.secret.clone(),
             client,
             global,
@@ -123,7 +133,22 @@ impl Context {
     /// The workspace, or the "run confed init" error — which, at an instance
     /// root, points at the commands that work there.
     pub fn workspace(&self) -> Result<&Workspace> {
-        self.workspace.as_ref().ok_or_else(|| match &self.instance_root {
+        self.workspace.as_ref().ok_or_else(|| self.no_workspace())
+    }
+
+    /// Why there is no workspace to hand out.
+    fn no_workspace(&self) -> ConfedError {
+        if let Some((exit, message, hint)) = &self.workspace_error {
+            let message = format!("the workspace here could not be opened: {message}");
+            return match exit {
+                confed_core::ExitCode::State => ConfedError::State { message, hint: hint.clone() },
+                _ => ConfedError::Other(match hint {
+                    Some(hint) => format!("{message} ({hint})"),
+                    None => message,
+                }),
+            };
+        }
+        match &self.instance_root {
             Some(root) => ConfedError::state_with_hint(
                 format!(
                     "{} is an instance root, not a workspace: each space is in a directory of its own",
@@ -133,11 +158,14 @@ impl Context {
                  for one space",
             ),
             None => ConfedError::not_initialized(),
-        })
+        }
     }
 
     pub fn workspace_mut(&mut self) -> Result<&mut Workspace> {
-        self.workspace.as_mut().ok_or_else(ConfedError::not_initialized)
+        if self.workspace.is_none() {
+            return Err(self.no_workspace());
+        }
+        Ok(self.workspace.as_mut().expect("checked above"))
     }
 
     /// Move the workspace out of the context.
@@ -145,7 +173,10 @@ impl Context {
     /// The TUI needs to own it: long operations run on the tokio runtime, and
     /// the workspace (a SQLite connection) travels with them.
     pub fn take_workspace(&mut self) -> Result<Workspace> {
-        self.workspace.take().ok_or_else(ConfedError::not_initialized)
+        if self.workspace.is_none() {
+            return Err(self.no_workspace());
+        }
+        Ok(self.workspace.take().expect("checked above"))
     }
 
     pub fn has_workspace(&self) -> bool {

@@ -10,6 +10,8 @@ pub const SPACE_KEY_RULE: &str =
 
 pub type Result<T> = std::result::Result<T, ConfedError>;
 
+const NOT_INITIALIZED: &str = "this directory is not a confed workspace (.state.db not found)";
+
 /// Process exit codes. Documented in docs/design/04-command-reference.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
@@ -215,9 +217,15 @@ impl ConfedError {
 
     pub fn not_initialized() -> Self {
         ConfedError::State {
-            message: "this directory is not a confed workspace (.state.db not found)".into(),
+            message: NOT_INITIALIZED.into(),
             hint: Some("run `confed init` or `confed clone <space>` first".into()),
         }
+    }
+
+    /// Whether this is [`Self::not_initialized`]: no workspace here at all,
+    /// as opposed to one that is there and could not be opened.
+    pub fn is_not_initialized(&self) -> bool {
+        matches!(self, ConfedError::State { message, .. } if message == NOT_INITIALIZED)
     }
 }
 
