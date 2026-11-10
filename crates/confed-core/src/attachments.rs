@@ -47,11 +47,21 @@ pub fn remove_stale_partials(sidecar_dir: &Path) -> usize {
 }
 
 /// Content hash of a file on disk, used to decide whether to re-upload.
+/// Streamed in chunks: an attachment can be larger than the memory confed
+/// should take for it.
 pub fn file_sha256(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| ConfedError::io(format!("reading {}", path.display()), e))?;
+    use std::io::Read;
+    let read_error = |e| ConfedError::io(format!("reading {}", path.display()), e);
+    let mut file = std::fs::File::open(path).map_err(read_error)?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(read_error)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -186,6 +196,18 @@ pub fn to_refs(records: &[AttachmentRecord]) -> Vec<AttachmentRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The streamed hash is the hash of the whole file, across chunk edges.
+    #[test]
+    fn a_file_is_hashed_whole_in_chunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagram.bin");
+        let bytes: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        assert_eq!(file_sha256(&path).unwrap(), format!("{:x}", hasher.finalize()));
+    }
 
     fn record(id: &str, filename: &str, sha: &str) -> AttachmentRecord {
         AttachmentRecord {
