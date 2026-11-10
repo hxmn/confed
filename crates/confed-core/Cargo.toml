@@ -38,6 +38,7 @@ zstd.workspace = true
 
 [dev-dependencies]
 confed-api = { workspace = true, features = ["mock"] }
+proptest.workspace = true
 
 [lints]
 workspace = true

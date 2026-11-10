@@ -13,6 +13,8 @@
 //! 4. A fuzzy window match above a high similarity threshold.
 //! 5. Otherwise: orphaned. Never guessed at, and never deleted server-side.
 
+use std::collections::HashMap;
+
 use confed_api::InlineAnchor;
 
 /// How much of the surrounding text is kept as context.
@@ -187,23 +189,98 @@ fn best_fuzzy_window(needle: &str, body: &str) -> Option<(usize, f64)> {
     starts.sort_unstable();
     starts.dedup();
 
+    // Every width from one start is a prefix of the widest window, so a single
+    // pass over that window scores them all — at the cost of reading it once,
+    // rather than diffing each window from scratch.
+    let lcs = Lcs::new(needle);
     let mut best: Option<(usize, f64)> = None;
     for start in starts {
         if start >= chars.len() {
             continue;
         }
-        let byte_start = chars[start].0;
+        let mut scan = lcs.scan();
+        let mut read = start;
         for &width in &widths {
             let end_index = (start + width).min(chars.len());
-            let byte_end = if end_index < chars.len() { chars[end_index].0 } else { body.len() };
+            for &(_, c) in chars.get(read..end_index).unwrap_or_default() {
+                lcs.push(&mut scan, c);
+            }
+            read = read.max(end_index);
 
-            let score = similarity(needle, &body[byte_start..byte_end]);
+            let score = ratio(lcs.length(&scan), needle_len, end_index - start);
             if best.is_none_or(|(_, b)| score > b) {
-                best = Some((byte_start, score));
+                best = Some((chars[start].0, score));
             }
         }
     }
     best
+}
+
+/// The length of the longest common subsequence of a fixed pattern and a text
+/// read one character at a time, so that every prefix of the text is measured
+/// in a single pass: the bit-parallel form of Hyyrö (2004), one bit per pattern
+/// character.
+struct Lcs {
+    /// For each character, the pattern positions it occupies.
+    masks: HashMap<char, Vec<u64>>,
+    words: usize,
+    len: usize,
+}
+
+impl Lcs {
+    fn new(pattern: &str) -> Self {
+        let len = pattern.chars().count();
+        let words = len.div_ceil(64).max(1);
+        let mut masks: HashMap<char, Vec<u64>> = HashMap::new();
+        for (i, c) in pattern.chars().enumerate() {
+            masks.entry(c).or_insert_with(|| vec![0; words])[i / 64] |= 1 << (i % 64);
+        }
+        Lcs { masks, words, len }
+    }
+
+    /// The state before any text has been read.
+    fn scan(&self) -> Vec<u64> {
+        vec![!0; self.words]
+    }
+
+    /// Read one more character of the text: `V' = (V + (V & M)) | (V & !M)`,
+    /// added across the words with carry.
+    fn push(&self, scan: &mut [u64], c: char) {
+        // A character the pattern lacks leaves the state as it is.
+        let Some(mask) = self.masks.get(&c) else { return };
+        let mut carry = false;
+        for (v, &m) in scan.iter_mut().zip(mask) {
+            let (sum, c1) = v.overflowing_add(*v & m);
+            let (sum, c2) = sum.overflowing_add(u64::from(carry));
+            carry = c1 || c2;
+            *v = sum | (*v & !m);
+        }
+    }
+
+    /// The LCS of the pattern and the text read so far: the zero bits among
+    /// the pattern's positions.
+    fn length(&self, scan: &[u64]) -> usize {
+        let ones: usize = scan
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let used = self.len.saturating_sub(i * 64).min(64);
+                let mask = if used == 64 { !0 } else { (1u64 << used) - 1 };
+                (v & mask).count_ones() as usize
+            })
+            .sum();
+        self.len - ones
+    }
+}
+
+/// The similarity of two texts of `a` and `b` characters sharing a common
+/// subsequence of `common`, as `similarity` measures it.
+fn ratio(common: usize, a: usize, b: usize) -> f64 {
+    match (a, b) {
+        (0, 0) => 1.0,
+        (0, _) | (_, 0) => 0.0,
+        _ => 2.0 * common as f64 / (a + b) as f64,
+    }
 }
 
 /// The first word and first two words of the anchor, when they are long enough
@@ -389,6 +466,49 @@ mod tests {
 
         assert!(result.anchor.context_before.chars().count() <= CONTEXT_CHARS);
         assert!(result.anchor.context_after.chars().count() <= CONTEXT_CHARS);
+    }
+
+    proptest::proptest! {
+        /// The one-pass measure scores every prefix exactly as a diff of it
+        /// does, so the fuzzy fallback finds what it found before, only faster.
+        #[test]
+        fn one_pass_scores_match_a_diff(
+            pattern in "[abc я\u{e9}]{0,100}",
+            text in "[abcd я\u{e9}]{0,100}",
+        ) {
+            let lcs = Lcs::new(&pattern);
+            let mut scan = lcs.scan();
+            let a = pattern.chars().count();
+            let chars: Vec<char> = text.chars().collect();
+            for b in 0..=chars.len() {
+                if b > 0 {
+                    lcs.push(&mut scan, chars[b - 1]);
+                }
+                let prefix: String = chars[..b].iter().collect();
+                let expected = similarity(&pattern, &prefix);
+                let measured = ratio(lcs.length(&scan), a, b);
+                proptest::prop_assert!(
+                    (expected - measured).abs() < 1e-6,
+                    "{pattern:?} against {prefix:?}: {measured}, a diff says {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_anchor_that_is_gone_from_a_long_page_is_given_up_on_quickly() {
+        // Every pull re-checks every orphaned anchor, so a page with many of
+        // them must not take seconds. A diff per window took about half a
+        // second for this one.
+        let words = ["Фраза", "данные", "поле", "значение", "Team", "Handbook", "guide"];
+        let body: String =
+            (0..6000).map(|i| words[i * 7 % words.len()]).collect::<Vec<_>>().join(" ");
+        let gone = anchor("совершенно другой текст, которого больше нет", "", "");
+
+        let started = std::time::Instant::now();
+        assert!(reanchor(&gone, &body).is_orphaned());
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_millis(250), "took {took:?}");
     }
 
     #[test]
