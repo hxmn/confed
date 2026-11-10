@@ -641,7 +641,9 @@ fn normalize_rel(path: &str) -> String {
     for part in path.split('/') {
         match part {
             "" | "." => {}
-            ".." => {
+            // Climbing above the workspace is kept, for the caller to refuse
+            // — not quietly taken back to its root.
+            ".." if parts.last().is_some_and(|p| *p != "..") => {
                 parts.pop();
             }
             other => parts.push(other),

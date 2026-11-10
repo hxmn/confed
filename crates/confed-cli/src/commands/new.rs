@@ -71,7 +71,7 @@ pub async fn run_and_push(ctx: &mut Context, args: &NewArgs) -> Result<Output> {
 fn scaffold(ctx: &Context, args: &NewArgs) -> Result<(String, MarkdownFile)> {
     let ws = ctx.workspace()?;
 
-    let path = ctx.workspace_path(&args.path);
+    let path = confed_core::paths::checked_relative(&ctx.workspace_path(&args.path))?;
     let raw = path.trim_end_matches(".md");
     let (dir, name) = match raw.rsplit_once('/') {
         Some((dir, name)) => (Some(dir.to_string()), name.to_string()),

@@ -30,6 +30,7 @@ pub fn move_page(
     destination: &str,
     rename_title: bool,
 ) -> Result<LocalMove> {
+    let destination = paths::checked_relative(destination)?;
     let _lock = ws.lock()?;
     let record = page_record(ws, page_id)?;
     let old_path = record.local_path.clone();

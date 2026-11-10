@@ -2606,3 +2606,27 @@ async fn ctrl_c_stops_a_pull_between_pages_and_keeps_its_outcome() {
     assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
     assert!(dir.path().join(CHILD_FILE).exists());
 }
+
+/// A path typed on the command line names a place inside the workspace or
+/// is refused.
+#[tokio::test]
+async fn paths_outside_the_workspace_and_ids_that_climb_are_refused() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+
+    let escape = outside.path().join("Escaped.md");
+    for path in ["../Escaped.md", escape.to_str().unwrap()] {
+        let output = run(confed(dir.path(), &["new", path, "--json"]));
+        assert_eq!(exit_code(&output), 2, "{path}: {}", stderr(&output));
+    }
+    assert!(!escape.exists());
+    assert!(!dir.path().parent().unwrap().join("Escaped.md").exists());
+
+    let output = run(confed(dir.path(), &["mv", CHILD_FILE, "../Escaped.md", "--json"]));
+    assert_eq!(exit_code(&output), 2, "{}", stderr(&output));
+    assert!(dir.path().join(CHILD_FILE).exists());
+    assert!(mutations(&server).await.is_empty());
+}

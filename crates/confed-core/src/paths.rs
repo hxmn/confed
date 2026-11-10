@@ -1,5 +1,6 @@
 //! Mapping the page hierarchy onto the filesystem, and links between files.
 
+use crate::error::{ConfedError, Result};
 use crate::slug::{page_path, sidecar_dir_name, slugify, SlugAllocator};
 use std::collections::HashMap;
 
@@ -168,6 +169,29 @@ pub fn storage_file_for(page_path: &str) -> String {
 }
 
 /// The sidecar directory for a page file: `a/b/Page.md` → `a/b/.Page`.
+/// `path` as a place inside the workspace — relative, and not climbing out
+/// of it — or why it is not one. For paths a person typed: a page file goes
+/// nowhere else.
+pub fn checked_relative(path: &str) -> Result<String> {
+    let path = path.replace('\\', "/");
+    let absolute = path.starts_with('/')
+        || path.as_bytes().get(1) == Some(&b':')
+        || std::path::Path::new(&path).is_absolute();
+    let mut parts: Vec<&str> = Vec::new();
+    let mut climbs = absolute;
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => climbs |= parts.pop().is_none(),
+            other => parts.push(other),
+        }
+    }
+    if climbs || parts.is_empty() {
+        return Err(ConfedError::usage(format!("{path} is not a path inside this workspace")));
+    }
+    Ok(parts.join("/"))
+}
+
 pub fn sidecar_for(path: &str) -> String {
     let stem = path.strip_suffix(".md").unwrap_or(path);
     match stem.rsplit_once('/') {
@@ -191,6 +215,20 @@ pub fn children_dir(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_paths_inside_the_workspace_are_taken() {
+        assert_eq!(
+            checked_relative("Team Handbook/./Onboarding.md").unwrap(),
+            "Team Handbook/Onboarding.md"
+        );
+        assert_eq!(checked_relative("a/b/../Фраза.md").unwrap(), "a/Фраза.md");
+        for outside in
+            ["../x.md", "a/../../x.md", "/tmp/x.md", "C:/x.md", "\\\\host\\share\\x.md", "", "."]
+        {
+            assert!(checked_relative(outside).is_err(), "{outside:?}");
+        }
+    }
 
     fn page(id: &str, title: &str, parent: Option<&str>) -> PagePlacement {
         PagePlacement {
