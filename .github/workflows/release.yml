@@ -12,11 +12,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Native runners for every target: SQLite is bundled C, so a cross
-          # build would need a C toolchain for the target as well.
+          # Native runners for Linux and Windows: SQLite is bundled C, and a
+          # cross build there would need a C toolchain for the target. On
+          # macOS, Apple's clang builds for both architectures from one
+          # runner, and Intel runners are being retired, so x86_64 is built
+          # on Apple silicon.
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-13, target: x86_64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
           - { os: macos-14, target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
