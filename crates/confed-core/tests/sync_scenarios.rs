@@ -242,6 +242,8 @@ both_flavors!(a_stale_base_is_refused_until_the_page_is_pulled, |mut h: Harness|
         "the reason names the version gap: {}",
         push.skipped[0].reason
     );
+    assert_eq!(push.skipped[0].kind, confed_core::sync::Blocked::Stale);
+    assert!(push.skipped[0].kind.is_conflict(), "exit 4: pull, then push");
     assert!(h.mock.page_body("1001").unwrap().contains("changed elsewhere"));
 });
 

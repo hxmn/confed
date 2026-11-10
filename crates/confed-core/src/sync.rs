@@ -406,7 +406,37 @@ pub struct MovedPage {
 pub struct BlockedPage {
     pub page_id: String,
     pub path: String,
+    /// Why, for a person.
     pub reason: String,
+    /// Why, for code: what decides the exit code and what to suggest. Not in
+    /// the JSON, whose `reason` is the documented field.
+    #[serde(skip)]
+    pub kind: Blocked,
+}
+
+/// What stops a page from going up or coming down.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Blocked {
+    /// The file still has merge conflict markers.
+    Conflicted,
+    /// The server has a newer version than the file was based on.
+    Stale,
+    /// Local work that the operation would overwrite or drop.
+    LocalWork,
+    /// Something only `--allow-delete` may do.
+    NeedsAllowDelete,
+    /// Its parent is in another space: `confed instance mv`'s work.
+    CrossSpace,
+    #[default]
+    Other,
+}
+
+impl Blocked {
+    /// Whether this is a version conflict: what `pull` and then `push` fix,
+    /// and what exit 4 means.
+    pub fn is_conflict(self) -> bool {
+        matches!(self, Blocked::Conflicted | Blocked::Stale)
+    }
 }
 
 // ----------------------------------------------------------------- push ----
@@ -492,6 +522,7 @@ fn blocked_attachment(op: &AttachmentOp) -> BlockedPage {
         page_id: op.page_id.clone(),
         path: op.file.clone(),
         reason: "attachment is gone locally; pass --allow-delete to remove it on the server".into(),
+        kind: Blocked::NeedsAllowDelete,
     }
 }
 
@@ -1366,6 +1397,7 @@ impl SyncEngine {
                     page_id: remote_page.page_id.clone(),
                     path: status.map(|s| s.path.clone()).unwrap_or_default(),
                     reason: reason.clone(),
+                    kind: Blocked::LocalWork,
                 });
             }
             if !matches!(action, PullAction::Nothing) {
@@ -2272,6 +2304,7 @@ impl SyncEngine {
                     page_id: status.page_id.clone().unwrap_or_default(),
                     path: status.path.clone(),
                     reason: "unresolved merge conflict; run `confed resolve` first".into(),
+                    kind: Blocked::Conflicted,
                 });
                 continue;
             }
@@ -2288,6 +2321,7 @@ impl SyncEngine {
                         "tool-managed frontmatter was edited ({}); run `confed pull --force` on this page",
                         fields.join(", ")
                     ),
+                    kind: Blocked::LocalWork,
                 });
                 continue;
             }
@@ -2303,6 +2337,7 @@ impl SyncEngine {
                                 "remote is at version {} but this file is based on {}; run `confed pull`",
                                 remote.version, base_version
                             ),
+                            kind: Blocked::Stale,
                         });
                         continue;
                     }
@@ -2337,6 +2372,7 @@ impl SyncEngine {
                             reason:
                                 "deleted locally; pass --allow-delete to delete it on the server"
                                     .into(),
+                            kind: Blocked::NeedsAllowDelete,
                         });
                     }
                 }
@@ -2412,6 +2448,7 @@ impl SyncEngine {
                                 reason: "the attachment was deleted on the server; `confed pull` \
                                          removes this copy, or keeps it if it has changed"
                                     .into(),
+                                kind: Blocked::Other,
                             });
                             continue;
                         }
@@ -2666,6 +2703,7 @@ impl SyncEngine {
                             own = self.space.key,
                             path = op.path
                         ),
+                        kind: Blocked::CrossSpace,
                     };
                     plan.skipped.push(blocked.clone());
                     refused.push(blocked);

@@ -367,11 +367,7 @@ pub mod push {
             output.exit = ExitCode::State;
         } else if !outcome.failed.is_empty() {
             output.exit = ExitCode::Partial;
-        } else if outcome
-            .skipped
-            .iter()
-            .any(|s| s.reason.contains("conflict") || s.reason.contains("version"))
-        {
+        } else if outcome.skipped.iter().any(|s| s.kind.is_conflict()) {
             output.exit = ExitCode::Conflict;
         }
         Ok(output)
