@@ -128,7 +128,7 @@ fn collect_text(nodes: &[Node], out: &mut String) {
 ///
 /// Only unprefixed names count — `<ac:link>` is a container that happens to be
 /// spelled like the HTML void element `<link>`.
-fn is_void(qname: &str) -> bool {
+pub fn is_void(qname: &str) -> bool {
     !qname.contains(':')
         && matches!(
             qname,
@@ -455,36 +455,56 @@ pub fn check_well_formed(fragment: &str) -> Result<(), String> {
     let mut reader = Reader::from_str(fragment);
     {
         let cfg = reader.config_mut();
-        cfg.check_end_names = true;
-        cfg.allow_unmatched_ends = false;
+        // The names are matched here rather than by the reader, which knows
+        // nothing of void elements: a bare `<br>` would leave it waiting for a
+        // `</br>` and refuse the `</p>` that really closes the paragraph — the
+        // same input [`parse_fragment`] reads without complaint.
+        cfg.check_end_names = false;
+        cfg.allow_unmatched_ends = true;
         cfg.allow_dangling_amp = true;
         cfg.check_comments = false;
         cfg.expand_empty_elements = false;
         cfg.trim_text(false);
     }
-    let mut depth = 0usize;
+    let mut open: Vec<(String, u64)> = Vec::new();
     loop {
         let pos = reader.buffer_position();
         match reader.read_event() {
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
-                if !is_void(&String::from_utf8_lossy(e.name().as_ref())) {
-                    depth += 1;
+                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                if !is_void(&name) {
+                    open.push((name, pos));
                 }
             }
-            Ok(Event::End(_)) => {
-                depth = depth
-                    .checked_sub(1)
-                    .ok_or_else(|| format!("unexpected closing tag at byte {pos}"))?;
+            Ok(Event::End(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                // `</br>` closes nothing: browsers read it as another break.
+                if is_void(&name) {
+                    continue;
+                }
+                match open.pop() {
+                    Some((expected, _)) if expected == name => {}
+                    Some((expected, at)) => {
+                        return Err(format!(
+                            "byte {pos}: </{name}> closes <{expected}>, opened at byte {at}"
+                        ))
+                    }
+                    None => return Err(format!("unexpected closing tag </{name}> at byte {pos}")),
+                }
             }
             Ok(_) => {}
             Err(e) => return Err(format!("byte {pos}: {e}")),
         }
     }
-    if depth != 0 {
-        return Err(format!("{depth} unclosed element(s)"));
+    match open.as_slice() {
+        [] => Ok(()),
+        [(name, at)] => Err(format!("<{name}> at byte {at} is never closed")),
+        [(name, at), rest @ ..] => Err(format!(
+            "<{name}> at byte {at} and {} more element(s) are never closed",
+            rest.len()
+        )),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -578,6 +598,20 @@ mod tests {
         assert!(check_well_formed("<p>oops").is_err());
         assert!(check_well_formed("<p>oops</div>").is_err());
         assert!(check_well_formed("</p>").is_err());
+    }
+
+    /// Storage imported from elsewhere carries HTML's bare void elements. The
+    /// parser reads them, so the gate must too — or no edit to the page,
+    /// however far from the `<br>`, could ever be pushed.
+    #[test]
+    fn bare_void_elements_are_well_formed() {
+        assert!(check_well_formed("<p>one<br>two</p>").is_ok());
+        assert!(check_well_formed("<p>one<br>two<br></br>three</p>").is_ok());
+        assert!(check_well_formed("<table><tr><td>a<br>b</td></tr></table>").is_ok());
+        assert!(check_well_formed("<p><img src=\"x.png\">caption</p>").is_ok());
+        // Still strict about everything that is not void.
+        assert!(check_well_formed("<p><strong>a<br></p>").is_err());
+        assert!(check_well_formed("<ac:link>x").is_err(), "prefixed names are never void");
     }
 
     #[test]

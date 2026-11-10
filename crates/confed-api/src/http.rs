@@ -139,6 +139,89 @@ impl Pacer {
     }
 }
 
+/// How long confed waits on the network before calling a request lost.
+#[derive(Clone, Copy, Debug)]
+pub struct Timeouts {
+    /// The whole of an API call, answer included. API answers are small, so
+    /// one that takes this long is stuck, not slow.
+    pub request: Duration,
+    /// The longest a transfer — an attachment going up or coming down — may
+    /// go without moving a byte. Only silence counts: a large file on a slow
+    /// line takes as long as it takes.
+    pub stall: Duration,
+    /// How long the server may take to answer once an upload is fully sent,
+    /// while it stores the file.
+    pub after_upload: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            request: Duration::from_secs(120),
+            stall: Duration::from_secs(120),
+            after_upload: Duration::from_secs(600),
+        }
+    }
+}
+
+/// What a request is waiting for, which decides how long is too long.
+#[derive(Clone)]
+enum Wait {
+    /// An API call, bounded as a whole.
+    Request,
+    /// A download: the answer's headers, then each chunk of the body (which
+    /// [`stream_to_file`] reads under the same limit).
+    Download,
+    /// An upload, watched through the body it is sending.
+    Upload(Arc<UploadProgress>),
+}
+
+/// How far an upload's body has got, for the watchdog in [`watch_upload`].
+#[derive(Debug)]
+struct UploadProgress {
+    started: Instant,
+    /// Milliseconds after `started` that a chunk was last handed to the socket.
+    last: AtomicU64,
+    sent: AtomicU64,
+    len: u64,
+}
+
+impl UploadProgress {
+    fn new(len: u64) -> Self {
+        Self { started: Instant::now(), last: AtomicU64::new(0), sent: AtomicU64::new(0), len }
+    }
+
+    fn restart(&self) {
+        self.sent.store(0, Ordering::Relaxed);
+        self.touch();
+    }
+
+    fn touch(&self) {
+        self.last.store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn advance(&self, bytes: usize) {
+        self.sent.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.touch();
+    }
+
+    fn idle(&self) -> Duration {
+        let last = Duration::from_millis(self.last.load(Ordering::Relaxed));
+        self.started.elapsed().saturating_sub(last)
+    }
+
+    fn finished(&self) -> bool {
+        self.sent.load(Ordering::Relaxed) >= self.len
+    }
+}
+
+/// Why a request came back with no answer.
+enum Unanswered {
+    Http(reqwest::Error),
+    /// Nothing moved for longer than the limit allows.
+    Stalled(String),
+}
+
 /// A web page's answer, unjudged.
 #[derive(Clone, Debug)]
 pub struct WebAnswer {
@@ -176,6 +259,7 @@ pub struct Http {
     policy: RetryPolicy,
     sem: Arc<Semaphore>,
     pacer: Arc<Mutex<Pacer>>,
+    timeouts: Timeouts,
 }
 
 impl Http {
@@ -183,10 +267,18 @@ impl Http {
         let normalized =
             if base_url.ends_with('/') { base_url.to_string() } else { format!("{base_url}/") };
         let base = Url::parse(&normalized)?;
+        // No client-wide deadline: it would cover a whole attachment transfer,
+        // and a large file on a slow line would always run out of it. Each
+        // request is bounded by what it waits for instead — see [`Wait`].
+        //
+        // Certificates are checked against the operating system's store as
+        // well as the bundled roots, so a Data Center behind a company's own
+        // authority is reachable once that authority is installed — or named
+        // with SSL_CERT_FILE or SSL_CERT_DIR.
         let client = reqwest::Client::builder()
             .user_agent(concat!("confed/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(120))
             .connect_timeout(Duration::from_secs(15))
+            .tcp_keepalive(Duration::from_secs(60))
             .build()?;
         Ok(Self {
             client,
@@ -195,7 +287,13 @@ impl Http {
             policy: RetryPolicy::default(),
             sem: Arc::new(Semaphore::new(concurrency.max(1))),
             pacer: Arc::new(Mutex::new(Pacer::new(Duration::from_millis(0)))),
+            timeouts: Timeouts::default(),
         })
+    }
+
+    pub fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
+        self.timeouts = timeouts;
+        self
     }
 
     /// Draw request permits from `limit` instead of a semaphore of its own, so
@@ -240,11 +338,27 @@ impl Http {
     }
 
     /// Run a request with retry/backoff. `build` is called once per attempt so the
-    /// body can be recreated; `idempotent` gates retry-after-send for POST/PUT.
+    /// body can be recreated. `idempotent` says whether the request may be
+    /// sent again after it could have reached the server: a GET or DELETE may,
+    /// a create or an upload may not — repeating one after the server took it
+    /// leaves a duplicate page, comment or attachment version behind.
     pub async fn send_with_retry<F>(
         &self,
         context: &str,
         idempotent: bool,
+        build: F,
+    ) -> ApiResult<reqwest::Response>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        self.send_waiting(context, idempotent, Wait::Request, build).await
+    }
+
+    async fn send_waiting<F>(
+        &self,
+        context: &str,
+        idempotent: bool,
+        wait: Wait,
         build: F,
     ) -> ApiResult<reqwest::Response>
     where
@@ -262,7 +376,7 @@ impl Http {
             }
 
             let started = Instant::now();
-            let result = build().send().await;
+            let result = self.send_once(&wait, build()).await;
             let retriable_transport;
             match result {
                 Ok(resp) => {
@@ -280,7 +394,11 @@ impl Http {
                     if code == 429 {
                         self.pacer.lock().expect("pacer poisoned").on_rate_limit();
                     }
-                    let retriable = code == 429 || matches!(code, 502..=504);
+                    // A 429 is a refusal: nothing was done, so anything may be
+                    // sent again. A gateway's 502–504 says nothing of the sort —
+                    // the gateway may have given up while Confluence went on to
+                    // do the work — so only a request safe to repeat is.
+                    let retriable = code == 429 || (idempotent && matches!(code, 502..=504));
                     if !retriable || attempt + 1 >= self.policy.max_attempts {
                         let body = resp.text().await.unwrap_or_default();
                         debug!(target: "confed::http", context, status = code, body = %body, "error response");
@@ -302,7 +420,21 @@ impl Http {
                     attempt += 1;
                     continue;
                 }
-                Err(e) => {
+                Err(Unanswered::Stalled(message)) => {
+                    let message = format!("{context}: {message}");
+                    if !idempotent || attempt + 1 >= self.policy.max_attempts {
+                        return Err(ApiError::Network(message));
+                    }
+                    let delay = self.policy.delay_for(attempt);
+                    warn!(
+                        target: "confed::http",
+                        context, attempt = attempt + 1, error = %message,
+                        delay_ms = delay.as_millis() as u64, "retrying after a stall"
+                    );
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+                Err(Unanswered::Http(e)) => {
                     // Retrying a non-idempotent request is only safe when the request
                     // never reached the server.
                     retriable_transport =
@@ -320,6 +452,27 @@ impl Http {
                     attempt += 1;
                 }
             }
+        }
+    }
+
+    /// Send one attempt, bounded the way `wait` asks.
+    async fn send_once(
+        &self,
+        wait: &Wait,
+        rb: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, Unanswered> {
+        match wait {
+            Wait::Request => {
+                rb.timeout(self.timeouts.request).send().await.map_err(Unanswered::Http)
+            }
+            Wait::Download => match tokio::time::timeout(self.timeouts.stall, rb.send()).await {
+                Ok(result) => result.map_err(Unanswered::Http),
+                Err(_) => Err(Unanswered::Stalled(format!(
+                    "no answer after {}s",
+                    self.timeouts.stall.as_secs()
+                ))),
+            },
+            Wait::Upload(progress) => watch_upload(rb.send(), progress, &self.timeouts).await,
         }
     }
 
@@ -515,7 +668,7 @@ impl Http {
         F: Fn() -> reqwest::RequestBuilder,
     {
         let _permit = self.sem.acquire().await.expect("semaphore closed");
-        let resp = build().send().await?;
+        let resp = build().timeout(self.timeouts.request).send().await?;
         let status = resp.status().as_u16();
         let final_url = resp.url().to_string();
         let cookies = resp
@@ -558,7 +711,9 @@ impl Http {
         };
         let ctx = format!("GET {}", url.path());
         let resp = self
-            .send_with_retry(&ctx, true, || self.request(reqwest::Method::GET, url.clone()))
+            .send_waiting(&ctx, true, Wait::Download, || {
+                self.request(reqwest::Method::GET, url.clone())
+            })
             .await?;
 
         if let Some(parent) = dest.parent() {
@@ -566,7 +721,7 @@ impl Http {
         }
         let tmp = partial_path(dest);
         let mut file = tokio::fs::File::create(&tmp).await?;
-        let written = stream_to_file(resp, &mut file).await;
+        let written = stream_to_file(resp, &mut file, self.timeouts.stall, &ctx).await;
         drop(file);
 
         // A half-written download is confed's mess to clean up: leaving it in a
@@ -592,14 +747,19 @@ impl Http {
     ) -> ApiResult<T> {
         let url = self.url(path)?;
         let ctx = format!("POST {path}");
-        let bytes = tokio::fs::read(file).await?;
+        // Streamed from disk, never read into memory whole: an attachment
+        // can be larger than the memory confed may use.
+        let len = tokio::fs::metadata(file).await?.len();
         let filename =
             file.file_name().and_then(|n| n.to_str()).unwrap_or("attachment").to_string();
+        let progress = Arc::new(UploadProgress::new(len));
 
         let resp = self
-            .send_with_retry(&ctx, false, || {
-                let part =
-                    reqwest::multipart::Part::bytes(bytes.clone()).file_name(filename.clone());
+            .send_waiting(&ctx, false, Wait::Upload(progress.clone()), || {
+                progress.restart();
+                let body = file_body(file, progress.clone());
+                let part = reqwest::multipart::Part::stream_with_length(body, len)
+                    .file_name(filename.clone());
                 let mut form = reqwest::multipart::Form::new().part(field.to_string(), part);
                 for (k, v) in extra {
                     form = form.text(k.to_string(), v.clone());
@@ -627,19 +787,92 @@ pub fn partial_path(dest: &Path) -> std::path::PathBuf {
 /// Suffix marking confed's own half-finished downloads.
 pub const PARTIAL_SUFFIX: &str = ".confed-part";
 
-async fn stream_to_file(resp: reqwest::Response, file: &mut tokio::fs::File) -> ApiResult<u64> {
+/// Write a download to `file`, failing it once `stall` passes with no data.
+async fn stream_to_file(
+    resp: reqwest::Response,
+    file: &mut tokio::fs::File,
+    stall: Duration,
+    context: &str,
+) -> ApiResult<u64> {
     use futures::StreamExt;
     use tokio::io::AsyncWriteExt;
 
     let mut written = 0u64;
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = tokio::time::timeout(stall, stream.next()).await.map_err(|_| {
+            ApiError::Network(format!(
+                "{context}: the download stopped: no data for {}s after {written} bytes",
+                stall.as_secs()
+            ))
+        })?;
+        let Some(chunk) = next else { break };
         let chunk = chunk?;
         written += chunk.len() as u64;
         file.write_all(&chunk).await?;
     }
     file.flush().await?;
     Ok(written)
+}
+
+/// A file as a request body read from disk as it is sent, reporting each
+/// chunk to `progress`.
+fn file_body(path: &Path, progress: Arc<UploadProgress>) -> reqwest::Body {
+    use futures::StreamExt;
+
+    match std::fs::File::open(path) {
+        Ok(file) => {
+            let stream = tokio_util::io::ReaderStream::new(tokio::fs::File::from_std(file)).map(
+                move |chunk| {
+                    if let Ok(bytes) = &chunk {
+                        progress.advance(bytes.len());
+                    }
+                    chunk
+                },
+            );
+            reqwest::Body::wrap_stream(stream)
+        }
+        // Gone between the size check and the send: the request fails with
+        // the reason rather than sending an empty file.
+        Err(e) => {
+            reqwest::Body::wrap_stream(futures::stream::once(async move { Err::<Vec<u8>, _>(e) }))
+        }
+    }
+}
+
+/// Wait for an upload's answer while watching its body move: fail it once
+/// the body has sat unread for longer than `stall`, or the server has gone
+/// longer than `after_upload` without answering a body it has whole.
+async fn watch_upload(
+    send: impl std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+    progress: &UploadProgress,
+    timeouts: &Timeouts,
+) -> Result<reqwest::Response, Unanswered> {
+    let tick = (timeouts.stall / 8).clamp(Duration::from_millis(10), Duration::from_secs(5));
+    tokio::pin!(send);
+    loop {
+        tokio::select! {
+            result = &mut send => return result.map_err(Unanswered::Http),
+            () = tokio::time::sleep(tick) => {
+                let idle = progress.idle();
+                if progress.finished() {
+                    if idle > timeouts.after_upload {
+                        return Err(Unanswered::Stalled(format!(
+                            "the upload was sent, but no answer came for {}s",
+                            idle.as_secs()
+                        )));
+                    }
+                } else if idle > timeouts.stall {
+                    return Err(Unanswered::Stalled(format!(
+                        "the upload stopped: nothing sent for {}s after {} of {} bytes",
+                        idle.as_secs(),
+                        progress.sent.load(Ordering::Relaxed),
+                        progress.len
+                    )));
+                }
+            }
+        }
+    }
 }
 
 async fn decode<T: DeserializeOwned>(resp: reqwest::Response, context: &str) -> ApiResult<T> {

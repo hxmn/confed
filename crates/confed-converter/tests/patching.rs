@@ -347,3 +347,20 @@ fn a_corrupted_preserved_fence_fails_the_push() {
     }
     panic!("no fixture exercised a preserved block");
 }
+
+/// Storage carrying HTML's bare `<br>` — pages imported from elsewhere have it
+/// — must not hold every later push hostage: an edit to another block goes
+/// up, and the `<br>` block goes back exactly as it was.
+#[test]
+fn a_bare_br_in_an_untouched_block_does_not_block_the_push() {
+    let storage = "<p>First line<br>second line</p><p>Фраза 1.</p>";
+    let opts = corpus::options();
+    let c = storage_to_markdown(storage, &opts).unwrap();
+    let edited = c.markdown.replace("Фраза 1.", "Фраза 2.");
+    assert_ne!(edited, c.markdown, "the edit must land: {}", c.markdown);
+
+    let out = markdown_to_storage_patched(storage, &c.block_map, &c.markdown, &edited, &opts)
+        .unwrap_or_else(|e| panic!("push refused: {e}"));
+    assert!(out.starts_with("<p>First line<br>second line</p>"), "{out}");
+    assert!(out.contains("Фраза 2."), "{out}");
+}

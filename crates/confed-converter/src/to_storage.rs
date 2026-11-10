@@ -44,7 +44,18 @@ fn generate_at(markdown: &str, opts: &ConvertOptions, line_offset: usize) -> Con
     let root = mdblock::parse(&arena, &markdown);
     let g = Generator { opts, line_offset, open_marks: RefCell::new(Vec::new()) };
     let mut out = String::new();
-    g.blocks(root, &mut out)?;
+    // Checked block by block, so a failure names the Markdown line that
+    // caused it rather than a byte offset into storage nobody has seen.
+    for block in root.children() {
+        let start = out.len();
+        g.block(block, &mut out)?;
+        if let Err(detail) = dom::check_well_formed(&out[start..]) {
+            let line = block.data.borrow().sourcepos.start.line + line_offset;
+            return Err(ConvertError::Generate(format!(
+                "line {line}: the storage written for this block is not well-formed ({detail})"
+            )));
+        }
+    }
     Ok(out)
 }
 
@@ -300,7 +311,15 @@ impl<'a> Generator<'a> {
     // -- inline ------------------------------------------------------------
 
     fn inlines(&self, parent: &'a AstNode<'a>, out: &mut String) -> ConvertResult<()> {
-        for child in parent.children() {
+        let children: Vec<_> = parent.children().collect();
+        let as_text = unbalanced_html(&children);
+        for (i, child) in children.into_iter().enumerate() {
+            if as_text[i] {
+                if let NodeValue::HtmlInline(h) = &child.data.borrow().value {
+                    out.push_str(&dom::escape_text(h));
+                }
+                continue;
+            }
             self.inline(child, out)?;
         }
         Ok(())
@@ -393,7 +412,16 @@ impl<'a> Generator<'a> {
             }
             // `<u>`, `<sub>`, `<sup>` come back through here; they are already
             // storage-legal XHTML.
-            NodeValue::HtmlInline(h) => out.push_str(h),
+            NodeValue::HtmlInline(h) => match html_tag(h) {
+                // Storage is XML: a bare `<br>` is written the way it closes.
+                HtmlTag::Open(name) if dom::is_void(&name) => {
+                    let inner = h.trim_end_matches('>').trim_end();
+                    out.push_str(inner);
+                    out.push_str(" />");
+                }
+                HtmlTag::Close(name) if dom::is_void(&name) => {}
+                _ => out.push_str(h),
+            },
             NodeValue::Strong => self.wrapped(node, "<strong>", "</strong>", out)?,
             NodeValue::Emph => self.wrapped(node, "<em>", "</em>", out)?,
             NodeValue::Strikethrough => self.wrapped(node, "<del>", "</del>", out)?,
@@ -757,6 +785,65 @@ fn split_details(literal: &str) -> Option<(String, String)> {
 }
 
 /// A first child that is a paragraph consisting solely of bold text.
+/// One piece of inline HTML, as CommonMark split it out of the text.
+#[derive(Debug, PartialEq)]
+enum HtmlTag {
+    Open(String),
+    Close(String),
+    /// `<x/>`, a comment, a declaration: complete in itself.
+    Whole,
+}
+
+fn html_tag(html: &str) -> HtmlTag {
+    let name_of = |rest: &str| -> String {
+        rest.chars().take_while(|c| c.is_alphanumeric() || matches!(c, ':' | '-' | '_')).collect()
+    };
+    if let Some(rest) = html.strip_prefix("</") {
+        return HtmlTag::Close(name_of(rest));
+    }
+    match html.strip_prefix('<') {
+        Some(rest) if !rest.starts_with(['!', '?']) && !html.ends_with("/>") => {
+            HtmlTag::Open(name_of(rest))
+        }
+        _ => HtmlTag::Whole,
+    }
+}
+
+/// Which of these siblings are inline HTML tags that open or close nothing
+/// among them. Prose like `Vec<T>` or `a <b` reads to CommonMark as a tag;
+/// sent up as one, it is an element that never closes and the whole body is
+/// refused. Those go up as the text they were written as. Balanced tags —
+/// `<u>…</u>`, `<sub>…</sub>` — and void ones pass through as markup.
+fn unbalanced_html<'a>(children: &[&'a AstNode<'a>]) -> Vec<bool> {
+    let mut as_text = vec![false; children.len()];
+    let mut open: Vec<(usize, String)> = Vec::new();
+    for (i, child) in children.iter().enumerate() {
+        let NodeValue::HtmlInline(h) = &child.data.borrow().value else { continue };
+        if marks::parse_marker(h.trim()).is_some() {
+            continue;
+        }
+        match html_tag(h) {
+            HtmlTag::Open(name) if dom::is_void(&name) => {}
+            HtmlTag::Open(name) => open.push((i, name)),
+            HtmlTag::Close(name) if dom::is_void(&name) => {}
+            HtmlTag::Close(name) => match open.iter().rposition(|(_, n)| *n == name) {
+                Some(at) => {
+                    // Whatever opened inside it and never closed is text.
+                    for (j, _) in open.drain(at..).skip(1) {
+                        as_text[j] = true;
+                    }
+                }
+                None => as_text[i] = true,
+            },
+            HtmlTag::Whole => {}
+        }
+    }
+    for (j, _) in open {
+        as_text[j] = true;
+    }
+    as_text
+}
+
 fn sole_strong_text<'a>(node: &'a AstNode<'a>) -> Option<String> {
     if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
         return None;
@@ -812,6 +899,25 @@ mod tests {
     #[test]
     fn inline_html_survives() {
         assert_eq!(gen("x<sub>1</sub>\n"), "<p>x<sub>1</sub></p>");
+    }
+
+    /// Prose that CommonMark reads as a tag must not reach storage as one: an
+    /// element that never closes makes Confluence refuse the whole body.
+    #[test]
+    fn unclosed_inline_html_goes_up_as_text() {
+        assert_eq!(gen("Use Vec<T> here.\n"), "<p>Use Vec&lt;T&gt; here.</p>");
+        assert_eq!(gen("a <b>bold\n"), "<p>a &lt;b&gt;bold</p>");
+        assert_eq!(gen("stray </u> close\n"), "<p>stray &lt;/u&gt; close</p>");
+        assert_eq!(gen("**Map<K, V>**\n"), "<p><strong>Map&lt;K, V&gt;</strong></p>");
+        // Inside a balanced pair, only the unbalanced tag is text.
+        assert_eq!(gen("<u>Vec<T></u>\n"), "<p><u>Vec&lt;T&gt;</u></p>");
+        // Balanced and void tags are still markup.
+        assert_eq!(
+            gen("H<sub>2</sub>O and x<sup>2</sup>\n"),
+            "<p>H<sub>2</sub>O and x<sup>2</sup></p>"
+        );
+        assert_eq!(gen("one<br>two\n"), "<p>one<br />two</p>");
+        assert_eq!(gen("one<br/>two\n"), "<p>one<br/>two</p>");
     }
 
     #[test]

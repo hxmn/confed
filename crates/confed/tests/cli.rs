@@ -207,6 +207,7 @@ const ENV_VARS: &[&str] = &[
     "CONFED_CONCURRENCY",
     "CONFED_LOG",
     "CONFED_EDITOR",
+    "CONFED_SILENT",
 ];
 
 /// A `confed` invocation rooted at `dir`, with a clean environment and a closed
@@ -812,6 +813,29 @@ async fn a_missing_value_fails_fast_with_exit_2_instead_of_prompting() {
         "{}",
         value["errors"][0]
     );
+}
+
+/// The docs set the boolean variables to `1`; every common spelling of yes
+/// and no must be read, not refused as a usage error.
+#[tokio::test]
+async fn boolean_environment_variables_take_1_and_0() {
+    let dir = tempfile::tempdir().unwrap();
+
+    for on in ["1", "true", "yes", "on"] {
+        let mut cmd = confed(dir.path(), &["status"]);
+        cmd.env("CONFED_JSON", on).env("CONFED_SILENT", on).env("CONFED_NON_INTERACTIVE", on);
+        let output = run(cmd);
+        assert_eq!(exit_code(&output), 7, "CONFED_JSON={on}: {}", stderr(&output));
+        envelope(&output, "status");
+    }
+
+    for off in ["0", "false", "no", "off"] {
+        let mut cmd = confed(dir.path(), &["status"]);
+        cmd.env("CONFED_JSON", off);
+        let output = run(cmd);
+        assert_eq!(exit_code(&output), 7, "CONFED_JSON={off}: {}", stderr(&output));
+        assert!(stdout(&output).is_empty(), "CONFED_JSON={off} must not turn JSON on");
+    }
 }
 
 /// The TUI is the one command with no non-interactive fallback: without a

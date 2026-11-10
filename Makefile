@@ -4,7 +4,7 @@
 # Actions workflow runs, so a green `make ci` means a green pipeline.
 
 CARGO ?= cargo
-MSRV  ?= 1.85.0
+MSRV  ?= 1.89.0
 BIN   ?= confed
 
 # Clippy denies warnings the way CI does (RUSTFLAGS in .github/workflows/ci.yml).

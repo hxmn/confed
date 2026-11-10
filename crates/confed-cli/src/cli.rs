@@ -1,5 +1,6 @@
 //! Command-line surface. Flags here mirror docs/design/04-command-reference.md.
 
+use clap::builder::BoolishValueParser;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -26,11 +27,11 @@ pub struct Cli {
 #[derive(Args, Debug, Clone, Default)]
 pub struct GlobalArgs {
     /// Machine-readable output. Implies --non-interactive.
-    #[arg(long, global = true, env = "CONFED_JSON")]
+    #[arg(long, global = true, env = "CONFED_JSON", value_parser = BoolishValueParser::new())]
     pub json: bool,
 
     /// Never prompt; missing values fail with exit code 2.
-    #[arg(long, global = true, env = "CONFED_NON_INTERACTIVE")]
+    #[arg(long, global = true, env = "CONFED_NON_INTERACTIVE", value_parser = BoolishValueParser::new())]
     pub non_interactive: bool,
 
     /// Confluence base URL (Cloud: https://site.atlassian.net/wiki).
@@ -76,7 +77,7 @@ pub struct GlobalArgs {
     pub quiet: bool,
 
     /// Do not show progress while long operations run.
-    #[arg(long, global = true, env = "CONFED_SILENT")]
+    #[arg(long, global = true, env = "CONFED_SILENT", value_parser = BoolishValueParser::new())]
     pub silent: bool,
 
     /// Tracing filter, e.g. `confed::http=debug`.

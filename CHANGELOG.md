@@ -20,6 +20,58 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-10
+
+A round of fixes for things that lost data or stopped work: duplicate pages and
+attachment versions after a gateway timeout, pages no edit could push, Markdown that
+came back changed, and servers confed could not reach.
+
+### Changed
+
+- **confed now needs Rust 1.89 or newer** (was 1.85). The SQLite bundled into
+  `.state.db` handling had a published vulnerability, and the `rusqlite` release that
+  fixes it requires 1.89.
+- **Dependencies updated** to clear every advisory `cargo audit` reported: `rustls`,
+  `rustls-webpki`, the bundled certificate roots (`webpki-roots`), `zstd` and SQLite
+  (`rusqlite` 0.41, `libsqlite3-sys` 0.39).
+
+### Fixed
+
+- **A gateway error after a write could duplicate it.** A `502`, `503` or `504` was
+  retried for every request, creates and uploads included; when the gateway gave up
+  after Confluence had taken the request, the retry made a second page, comment or
+  attachment version. Only requests safe to repeat (reads, deletes) are retried after
+  one now. A `429` is still retried for everything, since it means nothing was done.
+- **A push interrupted after the server created a page made it again next time.** A
+  lost answer, a kill, or a failure reading back the stored body left the file without
+  its `page_id`, and the next push created a duplicate. Each create is now recorded
+  before it is sent; the next push looks the page up by title and parent and takes it
+  up instead. The id is written to the file before anything else that can fail, and an
+  edit made in between still shows as one and is pushed.
+- **A bare `<br>` in a page stopped every push of it**, whatever was edited: the check
+  run before upload refused HTML void elements that the parser itself accepts.
+- **Prose that looks like a tag failed the push.** `Vec<T>` or `a <b` in a paragraph
+  went up as an element that never closes, and the error gave a byte offset into
+  storage. Inline tags that are not balanced within their block are sent as text; a
+  bare `<br>` is sent as `<br />`. A body that still cannot be written names the
+  Markdown line.
+- **Headings lost their backslashes.** `C:\tmp` in a heading came down as `C:tmp`, and
+  an escaped `\<T>` as a live tag. Only a heading's line breaks are removed now. The
+  converter version is bumped, so the next pull re-renders affected pages.
+- **`CONFED_JSON=1`, as the docs write it, was refused as a usage error**, and so were
+  `CONFED_NON_INTERACTIVE=1` and `CONFED_SILENT=1`. These accept `1`/`0`, `yes`/`no`,
+  `on`/`off` and `true`/`false`.
+- **Large or slow attachment transfers always failed** once they took two minutes: the
+  120-second limit covered the whole transfer. API calls keep that limit; a transfer now
+  fails only after 120 seconds with no data moving, or when the server takes over ten
+  minutes to answer an upload it has whole. Uploads are streamed from disk instead of
+  being read into memory first.
+- **A Data Center behind a company's own certificate authority was unreachable**, and
+  the error did not say why. confed now trusts the operating system's certificate store
+  as well as its bundled roots, and honours `SSL_CERT_FILE` and `SSL_CERT_DIR`. Network
+  errors carry their cause (`invalid peer certificate: UnknownIssuer`), with a hint on
+  how to trust the CA.
+
 ## [0.17.1] - 2026-11-10
 
 ### Fixed
@@ -1151,7 +1203,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/hxmn/confed/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/hxmn/confed/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/hxmn/confed/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/hxmn/confed/compare/v0.15.0...v0.16.0

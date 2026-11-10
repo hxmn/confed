@@ -272,6 +272,63 @@ both_flavors!(a_new_local_file_is_created_on_the_server, |mut h: Harness| async 
     assert_eq!(h.status(page_id), PageState::Unchanged);
 });
 
+// The server took the create but its answer never came — a gateway timeout,
+// or confed killed before the id reached the file. The next push must find
+// that page, not make a second one.
+both_flavors!(a_create_whose_answer_was_lost_is_not_made_twice, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Parent", None, "<p>Parent page.</p>");
+    h.pull().await;
+    std::fs::create_dir_all(h.path("Parent")).unwrap();
+    h.write("Parent/Child.md", "---\ntitle: Child\nlabels: []\n---\n\nBrand new content.\n");
+
+    h.mock.lose_create_answers(true);
+    let first = h
+        .engine
+        .push(&mut h.ws, &PushOptions::default())
+        .await
+        .map(|o| o.created.len())
+        .unwrap_or(0);
+    assert_eq!(first, 0, "the create was not confirmed");
+    assert!(!h.read("Parent/Child.md").contains("page_id"), "no id to write down");
+
+    h.mock.lose_create_answers(false);
+    let outcome = h.push().await;
+    assert_eq!(outcome.created.len(), 1, "{outcome:?}");
+    let creates = h.mock.calls().iter().filter(|c| c.starts_with("create_page:")).count();
+    assert_eq!(creates, 1, "the page was created once: {:?}", h.mock.calls());
+
+    let page_id = &outcome.created[0].page_id;
+    assert_eq!(h.mock.page_parent(page_id).as_deref(), Some("1001"));
+    assert!(h.read("Parent/Child.md").contains(page_id.as_str()));
+    assert_eq!(h.status(page_id), PageState::Unchanged);
+    assert!(h
+        .ws
+        .state()
+        .all_meta()
+        .unwrap()
+        .iter()
+        .all(|(k, _)| !k.starts_with("pending_create:")));
+});
+
+// The same, with the file edited before the push that finds the page: the
+// edit is not taken for what was sent, and goes up with the next push.
+both_flavors!(an_edit_after_a_lost_create_is_still_pushed, |mut h: Harness| async move {
+    h.write("Draft.md", "---\ntitle: Draft\nlabels: []\n---\n\nFirst words.\n");
+    h.mock.lose_create_answers(true);
+    let _ = h.engine.push(&mut h.ws, &PushOptions::default()).await;
+    h.mock.lose_create_answers(false);
+    h.edit_body("Draft.md", "\nSecond words.\n");
+
+    let outcome = h.push().await;
+    let page_id = outcome.created[0].page_id.clone();
+    assert!(!h.mock.page_body(&page_id).unwrap().contains("Second words"));
+    assert_eq!(h.status(&page_id), PageState::Modified);
+
+    h.push().await;
+    assert!(h.mock.page_body(&page_id).unwrap().contains("Second words"));
+    assert_eq!(h.status(&page_id), PageState::Unchanged);
+});
+
 both_flavors!(a_title_change_renames_the_page, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Old Title", None, "<p>Body.</p>");
     h.pull().await;

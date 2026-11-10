@@ -92,14 +92,39 @@ impl ApiError {
 
 impl From<reqwest::Error> for ApiError {
     fn from(e: reqwest::Error) -> Self {
+        // reqwest's own message is only the outermost layer ("error sending
+        // request for url …"); why — a refused certificate, a reset, a name
+        // that does not resolve — is further down the chain.
+        let detail = with_causes(&e);
         if e.is_timeout() {
-            ApiError::Network(format!("request timed out: {e}"))
+            ApiError::Network(format!("request timed out: {detail}"))
         } else if e.is_connect() {
-            ApiError::Network(format!("could not connect: {e}"))
+            ApiError::Network(format!("could not connect: {detail}"))
         } else {
-            ApiError::Network(e.to_string())
+            ApiError::Network(detail)
         }
     }
+}
+
+/// An error's message followed by each cause beneath it that adds something.
+pub fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let message = c.to_string();
+        if !message.is_empty() && !out.contains(&message) {
+            out.push_str(": ");
+            out.push_str(&message);
+        }
+        cause = c.source();
+    }
+    out
+}
+
+/// Whether a network failure was the server's certificate being refused.
+pub fn is_certificate_error(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("certificate") || m.contains("unknownissuer") || m.contains("unknown issuer")
 }
 
 impl From<url::ParseError> for ApiError {
@@ -141,6 +166,39 @@ mod tests {
             ApiError::from_status(500, "boom".into(), "page"),
             ApiError::Server { status: 500, .. }
         ));
+    }
+
+    #[derive(Debug)]
+    struct Layer(&'static str, Option<Box<Layer>>);
+
+    impl std::fmt::Display for Layer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for Layer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref().map(|l| l as _)
+        }
+    }
+
+    #[test]
+    fn a_network_error_keeps_its_causes() {
+        let e = Layer(
+            "error sending request",
+            Some(Box::new(Layer(
+                "client error (Connect)",
+                Some(Box::new(Layer("invalid peer certificate: UnknownIssuer", None))),
+            ))),
+        );
+        let message = with_causes(&e);
+        assert_eq!(
+            message,
+            "error sending request: client error (Connect): invalid peer certificate: UnknownIssuer"
+        );
+        assert!(is_certificate_error(&message));
+        assert!(!is_certificate_error("could not connect: connection refused"));
     }
 
     #[test]

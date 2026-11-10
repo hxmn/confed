@@ -105,10 +105,20 @@ will be refused identically, by design.
 **Symptom.** `error: network error: …` — a connection refused, a TLS failure, a timeout,
 or `429` after the retries were exhausted.
 
-**Cause.** Connectivity, a proxy, or rate limiting. confed already retries retryable
-statuses up to six times with exponential backoff and full jitter, honouring a
+**Cause.** Connectivity, a proxy, a certificate, or rate limiting. confed already retries
+retryable failures up to six times with exponential backoff and full jitter, honouring a
 `Retry-After` header when the server sends one, and it paces subsequent requests more
 slowly after a 429. Reaching exit 5 means that was not enough.
+
+A request that may already have reached Confluence — a create, a comment, an attachment
+upload — is not retried after a gateway's `502`, `503` or `504` or a timeout: the
+gateway may have given up while Confluence went on to save it, and sending it again would
+leave a duplicate. A page create cut off this way is not lost: the next `confed push`
+looks the page up by title and takes it up rather than creating a second one.
+
+An API request fails after 120 seconds. An attachment transfer has no overall limit; it
+fails only when no data has moved for 120 seconds, or when the server takes more than ten
+minutes to answer an upload it has received whole.
 
 **Fix.** Retry later. If it is persistent:
 
@@ -118,6 +128,21 @@ slowly after a 429. Reaching exit 5 means that was not enough.
   proxy environment variables.
 - If you are being rate limited during a large sync, lower `--concurrency` (see
   [large spaces](#a-large-space-is-slow-or-gets-rate-limited)).
+
+### The server's certificate is not trusted
+
+**Symptom.** `network error: … invalid peer certificate: UnknownIssuer`, with a hint about
+your organisation's CA.
+
+**Cause.** The server's certificate is signed by an authority confed does not trust —
+typically a company's own CA in front of Data Center. confed trusts the public authorities
+it was built with and every authority in the operating system's certificate store.
+
+**Fix.** Install the CA in the system store (`update-ca-certificates` on Debian and
+Ubuntu, `update-ca-trust` on Fedora and RHEL, Keychain Access on macOS, the Windows
+certificate manager on Windows). Or point confed at a PEM bundle without touching the
+system: `SSL_CERT_FILE=/path/to/company-ca.pem` (or `SSL_CERT_DIR` for a directory of
+them). Public servers stay trusted either way.
 
 ## Exit 6 — not found
 

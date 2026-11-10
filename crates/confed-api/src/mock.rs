@@ -75,6 +75,9 @@ struct MockState {
     restrictions: HashMap<String, Vec<String>>,
     /// Operations the signed-in user may not perform, by page.
     denied: HashMap<String, Vec<String>>,
+    /// Whether a create is stored and its answer then lost, as when a
+    /// gateway times out after Confluence took the request.
+    lose_create_answers: bool,
     /// Every mutating call recorded, so tests can assert "--dry-run wrote nothing".
     calls: Vec<String>,
 }
@@ -390,6 +393,12 @@ impl MockClient {
     /// Make the comment search answer that more changed than it will list.
     pub fn overflow_comment_search(&self, overflows: bool) {
         self.state.lock().expect("mock poisoned").comment_search_overflows = overflows;
+    }
+
+    /// Store every new page and then fail the create with a network error, or
+    /// answer creates normally again.
+    pub fn lose_create_answers(&self, lose: bool) {
+        self.state.lock().expect("mock poisoned").lose_create_answers = lose;
     }
 
     /// Make listing one page's comments fail, or work again.
@@ -783,7 +792,14 @@ impl ConfluenceClient for MockClient {
             bodies,
             deleted: false,
         };
-        self.state.lock().expect("mock poisoned").pages.insert(id, page);
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.pages.insert(id, page);
+        if state.lose_create_answers {
+            return Err(ApiError::Network(format!(
+                "POST rest/api/content: HTTP 504 from a gateway in front of Confluence ({})",
+                new.title
+            )));
+        }
         Ok(Page { summary, body_storage: new.body_storage.clone() })
     }
 

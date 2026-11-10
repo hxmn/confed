@@ -12,7 +12,7 @@ or hand the whole space to an AI agent.
 [![CI](https://github.com/hxmn/confed/actions/workflows/ci.yml/badge.svg)](https://github.com/hxmn/confed/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/tag/hxmn/confed?label=release&sort=semver&color=brightgreen)](https://github.com/hxmn/confed/blob/main/CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
-[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-orange?logo=rust&logoColor=white)](https://www.rust-lang.org)
 <br>
 [![Confluence Cloud](https://img.shields.io/badge/Confluence-Cloud-0052CC?logo=confluence&logoColor=white)](https://github.com/hxmn/confed/blob/main/docs/auth.md)
 [![Confluence Data Center](https://img.shields.io/badge/Confluence-Data%20Center-0052CC?logo=confluence&logoColor=white)](https://github.com/hxmn/confed/blob/main/docs/auth.md)
@@ -145,7 +145,7 @@ $ confed status --json
 cargo install --git https://github.com/hxmn/confed confed
 ```
 
-Requires Rust 1.85 or newer — no system dependencies: TLS, SQLite and the OS keyring
+Requires Rust 1.89 or newer — no system dependencies: TLS, SQLite and the OS keyring
 integration are vendored or pure Rust. Then:
 
 ```bash

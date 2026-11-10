@@ -14,21 +14,21 @@ members = [
 ]
 
 [workspace.package]
-version = "0.17.1"
+version = "0.18.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/hxmn/confed"
 homepage = "https://github.com/hxmn/confed"
 
 [workspace.dependencies]
-confed-api = { path = "crates/confed-api", version = "0.17.1" }
-confed-cli = { path = "crates/confed-cli", version = "0.17.1" }
-confed-cloud = { path = "crates/confed-cloud", version = "0.17.1" }
-confed-converter = { path = "crates/confed-converter", version = "0.17.1" }
-confed-core = { path = "crates/confed-core", version = "0.17.1" }
-confed-dc = { path = "crates/confed-dc", version = "0.17.1" }
-confed-tui = { path = "crates/confed-tui", version = "0.17.1" }
+confed-api = { path = "crates/confed-api", version = "0.18.0" }
+confed-cli = { path = "crates/confed-cli", version = "0.18.0" }
+confed-cloud = { path = "crates/confed-cloud", version = "0.18.0" }
+confed-converter = { path = "crates/confed-converter", version = "0.18.0" }
+confed-core = { path = "crates/confed-core", version = "0.18.0" }
+confed-dc = { path = "crates/confed-dc", version = "0.18.0" }
+confed-tui = { path = "crates/confed-tui", version = "0.18.0" }
 
 anyhow = "1"
 async-trait = "0.1"
@@ -54,8 +54,8 @@ keyring = { version = "3", default-features = false, features = [
 percent-encoding = "2"
 quick-xml = "0.41"
 ratatui = "0.29"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls", "gzip"] }
-rusqlite = { version = "0.37", features = ["bundled", "blob"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls", "rustls-tls-native-roots", "gzip"] }
+rusqlite = { version = "0.41", features = ["bundled", "blob"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -76,9 +76,7 @@ zstd = "0.13"
 
 insta = { version = "1", features = ["json", "yaml", "filters"] }
 proptest = "1"
-# 0.6.5 needs a newer Rust than our minimum and does not declare it, so the
-# resolver cannot know; keep below it until `rust-version` moves past 1.87.
-wiremock = ">=0.6.4, <0.6.5"
+wiremock = "0.6"
 
 [profile.dev]
 incremental = false

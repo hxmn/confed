@@ -32,6 +32,18 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
+/// Prefix of the `meta` key that records a page create in flight, by path.
+const PENDING_CREATE: &str = "pending_create:";
+
+/// What a push recorded before asking the server to create a page.
+#[derive(Serialize, serde::Deserialize)]
+struct SentCreate {
+    title: String,
+    parent_id: Option<String>,
+    /// [`MarkdownFile::content_hash`] of the file as it was sent.
+    content_hash: String,
+}
+
 pub struct SyncEngine {
     client: Arc<dyn ConfluenceClient>,
     space: SpaceId,
@@ -2770,8 +2782,54 @@ impl SyncEngine {
                 let file = crate::frontmatter::parse(&content, &path)?;
 
                 let parent_id = self.resolve_parent(ws, &path, &file, created_ids)?;
+                let journal = format!("{PENDING_CREATE}{path}");
+
+                if let Some(found) =
+                    self.find_lost_create(ws, &journal, parent_id.as_deref()).await?
+                {
+                    let (page, sent) = found;
+                    created_ids.insert(path.clone(), page.summary.id.0.clone());
+                    self.commit_page(ws, &page, &path, &file)?;
+                    // The base is what was sent. Should the file have changed
+                    // since, that change is still owed, and shows as one.
+                    if let Some(mut record) = ws.state().get_page(&page.summary.id.0)? {
+                        record.markdown_hash = sent.content_hash;
+                        ws.state().upsert_page(&record)?;
+                    }
+                    ws.state().delete_meta(&journal)?;
+                    ws.state().log(
+                        "push-create",
+                        Some(&page.summary.id.0),
+                        None,
+                        Some(page.summary.version),
+                        "ok",
+                        Some("found the page an interrupted push had created"),
+                    )?;
+                    return Ok(Some(PageChange {
+                        page_id: page.summary.id.0.clone(),
+                        path,
+                        title: page.summary.title.clone(),
+                        from_version: None,
+                        to_version: Some(page.summary.version),
+                        ops: op.ops.clone(),
+                    }));
+                }
+
                 let convert_opts = page_convert_options(ws, &path);
                 let storage = confed_converter::markdown_to_storage(&file.body, &convert_opts)?;
+
+                // Written before the request goes out, removed once its id is
+                // in the file: whatever happens between — a lost answer, a
+                // kill — the next push knows a page may already exist.
+                let sent = SentCreate {
+                    title: file.frontmatter.title.clone(),
+                    parent_id: parent_id.clone(),
+                    content_hash: file.content_hash(),
+                };
+                let record = serde_json::to_string(&sent).map_err(|e| {
+                    ConfedError::state(format!("recording the create of {path}: {e}"))
+                })?;
+                ws.state().set_meta(&journal, &record)?;
 
                 let created = self
                     .client
@@ -2782,10 +2840,23 @@ impl SyncEngine {
                         body_storage: storage,
                         labels: file.frontmatter.labels.clone(),
                     })
-                    .await?;
+                    .await;
+                let created = match created {
+                    Ok(created) => created,
+                    // No answer: the page may exist. The record stays for the
+                    // next push to look for it.
+                    Err(e @ (confed_api::ApiError::Network(_) | confed_api::ApiError::Io(_))) => {
+                        return Err(e.into())
+                    }
+                    Err(e) => {
+                        ws.state().delete_meta(&journal)?;
+                        return Err(e.into());
+                    }
+                };
 
                 created_ids.insert(path.clone(), created.summary.id.0.clone());
                 self.commit_page(ws, &created, &path, &file)?;
+                ws.state().delete_meta(&journal)?;
                 ws.state().log(
                     "push-create",
                     Some(&created.summary.id.0),
@@ -2948,6 +3019,42 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// The page a push created without learning so — its answer lost, or
+    /// confed stopped before writing the id down — when `journal` says one
+    /// was sent. Found by title, and taken only where the push put it.
+    async fn find_lost_create(
+        &self,
+        ws: &Workspace,
+        journal: &str,
+        parent_id: Option<&str>,
+    ) -> Result<Option<(Page, SentCreate)>> {
+        let Some(record) = ws.state().get_meta(journal)? else { return Ok(None) };
+        let Ok(sent) = serde_json::from_str::<SentCreate>(&record) else {
+            ws.state().delete_meta(journal)?;
+            return Ok(None);
+        };
+        let found = match self.client.find_page_by_title(&self.space.key, &sent.title).await {
+            Ok(found) => found,
+            // Nowhere to look: creating is all that is left, as before.
+            Err(confed_api::ApiError::Unsupported { .. }) => None,
+            Err(e) => return Err(e.into()),
+        };
+        let parent = parent_id.or(sent.parent_id.as_deref());
+        let Some(summary) =
+            found.filter(|p| p.parent_id.as_ref().map(|id| id.0.as_str()) == parent)
+        else {
+            ws.state().delete_meta(journal)?;
+            return Ok(None);
+        };
+        tracing::info!(
+            target: "confed::sync",
+            page = %summary.id, title = %summary.title,
+            "an earlier push created this page without recording it; taking it up"
+        );
+        let page = self.client.get_page(&summary.id, BodyFormat::Storage).await?;
+        Ok(Some((page, sent)))
+    }
+
     /// After a successful upload, advance the base and rewrite managed frontmatter.
     fn commit_page(
         &self,
@@ -2958,7 +3065,6 @@ impl SyncEngine {
     ) -> Result<()> {
         let summary = &page.summary;
         let convert_opts = page_convert_options(ws, path);
-        let converted = confed_converter::storage_to_markdown(&page.body_storage, &convert_opts)?;
 
         let mut file = local.clone();
         file.frontmatter.managed = Some(Managed {
@@ -2975,9 +3081,26 @@ impl SyncEngine {
         });
         file.frontmatter.title = summary.title.clone();
 
+        // The id goes into the file first. Everything after it can fail and
+        // be redone; a page the file does not name would be created again.
         write_atomic(&ws.absolute(path), &file.render()?)?;
         // The server's response is the new truth, including for the copy on disk.
         self.write_storage_copy(ws, path, &page.body_storage)?;
+
+        // Only the block map comes of this; without one, the next push of the
+        // page regenerates its body rather than patching it.
+        let block_map =
+            match confed_converter::storage_to_markdown(&page.body_storage, &convert_opts) {
+                Ok(converted) => serde_json::to_string(&converted.block_map).ok(),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "confed::sync",
+                        page = %summary.id, error = %e,
+                        "could not read back the body the server stored"
+                    );
+                    None
+                }
+            };
 
         let slug =
             path.rsplit('/').next().and_then(|f| f.strip_suffix(".md")).unwrap_or(path).to_string();
@@ -2998,7 +3121,7 @@ impl SyncEngine {
             storage_body: page.body_storage.clone(),
             storage_hash: hash_str(&page.body_storage),
             markdown_hash: file.content_hash(),
-            block_map: serde_json::to_string(&converted.block_map).ok(),
+            block_map,
             sync_state: SyncState::Clean,
             synced_at: now(),
             render_key: render_key(&page.body_storage, &convert_opts.users),

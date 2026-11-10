@@ -7,7 +7,7 @@ tracks is identical.
 
 ## Install from source
 
-confed needs a Rust toolchain of 1.85 or newer. It has no system dependencies: TLS is
+confed needs a Rust toolchain of 1.89 or newer. It has no system dependencies: TLS is
 `rustls`, SQLite is bundled, and the keyring backend is pure Rust, so there are no
 headers to install first.
 

@@ -190,7 +190,7 @@ impl Renderer<'_> {
                 if text.is_empty() {
                     String::new()
                 } else {
-                    format!("{} {}", "#".repeat(level), text.replace('\n', " ").replace('\\', ""))
+                    format!("{} {}", "#".repeat(level), heading_line(text))
                 }
             }
             "ul" => self.render_list(el, '-', '.'),
@@ -910,6 +910,30 @@ fn squeeze_blank_lines(text: &str) -> String {
     text.split('\n').filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
 }
 
+/// A heading is one line: its hard breaks (`\` before a newline) and plain
+/// newlines become spaces. Every other backslash is an escape the inline
+/// renderer wrote on purpose, and stays.
+fn heading_line(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('\n') => out.push(' '),
+                // A hard break at the very end, which the trim left behind.
+                None => {}
+                Some(next) => {
+                    out.push('\\');
+                    out.push(next);
+                }
+            },
+            '\n' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out.trim_end().to_string()
+}
+
 fn trim_hard_breaks(text: &str) -> String {
     text.trim_end_matches('\n').trim_end_matches('\\').to_string()
 }
@@ -954,6 +978,21 @@ mod tests {
             md("<p><u>u</u><sub>s</sub><sup>p</sup></p>"),
             "<u>u</u><sub>s</sub><sup>p</sup>\n"
         );
+    }
+
+    /// A heading keeps the escapes its text needs: dropping them turned
+    /// `C:\tmp` into `C:tmp` and an escaped `<T>` into a live tag.
+    #[test]
+    fn headings_keep_their_escapes_and_lose_only_their_breaks() {
+        assert_eq!(md("<h2>C:\\tmp and Vec&lt;T&gt;</h2>"), "## C:\\\\tmp and Vec\\<T>\n");
+        assert_eq!(md("<h3>one<br/>two</h3>"), "### one two\n");
+        assert_eq!(md("<h3>trailing<br/></h3>"), "### trailing\n");
+        assert_eq!(md("<h1>path\\<br/>next</h1>"), "# path\\\\ next\n");
+
+        let opts = ConvertOptions { attachment_dir: ".page".into(), ..Default::default() };
+        let storage =
+            crate::markdown_to_storage(&md("<h2>C:\\tmp and Vec&lt;T&gt;</h2>"), &opts).unwrap();
+        assert_eq!(storage, "<h2>C:\\tmp and Vec&lt;T&gt;</h2>", "the round trip is exact");
     }
 
     #[test]

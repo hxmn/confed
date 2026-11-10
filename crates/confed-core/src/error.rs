@@ -146,6 +146,11 @@ impl ConfedError {
             ConfedError::Auth(_) => {
                 Some("run `confed init` to refresh credentials, or check CONFED_TOKEN")
             }
+            ConfedError::Network(m) if confed_api::error::is_certificate_error(m) => Some(
+                "the server's certificate is not signed by an authority this machine trusts; \
+                 install your organisation's CA in the system certificate store, or point \
+                 SSL_CERT_FILE at a PEM bundle that includes it",
+            ),
             _ => None,
         }
     }
