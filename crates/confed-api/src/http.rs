@@ -99,6 +99,9 @@ fn next_random() -> u64 {
     x
 }
 
+/// The gap a first 429 puts between requests that had none.
+const FIRST_RATE_LIMIT_GAP: Duration = Duration::from_millis(100);
+
 /// Keeps a floor on the gap between requests, tightened when the server says 429.
 #[derive(Debug)]
 struct Pacer {
@@ -125,8 +128,12 @@ impl Pacer {
         wait
     }
 
+    /// Widen the gap after a 429. Doubling alone would leave the usual
+    /// unpaced client — a gap of zero — at zero, so a first 429 sets a gap of
+    /// its own.
     fn on_rate_limit(&mut self) {
-        self.min_interval = (self.min_interval * 2).min(Duration::from_secs(2));
+        self.min_interval =
+            (self.min_interval * 2).max(FIRST_RATE_LIMIT_GAP).min(Duration::from_secs(2));
     }
 
     fn on_success(&mut self) {
@@ -998,6 +1005,21 @@ mod tests {
         pacer.on_success();
         assert!(pacer.min_interval < Duration::from_millis(200));
         assert!(pacer.min_interval >= Duration::from_millis(100));
+    }
+
+    /// Clients start unpaced. A 429 must still slow them down — doubling a gap
+    /// of zero gives zero — and successes bring them back to unpaced.
+    #[test]
+    fn an_unpaced_client_slows_down_after_a_429_and_recovers() {
+        let mut pacer = Pacer::new(Duration::ZERO);
+        pacer.on_rate_limit();
+        assert_eq!(pacer.min_interval, FIRST_RATE_LIMIT_GAP);
+        pacer.on_rate_limit();
+        assert_eq!(pacer.min_interval, FIRST_RATE_LIMIT_GAP * 2);
+        for _ in 0..1000 {
+            pacer.on_success();
+        }
+        assert_eq!(pacer.min_interval, Duration::ZERO, "back to the floor");
     }
 
     #[test]
