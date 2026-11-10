@@ -11,8 +11,14 @@ pub enum ApiError {
     Auth(String),
 
     /// Transport failure, TLS problem, timeout, or retries exhausted.
-    #[error("network error: {0}")]
-    Network(String),
+    /// `message` already names the causes, for whoever prints only it;
+    /// `source` keeps the error itself, for whoever walks the chain.
+    #[error("network error: {message}")]
+    Network {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// 404 for a page/space/attachment/comment.
     #[error("not found: {0}")]
@@ -72,12 +78,17 @@ impl ApiError {
             409 => ApiError::Conflict(format!("{context}: {}", truncate(&body))),
             // A gateway that still cannot reach Confluence after the retries:
             // the network, from where confed stands, not a server answer.
-            502..=504 => ApiError::Network(format!(
+            502..=504 => ApiError::network(format!(
                 "{context}: HTTP {status} from a gateway in front of Confluence"
             )),
             429 => ApiError::RateLimited(format!("{context}: {}", truncate(&body))),
             _ => ApiError::Server { status, body: format!("{context}: {}", truncate(&body)) },
         }
+    }
+
+    /// A network failure with nothing beneath it to keep.
+    pub fn network(message: impl Into<String>) -> Self {
+        ApiError::Network { message: message.into(), source: None }
     }
 
     pub fn unsupported(flavor: crate::types::Flavor, operation: impl Into<String>) -> Self {
@@ -86,7 +97,7 @@ impl ApiError {
 
     /// True when the failure is worth surfacing as "try again later".
     pub fn is_transient(&self) -> bool {
-        matches!(self, ApiError::Network(_) | ApiError::RateLimited(_))
+        matches!(self, ApiError::Network { .. } | ApiError::RateLimited(_))
     }
 }
 
@@ -96,13 +107,14 @@ impl From<reqwest::Error> for ApiError {
         // request for url …"); why — a refused certificate, a reset, a name
         // that does not resolve — is further down the chain.
         let detail = with_causes(&e);
-        if e.is_timeout() {
-            ApiError::Network(format!("request timed out: {detail}"))
+        let message = if e.is_timeout() {
+            format!("request timed out: {detail}")
         } else if e.is_connect() {
-            ApiError::Network(format!("could not connect: {detail}"))
+            format!("could not connect: {detail}")
         } else {
-            ApiError::Network(detail)
-        }
+            detail
+        };
+        ApiError::Network { message, source: Some(Box::new(e)) }
     }
 }
 

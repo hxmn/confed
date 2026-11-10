@@ -60,7 +60,7 @@ pub async fn detect_flavor(base_url: &str, auth: Auth) -> ApiResult<Flavor> {
             Err(_) => continue,
         }
     }
-    Err(ApiError::Network(format!(
+    Err(ApiError::network(format!(
         "could not determine whether {base_url} is Confluence Cloud or Data Center; pass --flavor"
     )))
 }

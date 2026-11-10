@@ -464,7 +464,7 @@ impl Http {
                 Err(Unanswered::Stalled(message)) => {
                     let message = format!("{context}: {message}");
                     if !idempotent || attempt + 1 >= self.policy.max_attempts {
-                        return Err(ApiError::Network(message));
+                        return Err(ApiError::network(message));
                     }
                     let delay = self.policy.delay_for(attempt);
                     warn!(
@@ -851,7 +851,7 @@ async fn stream_to_file(
     let mut stream = resp.bytes_stream();
     loop {
         let next = tokio::time::timeout(stall, stream.next()).await.map_err(|_| {
-            ApiError::Network(format!(
+            ApiError::network(format!(
                 "{context}: the download stopped: no data for {}s after {written} bytes",
                 stall.as_secs()
             ))

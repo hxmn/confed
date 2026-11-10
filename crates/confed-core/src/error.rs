@@ -225,7 +225,7 @@ impl From<ApiError> for ConfedError {
     fn from(e: ApiError) -> Self {
         match e {
             ApiError::Auth(m) => ConfedError::Auth(m),
-            ApiError::Network(m) => ConfedError::Network(m),
+            ApiError::Network { message, .. } => ConfedError::Network(message),
             ApiError::RateLimited(m) => ConfedError::Network(m),
             ApiError::NotFound(m) => ConfedError::NotFound(m),
             ApiError::Conflict(m) => ConfedError::Conflict(m),

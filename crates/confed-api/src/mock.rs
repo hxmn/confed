@@ -795,7 +795,7 @@ impl ConfluenceClient for MockClient {
         let mut state = self.state.lock().expect("mock poisoned");
         state.pages.insert(id, page);
         if state.lose_create_answers {
-            return Err(ApiError::Network(format!(
+            return Err(ApiError::network(format!(
                 "POST rest/api/content: HTTP 504 from a gateway in front of Confluence ({})",
                 new.title
             )));

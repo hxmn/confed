@@ -2927,9 +2927,9 @@ impl SyncEngine {
                     Ok(created) => created,
                     // No answer: the page may exist. The record stays for the
                     // next push to look for it.
-                    Err(e @ (confed_api::ApiError::Network(_) | confed_api::ApiError::Io(_))) => {
-                        return Err(e.into())
-                    }
+                    Err(
+                        e @ (confed_api::ApiError::Network { .. } | confed_api::ApiError::Io(_)),
+                    ) => return Err(e.into()),
                     Err(e) => {
                         ws.state().delete_meta(&journal)?;
                         return Err(e.into());

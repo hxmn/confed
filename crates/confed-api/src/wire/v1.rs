@@ -806,7 +806,7 @@ mod tests {
             classify_move_probe(Err(ApiError::Server { status: 405, body: String::new() })),
             Probe::Unavailable
         );
-        assert_eq!(classify_move_probe(Err(ApiError::Network("down".into()))), Probe::Unknown);
+        assert_eq!(classify_move_probe(Err(ApiError::network("down"))), Probe::Unknown);
     }
 
     #[test]

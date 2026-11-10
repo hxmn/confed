@@ -44,7 +44,7 @@ async fn a_gateway_error_is_retried_only_for_requests_safe_to_repeat() {
         .post_json::<_, Value>("rest/api/content", &json!({ "title": "Team Handbook" }))
         .await
         .unwrap_err();
-    assert!(matches!(err, ApiError::Network(_)), "{err:?}");
+    assert!(matches!(err, ApiError::Network { .. }), "{err:?}");
     assert_eq!(requests_to(&server, "/rest/api/content").await, 1, "the create was sent once");
 
     let read: Value = http.get_json("rest/api/content", &[]).await.unwrap();
@@ -157,7 +157,7 @@ async fn a_download_with_no_answer_fails_after_the_stall_limit() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("notes.txt");
     let err = http.download_to("download/attachments/1001/notes.txt", &dest).await.unwrap_err();
-    assert!(matches!(err, ApiError::Network(_)), "{err:?}");
+    assert!(matches!(err, ApiError::Network { .. }), "{err:?}");
     assert!(err.to_string().contains("no answer"), "{err}");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing left behind");
 }
@@ -239,4 +239,19 @@ async fn the_credential_never_leaves_the_configured_host() {
 
     let err = http.get_json::<Value>(&foreign, &[]).await.unwrap_err();
     assert!(matches!(err, ApiError::Url(_)), "an API call elsewhere is refused: {err:?}");
+}
+
+/// A transport failure keeps the error beneath it, for whoever walks the
+/// chain, and still names the cause in its own message, for whoever prints it.
+#[tokio::test]
+async fn a_network_error_keeps_its_source() {
+    // Nothing listens on port 1.
+    let http = Http::new("http://127.0.0.1:1", Auth::None, 1)
+        .unwrap()
+        .with_policy(RetryPolicy { max_attempts: 1, ..RetryPolicy::immediate() });
+    let err = http.get_json::<Value>("rest/api/space", &[]).await.unwrap_err();
+    let ApiError::Network { message, source } = &err else { panic!("{err:?}") };
+    assert!(message.contains("could not connect"), "{message}");
+    assert!(source.is_some(), "the reqwest error is kept");
+    assert!(std::error::Error::source(&err).is_some());
 }
