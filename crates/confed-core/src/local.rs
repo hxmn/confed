@@ -58,17 +58,27 @@ pub fn move_page(
             std::fs::create_dir_all(parent)
                 .map_err(|e| ConfedError::io(format!("creating {}", parent.display()), e))?;
         }
-        std::fs::rename(ws.absolute(&old_path), &absolute_new)
-            .map_err(|e| ConfedError::io(format!("moving {old_path}"), e))?;
-        // The sidecar and the children directory follow the page.
-        for (from, to) in [
-            (paths::sidecar_for(&old_path), paths::sidecar_for(&new_path)),
-            (paths::children_dir(&old_path), paths::children_dir(&new_path)),
-        ] {
-            let from_abs = ws.absolute(&from);
-            if from_abs.is_dir() {
-                let _ = std::fs::rename(from_abs, ws.absolute(&to));
+        // The page, then its sidecar and children directory. Should one of
+        // them fail to follow, what already moved goes back: a page apart
+        // from its attachments and children is worse than a move refused.
+        let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+        let steps = [
+            (old_path.clone(), new_path.clone(), true),
+            (paths::sidecar_for(&old_path), paths::sidecar_for(&new_path), false),
+            (paths::children_dir(&old_path), paths::children_dir(&new_path), false),
+        ];
+        for (from, to, required) in steps {
+            let (from_abs, to_abs) = (ws.absolute(&from), ws.absolute(&to));
+            if !required && !from_abs.is_dir() {
+                continue;
             }
+            if let Err(e) = std::fs::rename(&from_abs, &to_abs) {
+                for (back_from, back_to) in moved.iter().rev() {
+                    let _ = std::fs::rename(back_to, back_from);
+                }
+                return Err(ConfedError::io(format!("moving {from} to {to}"), e));
+            }
+            moved.push((from_abs, to_abs));
         }
     }
 
@@ -238,5 +248,22 @@ mod tests {
         remove_pages(&ws, &ids, false).unwrap();
         assert!(!dir.path().join("Onboarding.md").exists());
         assert!(!dir.path().join("Onboarding/Week One.md").exists());
+    }
+
+    /// A sidecar that cannot follow its page puts the page back.
+    #[test]
+    fn a_move_whose_sidecar_cannot_follow_is_undone() {
+        let (dir, ws) = workspace_with(&[("1001", "Team Handbook.md", None)]);
+        let sidecar = dir.path().join(paths::sidecar_for("Team Handbook.md"));
+        std::fs::create_dir_all(&sidecar).unwrap();
+        // The sidecar's new name is taken by a directory that is not empty.
+        let blocked = dir.path().join(paths::sidecar_for("Handbook.md"));
+        std::fs::create_dir_all(blocked.join("inside")).unwrap();
+        let err = move_page(&ws, "1001", "Handbook.md", false).unwrap_err();
+        assert!(err.to_string().contains("moving"), "{err}");
+        assert!(dir.path().join("Team Handbook.md").exists(), "the page went back");
+        assert!(!dir.path().join("Handbook.md").exists());
+        assert!(sidecar.is_dir());
+        assert_eq!(ws.state().get_page("1001").unwrap().unwrap().local_path, "Team Handbook.md");
     }
 }
