@@ -37,9 +37,19 @@ pub fn read_secret(prompt: &str) -> Result<String> {
     let _ = write!(stderr, "{prompt}");
     let _ = stderr.flush();
 
-    if crossterm::terminal::enable_raw_mode().is_err() {
+    // Piped in, there is no terminal to echo it: read it as it comes.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         let _ = writeln!(stderr);
         return read_line("");
+    }
+    // A terminal that will not stop echoing would show the secret to anyone
+    // looking, and leave it in the scrollback: refuse rather than read it.
+    if crossterm::terminal::enable_raw_mode().is_err() {
+        let _ = writeln!(stderr);
+        return Err(ConfedError::usage_with_hint(
+            "this terminal cannot hide what is typed, so the secret is not read from it",
+            "pass it with --token, or set CONFED_TOKEN",
+        ));
     }
 
     let mut secret = String::new();
