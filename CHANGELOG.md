@@ -20,6 +20,68 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-10
+
+Hygiene and maintainability: smaller units, a smaller public API, typed errors, a
+lint and dependency policy, release binaries, and converter tests on generated input —
+which found eight converter bugs, fixed here.
+
+### Added
+
+- **Release binaries.** A tag builds `confed` for Linux (x86_64, aarch64), macOS
+  (x86_64, aarch64) and Windows (x86_64) and attaches the archives, with SHA-256 sums,
+  to a GitHub release whose notes are the version's changelog section.
+- **`make deny`** and a CI job: cargo-deny checks licenses, advisories, duplicate
+  versions and sources against `deny.toml`.
+- **`make fuzz`**: cargo-fuzz targets for the converter (`storage`, `markdown`), also
+  run weekly in CI.
+
+### Changed
+
+- **For Rust callers of the crates** (the binary is unchanged by these):
+  - `confed-api`: the administration calls (users, groups, space permissions) moved
+    from `ConfluenceClient` to a new `AdminClient` trait, reached with
+    `ConfluenceClient::admin()`. `MockClient` is behind the new `mock` feature.
+    `ApiError::Network` is `{ message, source }` and keeps the underlying error;
+    `ApiError::network` builds one from a message.
+  - `confed-converter`: only the conversion functions and their types (at the crate
+    root, with `MAX_DEPTH`, `SpanError` and `Side`) and the `marks`, `selection` and
+    `pretty` modules are public; every other module is private, and comrak's types no
+    longer appear in the API. `BlockMap::validate_spans` and `validate_md_spans`
+    return `SpanError`; `SpaceOperation::parse` returns `InvalidOperation`.
+  - `confed-core`: `sync` is split into modules, with the same exports; `BlockedPage`
+    has a `kind` (`Blocked`), not serialized.
+- **Dependencies:** `serde_yaml` (deprecated, with an unmaintained libyaml port) is
+  replaced by `serde_norway`, its maintained fork, which writes frontmatter byte for
+  byte as before. ratatui 0.30 replaces 0.29, dropping `lru` 0.12 (two soundness
+  advisories) and the unmaintained `paste`. Unused dependencies are gone.
+- **CI and releases build with `--locked`**, and one `[workspace.lints]` policy covers
+  every crate.
+
+### Fixed
+
+- **A push exited 4 (conflict) for skipped pages whose reason merely mentioned a
+  version**; it is now decided by why the page was skipped. And a 400 from the server
+  counts as a version conflict only when its error message says the version is stale —
+  not when it mentions a macro's or the API's version.
+- **The rate-limit pacer never engaged**: clients start with no gap between requests,
+  and a 429 doubled that gap of zero. A first 429 now sets a gap of 100 ms.
+- **Converter**, found by the new generated-input tests:
+  - A page of only spacer paragraphs was pushed back empty, and a paragraph added below
+    them replaced them.
+  - Three adjacent ordered lists, or two with a spacer paragraph between, fused into
+    one list in the Markdown, so the page was regenerated whole on push.
+  - A run of tildes in struck-through text broke the strikethrough on the way back.
+  - `<strong>a</strong><strong>b</strong>`, as Confluence's editor writes it, came
+    back as bold `a****b`.
+  - A paragraph of nothing but line breaks gained a stray backslash.
+  - A line that only looked like an HTML tag (`</u>` alone) sent the Markdown after it
+    up as literal text.
+  The rendering of affected pages changes, so the converter version moves and the next
+  pull re-renders them.
+- **Binary tests start from an empty environment** instead of a list of variables
+  that had fallen behind.
+
 ## [0.19.0] - 2026-11-10
 
 Robustness and layering: state written as whole transactions, errors no longer
@@ -1254,7 +1316,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/hxmn/confed/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/hxmn/confed/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/hxmn/confed/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/hxmn/confed/compare/v0.17.0...v0.17.1
