@@ -502,7 +502,7 @@ impl App {
             }
         };
 
-        match confed_cli::commands::resolve::finish_resolution(ws, &record, &original, &resolved) {
+        match confed_core::resolve::finish_resolution(ws, &record, &original, &resolved) {
             Ok(markers) if markers.is_empty() => {
                 self.resolver = None;
                 self.mode = Mode::Browse;
@@ -644,7 +644,7 @@ impl App {
                 // A pull or a push may have moved the rules page, as it would
                 // have from the command line.
                 if let Some(ws) = &self.ws {
-                    match confed_cli::commands::agent_docs::sync_rules(ws) {
+                    match confed_core::agent_docs::sync_rules(ws) {
                         Ok(sync) if sync.written.is_empty() => {}
                         Ok(sync) => self.status.push_str(&format!(
                             " The rules in {} were updated.",
@@ -1044,7 +1044,7 @@ mod tests {
         let mut harness = Harness::new();
         let ws = harness.app.workspace().expect("workspace");
         ws.state().set_meta("rules_page_id", "1001").unwrap();
-        confed_cli::commands::agent_docs::sync_rules(ws).expect("the first copy");
+        confed_core::agent_docs::sync_rules(ws).expect("the first copy");
         let agents = harness.path("AGENTS.md");
         assert!(std::fs::read_to_string(&agents).unwrap().contains("Original text."));
 

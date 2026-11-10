@@ -11,6 +11,8 @@
 //! majors outside [`TESTED_MAJORS`] get a warning, and its failures name the step
 //! that failed.
 
+#![forbid(unsafe_code)]
+
 mod admin;
 mod inline;
 mod space;

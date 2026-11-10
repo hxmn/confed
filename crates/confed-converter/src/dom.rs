@@ -26,13 +26,26 @@ pub enum Node {
     Comment(Chars),
     /// Processing instructions, doctypes, XML declarations: kept verbatim.
     Raw(Chars),
+    /// An element nested deeper than [`MAX_DEPTH`], kept as its source bytes
+    /// with nothing parsed inside it. Everything that walks the tree recurses,
+    /// so a page nested ten thousand levels deep would overflow the stack —
+    /// including freeing the tree. A block holding one is preserved verbatim.
+    Deep(Chars),
 }
+
+/// How deep elements nest before the rest of a subtree is kept unparsed. Far
+/// beyond any page a person writes — a layout, a macro, a table and a dozen
+/// list levels together come to about twenty — and well within the stack of
+/// any thread confed converts on.
+pub const MAX_DEPTH: usize = 100;
 
 impl Node {
     pub fn span(&self) -> (usize, usize) {
         match self {
             Node::Element(e) => e.span,
-            Node::Text(c) | Node::CData(c) | Node::Comment(c) | Node::Raw(c) => c.span,
+            Node::Text(c) | Node::CData(c) | Node::Comment(c) | Node::Raw(c) | Node::Deep(c) => {
+                c.span
+            }
         }
     }
 
@@ -163,6 +176,14 @@ pub fn parse_fragment(src: &str) -> ConvertResult<Vec<Node>> {
 
         match event {
             Event::Eof => break,
+            Event::Start(e)
+                if stack.len() >= MAX_DEPTH
+                    && !is_void(&String::from_utf8_lossy(e.name().as_ref())) =>
+            {
+                let end = skip_subtree(&mut reader, src.len());
+                let chars = Chars { span: (start, end), raw: src[start..end].to_string() };
+                push(&mut stack, &mut roots, Node::Deep(chars));
+            }
             Event::Start(e) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                 let attrs = decode_attrs(&e);
@@ -232,6 +253,44 @@ pub fn parse_fragment(src: &str) -> ConvertResult<Vec<Node>> {
     }
 
     Ok(roots)
+}
+
+/// Read past the rest of an element whose start tag was just read, without
+/// building anything: where it ends, by counting starts and ends. One that
+/// never closes runs to the end of the fragment, as an unclosed element does.
+fn skip_subtree(reader: &mut Reader<&[u8]>, len: usize) -> usize {
+    let mut depth = 1usize;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) if !is_void(&String::from_utf8_lossy(e.name().as_ref())) => {
+                depth += 1
+            }
+            Ok(Event::End(e)) if !is_void(&String::from_utf8_lossy(e.name().as_ref())) => {
+                depth -= 1;
+                if depth == 0 {
+                    return reader.buffer_position() as usize;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return len,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Whether any element under `el` was too deep to parse.
+pub fn contains_deep(el: &Element) -> bool {
+    // A stack, not recursion: this is the check that keeps recursion safe.
+    let mut pending: Vec<&Element> = vec![el];
+    while let Some(next) = pending.pop() {
+        for child in &next.children {
+            match child {
+                Node::Deep(_) => return true,
+                Node::Element(inner) => pending.push(inner),
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 fn push(stack: &mut [Element], roots: &mut Vec<Node>, node: Node) {

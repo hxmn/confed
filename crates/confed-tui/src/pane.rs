@@ -110,7 +110,7 @@ fn build_diff(ws: &Workspace, page_id: &str, path: &str, side: DiffSide) -> Resu
 
     // The same context the file on disk was rendered with, so the diff shows
     // real changes rather than a difference in how the two sides were rendered.
-    let options = confed_core::sync::page_convert_options(ws, path);
+    let options = confed_core::sync::page_convert_options(ws, path)?;
 
     let storage = match side {
         DiffSide::Base => Some(record.storage_body.clone()),

@@ -127,7 +127,7 @@ confed's own files at the workspace root:
 | `.state.db` | SQLite: the base snapshot (`pages`), the remote snapshot (`remote_pages`), attachments, comments, the resumable fetch queue, and a sync log. |
 | `.session.db` | SQLite, mode 0600: base URL, flavor, auth method, username, and the token if no OS keyring was available. |
 | `.pages.db` | SQLite: page bodies confed has already downloaded, keyed by version, plus the attachment and comment snapshots taken with them. A cache — deleting it costs bandwidth, not correctness. |
-| `.confed.lock` | Present only while a mutating command runs; carries the pid so a stale one can be cleaned up. |
+| `.confed.lock` | Locked by the operating system while a mutating command runs, and released when it exits; carries that command's pid for the "in use" message. Safe to leave in place. |
 
 All four are added to `.gitignore` by `confed init`. `.state.db` is excluded deliberately
 as well as `.session.db`: it holds full page bodies, is rebuilt by `init` + `fetch`, and

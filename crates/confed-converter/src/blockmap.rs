@@ -64,8 +64,12 @@ impl BlockMap {
         self.blocks.len()
     }
 
-    /// Storage spans must cover the document in order without overlapping.
-    pub fn validate_spans(&self, storage_len: usize) -> Result<(), String> {
+    /// Storage spans must cover the document in order without overlapping,
+    /// and start and end on character boundaries: a map recorded against
+    /// another body can point into the middle of a Cyrillic letter, and
+    /// slicing there would panic rather than fall back.
+    pub fn validate_spans(&self, storage: &str) -> Result<(), String> {
+        let storage_len = storage.len();
         let mut prev_end = 0usize;
         for (i, b) in self.blocks.iter().enumerate() {
             let (s, e) = b.storage_span;
@@ -76,6 +80,9 @@ impl BlockMap {
                 return Err(format!(
                     "block {i}: storage span {s}..{e} exceeds body length {storage_len}"
                 ));
+            }
+            if !storage.is_char_boundary(s) || !storage.is_char_boundary(e) {
+                return Err(format!("block {i}: storage span {s}..{e} falls inside a character"));
             }
             if s < prev_end {
                 return Err(format!("block {i}: storage span {s}..{e} overlaps previous block"));
@@ -152,7 +159,7 @@ mod tests {
                 entry(BlockKind::Heading, (10, 25), (2, 4)),
             ],
         };
-        map.validate_spans(25).unwrap();
+        map.validate_spans(&"x".repeat(25)).unwrap();
         map.validate_md_spans().unwrap();
     }
 
@@ -164,13 +171,22 @@ mod tests {
                 entry(BlockKind::Paragraph, (5, 20), (2, 4)),
             ],
         };
-        assert!(map.validate_spans(20).is_err());
+        assert!(map.validate_spans(&"x".repeat(20)).is_err());
     }
 
     #[test]
     fn spans_past_the_end_are_rejected() {
         let map = BlockMap { blocks: vec![entry(BlockKind::Paragraph, (0, 99), (0, 1))] };
-        assert!(map.validate_spans(10).is_err());
+        assert!(map.validate_spans(&"x".repeat(10)).is_err());
+    }
+
+    #[test]
+    fn spans_inside_a_character_are_rejected() {
+        // "Фраза" is two bytes a letter: 3 is the middle of the second one.
+        let map = BlockMap { blocks: vec![entry(BlockKind::Paragraph, (0, 3), (0, 1))] };
+        assert!(map.validate_spans("Фраза").unwrap_err().contains("inside a character"));
+        let map = BlockMap { blocks: vec![entry(BlockKind::Paragraph, (0, 4), (0, 1))] };
+        assert!(map.validate_spans("Фраза").is_ok());
     }
 
     #[test]

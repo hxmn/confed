@@ -30,7 +30,7 @@ fn parser_survives_the_corpus_and_spans_reproduce_the_source() {
 fn block_map_spans_are_valid_for_every_fixture() {
     for f in corpus::load() {
         let c = storage_to_markdown(&f.storage, &corpus::options()).unwrap();
-        c.block_map.validate_spans(f.storage.len()).unwrap_or_else(|e| panic!("{}: {e}", f.name));
+        c.block_map.validate_spans(&f.storage).unwrap_or_else(|e| panic!("{}: {e}", f.name));
         c.block_map.validate_md_spans().unwrap_or_else(|e| panic!("{}: {e}", f.name));
     }
 }

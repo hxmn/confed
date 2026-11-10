@@ -5,6 +5,8 @@
 //! live in `confed-tui` and build on the [`context`], [`output`] and
 //! [`commands`] here.
 
+#![forbid(unsafe_code)]
+
 pub mod changelog;
 pub mod cli;
 pub mod commands;
@@ -154,6 +156,10 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
         Command::Log(args) if args.local => return commands::log::run_local(&mut ctx, args),
         Command::Mkdocs(args) => return commands::mkdocs::run(&mut ctx, args),
         Command::Tree(args) if !args.remote => return commands::tree::run(&mut ctx, args),
+        Command::Mv(args) if !args.push => return commands::mv::run(&mut ctx, args),
+        Command::Rm(args) if !args.push || args.dry_run => {
+            return commands::rm::run(&mut ctx, args)
+        }
         _ => {}
     }
 
@@ -183,7 +189,28 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
         .build()
         .map_err(|e| ConfedError::io("starting the async runtime", e))?;
 
-    runtime.block_on(dispatch(ctx, command, prepared_init, prepared_instance))
+    runtime.block_on(async {
+        watch_interrupts();
+        dispatch(ctx, command, prepared_init, prepared_instance).await
+    })
+}
+
+/// The first Ctrl-C asks the running command to stop at the next page
+/// boundary, so no page file is left out of step with what `.state.db`
+/// records for it; the second quits at once, for a command stuck waiting.
+fn watch_interrupts() {
+    tokio::spawn(async {
+        while tokio::signal::ctrl_c().await.is_ok() {
+            if confed_core::interrupt::requested() {
+                eprintln!("confed: interrupted");
+                std::process::exit(confed_core::ExitCode::Interrupted.as_i32());
+            }
+            confed_core::interrupt::request();
+            eprintln!(
+                "confed: stopping after the page in hand (press Ctrl-C again to quit at once)"
+            );
+        }
+    });
 }
 
 async fn dispatch(
@@ -208,8 +235,8 @@ async fn dispatch(
         Command::Status(args) => commands::status::run_with_fetch(&mut ctx, &args).await,
         Command::Diff(args) => commands::diff::run_remote(&mut ctx, &args).await,
         Command::New(args) => commands::new::run_and_push(&mut ctx, &args).await,
-        Command::Mv(args) => commands::mv::run(&mut ctx, &args).await,
-        Command::Rm(args) => commands::rm::run(&mut ctx, &args).await,
+        Command::Mv(args) => commands::mv::run_and_push(&mut ctx, &args).await,
+        Command::Rm(args) => commands::rm::run_and_push(&mut ctx, &args).await,
         Command::Attach(args) => commands::attach::run(&mut ctx, &args).await,
         Command::Comment(args) => commands::comment::run(&mut ctx, &args).await,
         Command::Log(args) => commands::log::run(&mut ctx, &args).await,
@@ -269,6 +296,7 @@ mod tests {
             ExitCode::Conflict,
             ExitCode::State,
             ExitCode::Differences,
+            ExitCode::Interrupted,
         ] {
             assert_eq!(code.as_i32() as u8 as i32, code.as_i32());
         }

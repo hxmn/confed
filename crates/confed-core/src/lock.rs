@@ -3,164 +3,139 @@
 //! saving a file mid-push — that is handled by hashing at plan time.
 
 use crate::error::{ConfedError, Result};
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::{Read, Seek, Write};
+use std::path::Path;
 
 pub const LOCK_FILENAME: &str = ".confed.lock";
 
 /// Held for the duration of a mutating command; released on drop.
+///
+/// An operating-system lock on [`LOCK_FILENAME`] (`flock` on Unix,
+/// `LockFileEx` on Windows). The system releases it when the holder exits,
+/// however it exits, so there is no stale lock to judge or reclaim, and no
+/// window in which two processes both decide the old holder is gone. The file
+/// itself stays: removing it would let a process lock a fresh file while
+/// another still holds the old one.
 #[derive(Debug)]
 pub struct WorkspaceLock {
-    path: PathBuf,
+    _file: File,
 }
 
 impl WorkspaceLock {
     /// Take the lock, or explain who holds it.
     pub fn acquire(dir: &Path) -> Result<Self> {
         let path = dir.join(LOCK_FILENAME);
-
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
+        let opened =
+            OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path);
+        let mut file =
+            opened.map_err(|e| ConfedError::io(format!("opening {}", path.display()), e))?;
+        match file.try_lock() {
+            Ok(()) => {
+                // Who holds it, for the message another run prints. Only a
+                // courtesy: the lock is what counts, not this number.
+                let _ = file.set_len(0);
+                let _ = file.rewind();
                 let _ = writeln!(file, "{}", std::process::id());
-                Ok(Self { path })
+                let _ = file.flush();
+                Ok(Self { _file: file })
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                let holder = read_holder(&path);
-                if let Some(pid) = holder {
-                    if !process_alive(pid) {
-                        // Previous run died without cleaning up.
-                        tracing::debug!(target: "confed::lock", pid, "removing stale lock");
-                        let _ = fs::remove_file(&path);
-                        return Self::acquire(dir);
+            Err(TryLockError::WouldBlock) => {
+                let message = match read_holder(&mut file) {
+                    Some(pid) => {
+                        format!("another confed process (pid {pid}) is using this directory")
                     }
-                }
+                    None => "another confed process is using this directory".to_string(),
+                };
                 Err(ConfedError::state_with_hint(
-                    match holder {
-                        Some(pid) => {
-                            format!("another confed process (pid {pid}) is using this directory")
-                        }
-                        None => "another confed process is using this directory".to_string(),
-                    },
-                    format!("wait for it to finish, or remove {} if it is stale", path.display()),
+                    message,
+                    "wait for it to finish; the lock is released the moment it exits",
                 ))
             }
-            Err(e) => Err(ConfedError::io(format!("creating {}", path.display()), e)),
+            Err(TryLockError::Error(e)) => {
+                Err(ConfedError::io(format!("locking {}", path.display()), e))
+            }
         }
     }
 }
 
-impl Drop for WorkspaceLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn read_holder(path: &Path) -> Option<u32> {
+fn read_holder(file: &mut File) -> Option<u32> {
     let mut buf = String::new();
-    fs::File::open(path).ok()?.read_to_string(&mut buf).ok()?;
+    file.rewind().ok()?;
+    file.read_to_string(&mut buf).ok()?;
     buf.trim().parse().ok()
-}
-
-#[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
-    // `kill(0, …)` addresses the caller's whole process group, so it would
-    // always report "alive"; confed never writes pid 0, so treat it as stale.
-    if pid == 0 {
-        return false;
-    }
-    // Signal 0 checks for existence without delivering anything.
-    unsafe { libc_kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(unix)]
-unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    kill(pid, sig)
-}
-
-#[cfg(windows)]
-fn process_alive(pid: u32) -> bool {
-    use std::ffi::c_void;
-
-    // The kernel32 functions this needs, declared here rather than pulling in a
-    // Windows bindings crate for three calls.
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    const STILL_ACTIVE: u32 = 259;
-    const ERROR_ACCESS_DENIED: u32 = 5;
-    extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
-        fn GetExitCodeProcess(process: *mut c_void, code: *mut u32) -> i32;
-        fn CloseHandle(handle: *mut c_void) -> i32;
-        fn GetLastError() -> u32;
-    }
-
-    // confed never writes pid 0 (the System Idle Process).
-    if pid == 0 {
-        return false;
-    }
-    unsafe {
-        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if process.is_null() {
-            // No such process — unless it exists but belongs to someone we may
-            // not inspect, which still means it is running.
-            return GetLastError() == ERROR_ACCESS_DENIED;
-        }
-        let mut code = 0u32;
-        let queried = GetExitCodeProcess(process, &mut code) != 0;
-        CloseHandle(process);
-        // An exited process whose handle is still open somewhere reports its
-        // exit code; a running one reports STILL_ACTIVE.
-        !queried || code == STILL_ACTIVE
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn process_alive(_pid: u32) -> bool {
-    // Without a check on this platform, assume the holder is alive: refusing to
-    // run is safer than two processes writing the same files.
-    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Held by every test here. A process spawned while another test holds a
+    /// lock carries a copy of its descriptor until it execs, and keeps the
+    /// lock taken for that instant after the holder lets go.
+    static SERIAL: Mutex<()> = Mutex::new(());
 
     #[test]
     fn the_lock_is_exclusive_and_released_on_drop() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let lock = WorkspaceLock::acquire(dir.path()).unwrap();
 
         let err = WorkspaceLock::acquire(dir.path()).unwrap_err();
         assert_eq!(err.exit_code(), crate::error::ExitCode::State);
         assert!(err.to_string().contains("another confed process"));
-        assert!(err.hint().unwrap().contains(LOCK_FILENAME));
+        assert!(err.hint().unwrap().contains("wait for it"));
 
         drop(lock);
         assert!(WorkspaceLock::acquire(dir.path()).is_ok());
     }
 
+    /// A lock file left behind — a crash, a kill, an old confed that wrote
+    /// a pid — locks nothing: only a live holder does.
     #[test]
-    fn a_lock_left_by_a_dead_process_is_reclaimed() {
+    fn a_leftover_lock_file_does_not_wedge_the_workspace() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        // A process that has already exited: its pid cannot be alive.
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        let dead_pid = child.id();
-        child.wait().unwrap();
-
-        fs::write(dir.path().join(LOCK_FILENAME), format!("{dead_pid}\n")).unwrap();
-        assert!(
-            WorkspaceLock::acquire(dir.path()).is_ok(),
-            "a lock held by pid {dead_pid} (exited) should be reclaimed"
-        );
+        for leftover in ["0\n", "999999\n", "garbage", ""] {
+            std::fs::write(dir.path().join(LOCK_FILENAME), leftover).unwrap();
+            assert!(WorkspaceLock::acquire(dir.path()).is_ok(), "left over: {leftover:?}");
+        }
     }
 
+    /// Another process's lock — whoever owns it — is honoured.
+    #[cfg(unix)]
     #[test]
-    fn a_garbage_lock_file_does_not_wedge_the_workspace() {
+    fn a_lock_held_by_another_process_is_refused_until_it_exits() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join(LOCK_FILENAME), "0\n").unwrap();
-        assert!(WorkspaceLock::acquire(dir.path()).is_ok());
+        let path = dir.path().join(LOCK_FILENAME);
+        std::fs::write(&path, "").unwrap();
+        // flock(1) holds the lock until it exits; `-o` keeps the descriptor
+        // from its child, so killing flock is enough to release it.
+        let Ok(mut holder) = std::process::Command::new("flock")
+            .arg("-o")
+            .arg(&path)
+            .args(["sleep", "10"])
+            // Detached from the test's output, which the harness reads to
+            // the end: the `sleep` outlives the `flock` killed below.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        else {
+            return; // no flock(1) on this machine
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while WorkspaceLock::acquire(dir.path()).is_ok() {
+            assert!(std::time::Instant::now() < deadline, "the other process never took the lock");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let err = WorkspaceLock::acquire(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("another confed process"), "{err}");
+
+        holder.kill().unwrap();
+        holder.wait().unwrap();
+        assert!(WorkspaceLock::acquire(dir.path()).is_ok(), "released when the holder died");
     }
 }

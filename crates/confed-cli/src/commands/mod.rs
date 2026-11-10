@@ -2,7 +2,9 @@
 //! carrying both the human rendering and the JSON `result` payload.
 
 pub mod admin;
-pub mod agent_docs;
+/// The agent contract files live with the engine; the commands that write them
+/// reach them here.
+pub use confed_core::agent_docs;
 pub mod attach;
 pub mod clone;
 pub mod comment;

@@ -130,7 +130,8 @@
             "STATE",
             "PARTIAL",
             "UNSUPPORTED",
-            "DIFFERENCES"
+            "DIFFERENCES",
+            "INTERRUPTED"
           ]
         },
         "kind": {

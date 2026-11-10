@@ -26,6 +26,9 @@ pub enum ExitCode {
     Unsupported = 9,
     /// `--exit-code` and differences exist. Deliberately outside the error range.
     Differences = 10,
+    /// Stopped by Ctrl-C (SIGINT) between pages; 128 + the signal number, as
+    /// shells report it.
+    Interrupted = 130,
 }
 
 impl ExitCode {
@@ -46,6 +49,7 @@ impl ExitCode {
             ExitCode::Partial => "PARTIAL",
             ExitCode::Unsupported => "UNSUPPORTED",
             ExitCode::Differences => "DIFFERENCES",
+            ExitCode::Interrupted => "INTERRUPTED",
         }
     }
 }
@@ -81,6 +85,11 @@ pub enum ConfedError {
 
     #[error("{0}")]
     Unsupported(String),
+
+    /// Ctrl-C, honoured between pages: everything finished is recorded, the
+    /// rest is left for the next run.
+    #[error("{0}")]
+    Interrupted(String),
 
     /// A refusal confed names, for `errors[].kind` in `--json`: a space key
     /// that is taken, a missing permission. Its exit code is one of the above.
@@ -121,6 +130,7 @@ impl ConfedError {
             ConfedError::State { .. } => ExitCode::State,
             ConfedError::Partial(_) => ExitCode::Partial,
             ConfedError::Unsupported(_) => ExitCode::Unsupported,
+            ConfedError::Interrupted(_) => ExitCode::Interrupted,
             ConfedError::Refused { exit, .. } => *exit,
             ConfedError::Other(_)
             | ConfedError::Sqlite(_)

@@ -363,9 +363,10 @@ cannot reason about what it is overwriting:
   an interrupted `pull` or `push` can never truncate a page.
 - **`pull` decides everything before writing anything.** A partial pull cannot leave half
   your workspace overwritten and half untouched.
-- **A workspace lock** (`.confed.lock`, carrying the holder's pid) is held for the duration
-  of every mutating command, so two confed processes cannot fight over one directory. A
-  lock whose owner is dead is detected and removed automatically. It does not protect
+- **A workspace lock** (an operating-system lock on `.confed.lock`, which names the
+  holder's pid) is held for the duration of every mutating command, so two confed
+  processes cannot fight over one directory. The system releases it when its holder exits,
+  however that happens, so there is never a stale lock to clean up. It does not protect
   against your editor saving mid-push; that is what the plan-time hashing is for.
 - **Deletions are opt-in twice.** `pull` will not delete a locally modified file, and
   `push` will not delete a server page without `--allow-delete`, so an accidental `rm -rf`

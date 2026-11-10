@@ -6,6 +6,9 @@
 //! and the `.md` files are the working tree. Every page's status is derived by
 //! comparing those three.
 
+#![forbid(unsafe_code)]
+
+pub mod agent_docs;
 pub mod attachments;
 pub mod comments;
 pub mod config;
@@ -13,12 +16,15 @@ pub mod crossmove;
 pub mod error;
 pub mod frontmatter;
 pub mod instance;
+pub mod interrupt;
+pub mod local;
 pub mod lock;
 pub mod merge;
 pub mod pagestore;
 pub mod paths;
 pub mod progress;
 pub mod reanchor;
+pub mod resolve;
 pub mod session;
 pub mod slug;
 pub mod state;

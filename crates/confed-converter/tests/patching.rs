@@ -364,3 +364,20 @@ fn a_bare_br_in_an_untouched_block_does_not_block_the_push() {
     assert!(out.starts_with("<p>First line<br>second line</p>"), "{out}");
     assert!(out.contains("Фраза 2."), "{out}");
 }
+
+/// A block map recorded against another body — a page edited behind
+/// confed's back, a state database restored from elsewhere — can put an
+/// offset inside a multi-byte letter. That is a stale map to fall back from,
+/// not a panic.
+#[test]
+fn a_block_map_pointing_inside_a_letter_is_stale_not_a_panic() {
+    let opts = corpus::options();
+    let ascii = "<p>Team Handbook</p><p>Onboarding</p>";
+    let c = storage_to_markdown(ascii, &opts).unwrap();
+    // The same shape in Cyrillic: the first span now ends inside "Фраза".
+    let cyrillic = "<p>Фраза 1. Фраза</p><p>Фраза 2.</p>";
+    let edited = c.markdown.replace("Onboarding", "Changed");
+    let err = markdown_to_storage_patched(cyrillic, &c.block_map, &c.markdown, &edited, &opts)
+        .unwrap_err();
+    assert!(matches!(err, ConvertError::StaleBlockMap(_)), "got {err:?}");
+}

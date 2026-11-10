@@ -8,6 +8,8 @@
 //! [`run`] is `confed tui`; [`pick_page`] is the page picker a command opens
 //! when it needs the user to choose a page.
 
+#![forbid(unsafe_code)]
+
 mod app;
 mod conflict;
 mod pane;

@@ -6,10 +6,10 @@
 //! directory — Claude Code reads `CLAUDE.md`, Codex reads `AGENTS.md` — starts
 //! with them.
 
+use crate::error::{ConfedError, Result};
+use crate::workspace::Workspace;
+use crate::{paths, sync};
 use confed_api::Flavor;
-use confed_core::error::{ConfedError, Result};
-use confed_core::workspace::Workspace;
-use confed_core::{paths, sync};
 use std::path::Path;
 
 pub const FILENAMES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
@@ -81,7 +81,7 @@ pub fn current_rules(ws: &Workspace) -> Result<Option<Rules>> {
 
     // Rendered as the contract files see it, from the workspace root, so the
     // page's links and images still point at the right files.
-    let mut opts = sync::page_convert_options(ws, FILENAMES[0]);
+    let mut opts = sync::page_convert_options(ws, FILENAMES[0])?;
     let sidecar = paths::sidecar_ref(&record.local_path);
     opts.attachment_dir = match record.local_path.rsplit_once('/') {
         Some((dir, _)) => format!("{dir}/{sidecar}"),
@@ -263,8 +263,8 @@ pub fn audit(dir: &Path) -> (Vec<&'static str>, Vec<(&'static str, String)>) {
 /// The way up from a registered member to its instance root (`..`), or
 /// `None` when `dir` is no member of one.
 pub fn instance_of(dir: &Path) -> Option<String> {
-    let root = confed_core::instance::find_root(dir.parent()?)?;
-    let instance = confed_core::instance::Instance::open(&root).ok()?;
+    let root = crate::instance::find_root(dir.parent()?)?;
+    let instance = crate::instance::Instance::open(&root).ok()?;
     let member = instance.member_for_path(dir).ok()??;
     Some(member.dir.split('/').map(|_| "..").collect::<Vec<_>>().join("/"))
 }
@@ -297,7 +297,7 @@ directory has no `.session.db`, confed uses the root's shared credential.
 pub fn render_instance(
     base_url: &str,
     flavor: Flavor,
-    members: &[confed_core::instance::Member],
+    members: &[crate::instance::Member],
 ) -> String {
     let mut spaces = String::new();
     for member in members {
@@ -488,7 +488,7 @@ pub fn write_instance(
     root: &Path,
     base_url: &str,
     flavor: Flavor,
-    members: &[confed_core::instance::Member],
+    members: &[crate::instance::Member],
 ) -> Result<Vec<String>> {
     let content = render_instance(base_url, flavor, members);
     let mut written = Vec::new();
@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn a_member_of_an_instance_says_so_and_names_the_only_way_between_spaces() {
         let root = tempfile::tempdir().unwrap();
-        let instance = confed_core::instance::Instance::create(
+        let instance = crate::instance::Instance::create(
             root.path(),
             "https://wiki.example.test",
             Flavor::DataCenter,
@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     fn add_page(ws: &Workspace, id: &str, title: &str, path: &str, storage: &str) {
-        use confed_core::state::{hash_str, now, PageRecord, SyncState};
+        use crate::state::{hash_str, now, PageRecord, SyncState};
 
         ws.state()
             .upsert_page(&PageRecord {

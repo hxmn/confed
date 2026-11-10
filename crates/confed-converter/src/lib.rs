@@ -10,6 +10,8 @@
 //!    the original storage bytes for every top-level block the user did not touch,
 //!    so lossiness is confined to blocks that actually changed.
 
+#![forbid(unsafe_code)]
+
 /// Bumped whenever the rendering rules change in a way that makes previously
 /// converted Markdown out of date. It feeds the render fingerprint confed keeps
 /// per page, so an improvement reaches a workspace on the next pull without

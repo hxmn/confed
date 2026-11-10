@@ -37,7 +37,7 @@ pub fn parse(storage: &str) -> ConvertResult<StorageDoc> {
             Node::Text(_) | Node::CData(_) => BlockKind::Paragraph,
             // Comments and processing instructions are meaningful to somebody;
             // keep the bytes.
-            Node::Comment(_) | Node::Raw(_) => BlockKind::Preserved,
+            Node::Comment(_) | Node::Raw(_) | Node::Deep(_) => BlockKind::Preserved,
         };
         blocks.push(StorageBlock { span: node.span(), kind });
     }
@@ -50,6 +50,10 @@ pub fn parse(storage: &str) -> ConvertResult<StorageDoc> {
 /// losing anything? A shape we recognise but cannot render losslessly still
 /// becomes `Preserved` — the fence is always the safe answer.
 pub fn classify(el: &Element) -> BlockKind {
+    // Nothing that recurses may look inside a block nested too deep to parse.
+    if dom::contains_deep(el) {
+        return BlockKind::Preserved;
+    }
     let shape = shape_of(el);
     if shape == BlockKind::Preserved || macros::renderable(el) {
         shape

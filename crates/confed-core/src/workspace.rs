@@ -57,6 +57,19 @@ impl Workspace {
         &self.state
     }
 
+    /// Run `f` with every state write it makes in one transaction — see
+    /// [`StateDb::atomically`] — for work that needs the workspace itself, not
+    /// only its database.
+    pub fn atomically<T>(
+        &mut self,
+        f: impl FnOnce(&mut Workspace) -> crate::Result<T>,
+    ) -> crate::Result<T> {
+        let began = self.state.begin()?;
+        let result = f(self);
+        self.state.finish(began, result.is_ok())?;
+        result
+    }
+
     pub fn state_mut(&mut self) -> &mut StateDb {
         &mut self.state
     }

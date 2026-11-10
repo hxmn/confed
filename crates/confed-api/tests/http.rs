@@ -188,3 +188,55 @@ async fn an_unanswered_upload_fails_once_and_is_not_repeated() {
     assert!(err.to_string().contains("no answer came"), "{err}");
     assert_eq!(requests_to(&server, "/rest/api/content/1001/child/attachment").await, 1);
 }
+
+/// A link in a response can name any host. The credential goes only to the
+/// one confed was pointed at: a next-page link elsewhere is followed on the
+/// base, and a download elsewhere is fetched without it.
+#[tokio::test]
+async fn the_credential_never_leaves_the_configured_host() {
+    use wiremock::matchers::header;
+
+    let wiki = MockServer::start().await;
+    let other = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/space"))
+        .and(wiremock::matchers::query_param("cursor", "2"))
+        .and(header("authorization", "Bearer pat-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "results": ["ENG"] })))
+        .mount(&wiki)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/space"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": ["DOCS"],
+            "_links": { "next": format!("{}/rest/api/space?cursor=2", other.uri()) }
+        })))
+        .mount(&wiki)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(b"file".to_vec()))
+        .mount(&other)
+        .await;
+
+    let http = Http::new(&wiki.uri(), Auth::Bearer(confed_api::Secret::new("pat-token")), 4)
+        .unwrap()
+        .with_policy(RetryPolicy::immediate());
+
+    let spaces: Vec<String> =
+        confed_api::paginate::collect_cursor(&http, "rest/api/space", &[], None).await.unwrap();
+    assert_eq!(spaces, ["DOCS", "ENG"]);
+
+    let dir = tempfile::tempdir().unwrap();
+    let foreign = format!("{}/media/file.png", other.uri());
+    http.download_to(&foreign, &dir.path().join("file.png")).await.unwrap();
+
+    let at_other = other.received_requests().await.unwrap();
+    assert_eq!(at_other.len(), 1, "only the download went there");
+    assert!(
+        at_other.iter().all(|r| !r.headers.contains_key("authorization")),
+        "no credential sent to another host"
+    );
+
+    let err = http.get_json::<Value>(&foreign, &[]).await.unwrap_err();
+    assert!(matches!(err, ApiError::Url(_)), "an API call elsewhere is refused: {err:?}");
+}

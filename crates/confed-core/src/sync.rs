@@ -632,97 +632,107 @@ impl SyncEngine {
         let summaries = self.client.list_pages(&self.space).await?;
         let live: Vec<String> = summaries.iter().map(|s| s.id.0.clone()).collect();
 
-        for summary in &summaries {
-            if !opts.pages.is_empty() && !opts.pages.contains(&summary.id.0) {
-                continue;
-            }
-            if let Some(since) = &opts.since {
-                if summary.updated_at.as_deref().is_some_and(|u| u < since.as_str()) {
+        // What the listing says about every page goes in as one write: a
+        // first fetch of a large space is thousands of rows, and a fetch
+        // stopped halfway leaves the previous listing whole.
+        let listed: Result<()> = state.atomically(|state| {
+            for summary in &summaries {
+                if !opts.pages.is_empty() && !opts.pages.contains(&summary.id.0) {
                     continue;
                 }
-            }
-
-            let existing = state.get_remote(&summary.id.0)?;
-            let have_current_body = existing
-                .as_ref()
-                .is_some_and(|r| r.version == summary.version && r.storage_body.is_some());
-
-            // Anything already downloaded at this version is served from the
-            // cache, so the listing above is the only request its body costs.
-            let cached_body = if have_current_body {
-                None
-            } else {
-                cache.as_ref().and_then(|c| c.body(&summary.id.0, summary.version).ok().flatten())
-            };
-            let needs_body = !have_current_body && cached_body.is_none();
-
-            // Metadata is cheap and always current after a listing.
-            state.upsert_remote(&RemotePage {
-                page_id: summary.id.0.clone(),
-                title: summary.title.clone(),
-                parent_id: summary.parent_id.as_ref().map(|p| p.0.clone()),
-                position: summary.position,
-                version: summary.version,
-                status: summary.status.as_str().to_string(),
-                labels: summary.labels.clone(),
-                author: summary.author.clone(),
-                created_at: summary.created_at.clone(),
-                updated_at: summary.updated_at.clone(),
-                storage_hash: cached_body.as_deref().map(hash_str),
-                storage_body: cached_body.clone(),
-                fetched_at: now(),
-                deleted: false,
-            })?;
-
-            if needs_body {
-                state.enqueue_fetch(&summary.id.0, &["body", "attachments", "comments"])?;
-                continue;
-            }
-
-            let voucher = if cached_body.is_some() {
-                outcome.from_cache += 1;
-                // Restore the snapshots taken alongside that body, so a rebuilt
-                // state database does not have to ask for those either. They are
-                // exactly as current as the cache says they are.
-                let extras = cache
-                    .as_ref()
-                    .and_then(|c| c.extras(&summary.id.0, summary.version).ok().flatten());
-                match extras {
-                    Some(extras) => {
-                        let own_attachments = !state.page_attachments(&summary.id.0)?.is_empty();
-                        let own_comments = !state.page_comments(&summary.id.0)?.is_empty();
-                        restore_extras(state, &summary.id.0, &extras)?;
-                        Voucher::Cache { own_attachments, own_comments }
+                if let Some(since) = &opts.since {
+                    if summary.updated_at.as_deref().is_some_and(|u| u < since.as_str()) {
+                        continue;
                     }
-                    None => Voucher::Nobody,
                 }
-            } else if existing.as_ref().is_some_and(|r| r.deleted) {
-                // A page back in the listing after being gone from it — restored,
-                // or a restriction lifted — was out of the search's sight meanwhile.
-                Voucher::Nobody
-            } else {
-                Voucher::State
-            };
-            for check in &mut checks {
-                check.place(&summary.id.0, &voucher);
-            }
-            outcome.unchanged += 1;
-        }
 
-        // Pages that vanished from the listing were deleted or trashed.
-        for remote in state.all_remote()? {
-            if !remote.deleted && !live.contains(&remote.page_id) {
-                state.mark_remote_deleted(&remote.page_id)?;
-                outcome.deleted_on_remote.push(remote.page_id);
+                let existing = state.get_remote(&summary.id.0)?;
+                let have_current_body = existing
+                    .as_ref()
+                    .is_some_and(|r| r.version == summary.version && r.storage_body.is_some());
+
+                // Anything already downloaded at this version is served from the
+                // cache, so the listing above is the only request its body costs.
+                let cached_body = if have_current_body {
+                    None
+                } else {
+                    cache
+                        .as_ref()
+                        .and_then(|c| c.body(&summary.id.0, summary.version).ok().flatten())
+                };
+                let needs_body = !have_current_body && cached_body.is_none();
+
+                // Metadata is cheap and always current after a listing.
+                state.upsert_remote(&RemotePage {
+                    page_id: summary.id.0.clone(),
+                    title: summary.title.clone(),
+                    parent_id: summary.parent_id.as_ref().map(|p| p.0.clone()),
+                    position: summary.position,
+                    version: summary.version,
+                    status: summary.status.as_str().to_string(),
+                    labels: summary.labels.clone(),
+                    author: summary.author.clone(),
+                    created_at: summary.created_at.clone(),
+                    updated_at: summary.updated_at.clone(),
+                    storage_hash: cached_body.as_deref().map(hash_str),
+                    storage_body: cached_body.clone(),
+                    fetched_at: now(),
+                    deleted: false,
+                })?;
+
+                if needs_body {
+                    state.enqueue_fetch(&summary.id.0, &["body", "attachments", "comments"])?;
+                    continue;
+                }
+
+                let voucher = if cached_body.is_some() {
+                    outcome.from_cache += 1;
+                    // Restore the snapshots taken alongside that body, so a rebuilt
+                    // state database does not have to ask for those either. They are
+                    // exactly as current as the cache says they are.
+                    let extras = cache
+                        .as_ref()
+                        .and_then(|c| c.extras(&summary.id.0, summary.version).ok().flatten());
+                    match extras {
+                        Some(extras) => {
+                            let own_attachments =
+                                !state.page_attachments(&summary.id.0)?.is_empty();
+                            let own_comments = !state.page_comments(&summary.id.0)?.is_empty();
+                            restore_extras(state, &summary.id.0, &extras)?;
+                            Voucher::Cache { own_attachments, own_comments }
+                        }
+                        None => Voucher::Nobody,
+                    }
+                } else if existing.as_ref().is_some_and(|r| r.deleted) {
+                    // A page back in the listing after being gone from it — restored,
+                    // or a restriction lifted — was out of the search's sight meanwhile.
+                    Voucher::Nobody
+                } else {
+                    Voucher::State
+                };
+                for check in &mut checks {
+                    check.place(&summary.id.0, &voucher);
+                }
+                outcome.unchanged += 1;
             }
-        }
-        // Nothing is owed for a page that is gone: asking again would fail on
-        // every fetch from here on.
-        for (id, _) in state.pending_fetches()? {
-            if !live.contains(&id) {
-                state.mark_fetch_done(&id)?;
+
+            // Pages that vanished from the listing were deleted or trashed.
+            for remote in state.remote_index()? {
+                if !remote.deleted && !live.contains(&remote.page_id) {
+                    state.mark_remote_deleted(&remote.page_id)?;
+                    outcome.deleted_on_remote.push(remote.page_id);
+                }
             }
-        }
+            // Nothing is owed for a page that is gone: asking again would fail on
+            // every fetch from here on.
+            for (id, _) in state.pending_fetches()? {
+                if !live.contains(&id) {
+                    state.mark_fetch_done(&id)?;
+                }
+            }
+            Ok(())
+        });
+        listed?;
 
         // Attachments and comments of the pages whose body is current. Adding
         // or changing either leaves the page's version alone, so the listing
@@ -855,8 +865,12 @@ impl SyncEngine {
             }
         }
         while let Some(result) = inflight.next().await {
-            if let Some(item) = work.next() {
-                inflight.push(self.fetch_one(item));
+            // Once a stop is asked for, what is in flight is stored and nothing
+            // new is started. What was not read stays queued for the next fetch.
+            if !crate::interrupt::requested() {
+                if let Some(item) = work.next() {
+                    inflight.push(self.fetch_one(item));
+                }
             }
             match result {
                 Ok((id, Fetched::Page(fetched))) => {
@@ -890,45 +904,52 @@ impl SyncEngine {
                 Ok((id, Fetched::Extras { attachments, comments })) => {
                     let title = title_of(&id);
                     self.progress.item(&title);
-                    let mut read: Vec<&str> = Vec::new();
-                    let mut failed = |error: String| {
-                        tally.failed.push(FailedPage {
-                            page_id: id.clone(),
-                            title: title.clone(),
-                            error,
-                        })
-                    };
-                    match attachments {
-                        Some(Ok(listed)) => {
-                            if self.refresh_attachments(ws, &id, &listed)? {
-                                tally.attachments_changed.push(id.clone());
+                    // One transaction for the page, as for a page read whole.
+                    let began = ws.state().begin()?;
+                    let stored: Result<()> = (|| {
+                        let mut read: Vec<&str> = Vec::new();
+                        let mut failed = |error: String| {
+                            tally.failed.push(FailedPage {
+                                page_id: id.clone(),
+                                title: title.clone(),
+                                error,
+                            })
+                        };
+                        match attachments {
+                            Some(Ok(listed)) => {
+                                if self.refresh_attachments(ws, &id, &listed)? {
+                                    tally.attachments_changed.push(id.clone());
+                                }
+                                tally.attachments_refreshed += 1;
+                                tally.read.attachments.push(id.clone());
+                                read.push(Extra::Attachments.name());
                             }
-                            tally.attachments_refreshed += 1;
-                            tally.read.attachments.push(id.clone());
-                            read.push(Extra::Attachments.name());
-                        }
-                        Some(Err(e)) => {
-                            failed(format!("its attachments could not be listed again: {e}"))
-                        }
-                        None => {}
-                    }
-                    match comments {
-                        Some(Ok(comments)) => {
-                            if self.store_comments(ws, &id, &comments, true)? {
-                                tally.comments_changed.push(id.clone());
+                            Some(Err(e)) => {
+                                failed(format!("its attachments could not be listed again: {e}"))
                             }
-                            tally.comments_refreshed += 1;
-                            tally.read.comments.push(id.clone());
-                            read.push(Extra::Comments.name());
+                            None => {}
                         }
-                        Some(Err(e)) => {
-                            failed(format!("its comments could not be read again: {e}"))
+                        match comments {
+                            Some(Ok(comments)) => {
+                                if self.store_comments(ws, &id, &comments, true)? {
+                                    tally.comments_changed.push(id.clone());
+                                }
+                                tally.comments_refreshed += 1;
+                                tally.read.comments.push(id.clone());
+                                read.push(Extra::Comments.name());
+                            }
+                            Some(Err(e)) => {
+                                failed(format!("its comments could not be read again: {e}"))
+                            }
+                            None => {}
                         }
-                        None => {}
-                    }
-                    // Only what was read is settled: whatever failed, and a
-                    // body still waited for, stay in the queue.
-                    ws.state().mark_fetched(&id, &read)?;
+                        // Only what was read is settled: whatever failed, and a
+                        // body still waited for, stay in the queue.
+                        ws.state().mark_fetched(&id, &read)?;
+                        Ok(())
+                    })();
+                    ws.state().finish(began, stored.is_ok())?;
+                    stored?;
                 }
                 Err((item, e)) => {
                     let title = title_of(&item.page_id);
@@ -941,6 +962,7 @@ impl SyncEngine {
                 }
             }
         }
+        crate::interrupt::check(|| format!("{} page(s) fetched", tally.fetched))?;
         tally.attachments_changed.sort();
         tally.comments_changed.sort();
         Ok(tally)
@@ -972,7 +994,13 @@ impl SyncEngine {
         }
     }
 
+    /// Everything read for one page goes into the state as one transaction:
+    /// a body never lands without the attachments and comments read with it.
     fn store_fetched(&self, ws: &mut Workspace, id: &str, fetched: &FetchedPage) -> Result<()> {
+        ws.atomically(|ws| self.store_fetched_now(ws, id, fetched))
+    }
+
+    fn store_fetched_now(&self, ws: &mut Workspace, id: &str, fetched: &FetchedPage) -> Result<()> {
         let state = ws.state();
         let summary = &fetched.page.summary;
         state.upsert_remote(&RemotePage {
@@ -1102,20 +1130,22 @@ impl SyncEngine {
         }
 
         // All or nothing: half of this would lose which copies are confed's.
-        let tx = state.conn().unchecked_transaction()?;
-        state.clear_page_attachments(id)?;
-        for record in &after {
-            state.upsert_attachment(record)?;
-            state.forget_removed_attachment(id, &record.filename)?;
-        }
-        // A name that could never be a file in the sidecar has no copy there
-        // to remove: what it points at is something else's.
-        for gone in before.iter().filter(|b| {
-            attachments::is_storable(&b.filename) && !after.iter().any(|a| a.filename == b.filename)
-        }) {
-            state.note_removed_attachment(id, &gone.filename, gone.sha256.as_deref())?;
-        }
-        tx.commit()?;
+        state.atomically(|state| {
+            state.clear_page_attachments(id)?;
+            for record in &after {
+                state.upsert_attachment(record)?;
+                state.forget_removed_attachment(id, &record.filename)?;
+            }
+            // A name that could never be a file in the sidecar has no copy
+            // there to remove: what it points at is something else's.
+            for gone in before.iter().filter(|b| {
+                attachments::is_storable(&b.filename)
+                    && !after.iter().any(|a| a.filename == b.filename)
+            }) {
+                state.note_removed_attachment(id, &gone.filename, gone.sha256.as_deref())?;
+            }
+            Ok(())
+        })?;
         Ok(!same_attachments(&before, &after))
     }
 
@@ -1163,10 +1193,14 @@ impl SyncEngine {
             }
         }
 
-        state.clear_page_comments(id)?;
-        for record in &after {
-            state.upsert_comment(record)?;
-        }
+        // Replaced whole or not at all: a half-written set would lose threads.
+        state.atomically(|state| {
+            state.clear_page_comments(id)?;
+            for record in &after {
+                state.upsert_comment(record)?;
+            }
+            Ok(())
+        })?;
 
         if same_body {
             if let (Ok(cache), Some(remote)) = (ws.page_store(), ws.state().get_remote(id)?) {
@@ -1270,7 +1304,7 @@ impl SyncEngine {
         let statuses = worktree::compute_status(&files, &base, &remote);
 
         let placements = self.plan_placements(&remote, &base);
-        let links = link_map(&placements);
+        let render = Rendering { links: link_map(&placements), ctx: ConvertContext::load(ws)? };
         let files_by_id: HashMap<&str, &LocalFile> =
             files.iter().filter_map(|f| f.file.frontmatter.page_id().map(|id| (id, f))).collect();
         let base_by_id: HashMap<&str, &PageRecord> =
@@ -1278,7 +1312,7 @@ impl SyncEngine {
 
         // Pass one: decide, and refuse the whole operation if anything would be
         // clobbered. Nothing is written until the plan is known to be safe.
-        let known_users = convert_options(ws, "", &HashMap::new()).users;
+        let known_users = &render.ctx.users;
         // Pages the listing has moved on whose body could not be fetched yet.
         // What is stored for them is the previous text, or none: writing it
         // would stamp old content with the new version, and nothing would ever
@@ -1311,7 +1345,7 @@ impl SyncEngine {
             let base_record = base_by_id.get(remote_page.page_id.as_str()).copied();
             // Was this file rendered from the same inputs confed would use now?
             let stale_rendering = match (base_record, &remote_page.storage_body) {
-                (Some(base), Some(body)) => base.render_key != render_key(body, &known_users),
+                (Some(base), Some(body)) => base.render_key != render_key(body, known_users),
                 _ => false,
             };
             let mut action = decide_pull(remote_page, status, base_record, opts, stale_rendering);
@@ -1388,7 +1422,9 @@ impl SyncEngine {
         // old path is the other's new one.
         let claimed: Vec<&str> = placements.values().map(|p| p.path.as_str()).collect();
         let claimed_sidecars: Vec<&str> = placements.values().map(|p| p.sidecar.as_str()).collect();
-        for (remote_page, action) in plan {
+        let planned = plan.len();
+        for (done, (remote_page, action)) in plan.into_iter().enumerate() {
+            crate::interrupt::check(|| format!("{done} of {planned} page(s) pulled"))?;
             handled.push(remote_page.page_id.clone());
             let local = files_by_id.get(remote_page.page_id.as_str()).copied();
             let base_record = base_by_id.get(remote_page.page_id.as_str()).copied();
@@ -1469,7 +1505,7 @@ impl SyncEngine {
                 PullAction::Nothing | PullAction::Delete => continue,
                 PullAction::Create | PullAction::Overwrite | PullAction::Blocked(_) => {
                     let change =
-                        self.write_page(ws, &remote_page, placement, local, &links, opts, None)?;
+                        self.write_page(ws, &remote_page, placement, local, &render, opts, None)?;
                     if base_record.is_some() {
                         outcome.updated.push(change);
                     } else {
@@ -1483,7 +1519,7 @@ impl SyncEngine {
                         placement,
                         local,
                         base_record,
-                        &links,
+                        &render,
                         opts,
                     )?;
                     if conflicted {
@@ -1565,6 +1601,9 @@ impl SyncEngine {
         // comments added, edited and deleted, on the server without the page
         // itself changing.
         for record in ws.state().all_pages()? {
+            crate::interrupt::check(|| {
+                "every page was pulled; some sidecars were not checked".into()
+            })?;
             if handled.contains(&record.page_id)
                 || !self.in_scope(&opts.scope, &placements, &record.page_id)
             {
@@ -1705,14 +1744,14 @@ impl SyncEngine {
         remote: &RemotePage,
         placement: &Placement,
         local: Option<&LocalFile>,
-        links: &HashMap<String, String>,
+        render: &Rendering,
         opts: &PullOptions,
         body_override: Option<String>,
     ) -> Result<PageChange> {
         let storage = remote.storage_body.clone().unwrap_or_default();
-        let mut convert_opts = convert_options(ws, &placement.path, links);
+        let mut convert_opts = render.options(&placement.path);
         if opts.with_comments {
-            convert_opts.inline_marks = inline_marks_for(ws, &remote.page_id);
+            convert_opts.inline_marks = inline_marks_for(ws, &remote.page_id)?;
         }
         let converted = confed_converter::storage_to_markdown(&storage, &convert_opts)?;
 
@@ -1730,6 +1769,7 @@ impl SyncEngine {
                 &storage,
                 &converted.block_map,
                 SyncState::Clean,
+                &render.ctx.users,
             )?;
         }
 
@@ -1809,6 +1849,7 @@ impl SyncEngine {
         storage: &str,
         block_map: &BlockMap,
         sync_state: SyncState,
+        users: &HashMap<String, confed_converter::UserLink>,
     ) -> Result<()> {
         self.write_storage_copy(ws, &placement.path, storage)?;
         ws.state().upsert_page(&PageRecord {
@@ -1830,10 +1871,7 @@ impl SyncEngine {
             block_map: serde_json::to_string(block_map).ok(),
             sync_state,
             synced_at: now(),
-            render_key: render_key(
-                storage,
-                &convert_options(ws, &placement.path, &HashMap::new()).users,
-            ),
+            render_key: render_key(storage, users),
         })
     }
 
@@ -1845,15 +1883,15 @@ impl SyncEngine {
         placement: &Placement,
         local: Option<&LocalFile>,
         base_record: Option<&PageRecord>,
-        links: &HashMap<String, String>,
+        render: &Rendering,
         opts: &PullOptions,
     ) -> Result<(PageChange, bool)> {
         let (Some(local), Some(base_record)) = (local, base_record) else {
-            let change = self.write_page(ws, remote, placement, local, links, opts, None)?;
+            let change = self.write_page(ws, remote, placement, local, render, opts, None)?;
             return Ok((change, false));
         };
 
-        let convert_opts = convert_options(ws, &placement.path, links);
+        let convert_opts = render.options(&placement.path);
         let base_md =
             confed_converter::storage_to_markdown(&base_record.storage_body, &convert_opts)?;
         let remote_storage = remote.storage_body.clone().unwrap_or_default();
@@ -1914,6 +1952,7 @@ impl SyncEngine {
                 &remote_storage,
                 &remote_md.block_map,
                 state,
+                &render.ctx.users,
             )?;
             ws.state().log(
                 "pull-merge",
@@ -2525,7 +2564,10 @@ impl SyncEngine {
         let mut created_ids: HashMap<String, String> = HashMap::new();
         self.progress.stage("Pushing", Some(plan.ops.len()));
 
-        for op in &plan.ops {
+        for (done, op) in plan.ops.iter().enumerate() {
+            crate::interrupt::check(|| {
+                format!("{done} of {} page(s) pushed, nothing after them", plan.ops.len())
+            })?;
             self.progress.item(&op.path);
             let result = self.apply_push_op(ws, op, opts, &mut created_ids).await;
             match result {
@@ -2763,9 +2805,11 @@ impl SyncEngine {
             PushKind::Delete => {
                 let Some(page_id) = &op.page_id else { return Ok(None) };
                 self.client.delete_page(&PageId::new(page_id)).await?;
-                ws.state().delete_page(page_id)?;
-                ws.state().delete_remote(page_id)?;
-                ws.state().log("push-delete", Some(page_id), op.base_version, None, "ok", None)?;
+                ws.state().atomically(|state| {
+                    state.delete_page(page_id)?;
+                    state.delete_remote(page_id)?;
+                    state.log("push-delete", Some(page_id), op.base_version, None, "ok", None)
+                })?;
                 Ok(Some(PageChange {
                     page_id: page_id.clone(),
                     path: op.path.clone(),
@@ -2815,7 +2859,7 @@ impl SyncEngine {
                     }));
                 }
 
-                let convert_opts = page_convert_options(ws, &path);
+                let convert_opts = page_convert_options(ws, &path)?;
                 let storage = confed_converter::markdown_to_storage(&file.body, &convert_opts)?;
 
                 // Written before the request goes out, removed once its id is
@@ -2885,7 +2929,7 @@ impl SyncEngine {
                     .get_page(&page_id)?
                     .ok_or_else(|| ConfedError::state(format!("{path}: no base record")))?;
 
-                let convert_opts = page_convert_options(ws, &path);
+                let convert_opts = page_convert_options(ws, &path)?;
                 // The marked body: a regenerated block keeps its inline comment
                 // markers, so an edit next to a thread does not orphan it.
                 let body_storage = if op.ops.iter().any(|o| o == "body") {
@@ -3064,7 +3108,7 @@ impl SyncEngine {
         local: &MarkdownFile,
     ) -> Result<()> {
         let summary = &page.summary;
-        let convert_opts = page_convert_options(ws, path);
+        let convert_opts = page_convert_options(ws, path)?;
 
         let mut file = local.clone();
         file.frontmatter.managed = Some(Managed {
@@ -3105,43 +3149,46 @@ impl SyncEngine {
         let slug =
             path.rsplit('/').next().and_then(|f| f.strip_suffix(".md")).unwrap_or(path).to_string();
 
-        ws.state().upsert_page(&PageRecord {
-            page_id: summary.id.0.clone(),
-            title: summary.title.clone(),
-            slug,
-            local_path: path.to_string(),
-            parent_id: summary.parent_id.as_ref().map(|p| p.0.clone()),
-            position: summary.position,
-            version: summary.version,
-            status: summary.status.as_str().to_string(),
-            labels: file.frontmatter.labels.clone(),
-            author: summary.author.clone(),
-            created_at: summary.created_at.clone(),
-            updated_at: summary.updated_at.clone(),
-            storage_body: page.body_storage.clone(),
-            storage_hash: hash_str(&page.body_storage),
-            markdown_hash: file.content_hash(),
-            block_map,
-            sync_state: SyncState::Clean,
-            synced_at: now(),
-            render_key: render_key(&page.body_storage, &convert_opts.users),
-        })?;
+        // The base and the remote copy advance together.
+        ws.state().atomically(|state| {
+            state.upsert_page(&PageRecord {
+                page_id: summary.id.0.clone(),
+                title: summary.title.clone(),
+                slug,
+                local_path: path.to_string(),
+                parent_id: summary.parent_id.as_ref().map(|p| p.0.clone()),
+                position: summary.position,
+                version: summary.version,
+                status: summary.status.as_str().to_string(),
+                labels: file.frontmatter.labels.clone(),
+                author: summary.author.clone(),
+                created_at: summary.created_at.clone(),
+                updated_at: summary.updated_at.clone(),
+                storage_body: page.body_storage.clone(),
+                storage_hash: hash_str(&page.body_storage),
+                markdown_hash: file.content_hash(),
+                block_map,
+                sync_state: SyncState::Clean,
+                synced_at: now(),
+                render_key: render_key(&page.body_storage, &convert_opts.users),
+            })?;
 
-        ws.state().upsert_remote(&RemotePage {
-            page_id: summary.id.0.clone(),
-            title: summary.title.clone(),
-            parent_id: summary.parent_id.as_ref().map(|p| p.0.clone()),
-            position: summary.position,
-            version: summary.version,
-            status: summary.status.as_str().to_string(),
-            labels: file.frontmatter.labels.clone(),
-            author: summary.author.clone(),
-            created_at: summary.created_at.clone(),
-            updated_at: summary.updated_at.clone(),
-            storage_body: Some(page.body_storage.clone()),
-            storage_hash: Some(hash_str(&page.body_storage)),
-            fetched_at: now(),
-            deleted: false,
+            state.upsert_remote(&RemotePage {
+                page_id: summary.id.0.clone(),
+                title: summary.title.clone(),
+                parent_id: summary.parent_id.as_ref().map(|p| p.0.clone()),
+                position: summary.position,
+                version: summary.version,
+                status: summary.status.as_str().to_string(),
+                labels: file.frontmatter.labels.clone(),
+                author: summary.author.clone(),
+                created_at: summary.created_at.clone(),
+                updated_at: summary.updated_at.clone(),
+                storage_body: Some(page.body_storage.clone()),
+                storage_hash: Some(hash_str(&page.body_storage)),
+                fetched_at: now(),
+                deleted: false,
+            })
         })
     }
 
@@ -3169,7 +3216,7 @@ impl SyncEngine {
                 let draft = sidecar.comments[index].clone();
                 let storage = confed_converter::markdown_to_storage(
                     &draft.body,
-                    &comment_convert_options(ws, &record.local_path),
+                    &comment_convert_options(ws, &record.local_path)?,
                 )?;
                 let posted = match &draft.anchor {
                     Some(anchor) if draft.kind == comments::SidecarKind::Inline => {
@@ -3330,7 +3377,7 @@ impl SyncEngine {
             let content = std::fs::read_to_string(ws.absolute(&op.path))
                 .map_err(|e| ConfedError::io(format!("reading {}", op.path), e))?;
             let file = crate::frontmatter::parse(&content, &op.path)?;
-            let convert_opts = page_convert_options(ws, &op.path);
+            let convert_opts = page_convert_options(ws, &op.path)?;
             let base =
                 op.page_id.as_deref().map(|id| ws.state().get_page(id)).transpose()?.flatten();
             let storage = match base {
@@ -3353,7 +3400,7 @@ impl SyncEngine {
             {
                 continue;
             }
-            let convert_opts = comment_convert_options(ws, &record.local_path);
+            let convert_opts = comment_convert_options(ws, &record.local_path)?;
             let mut preview = |what: String, markdown: &str| -> Result<()> {
                 out.push(StoragePreview {
                     page_id: record.page_id.clone(),
@@ -3417,7 +3464,7 @@ impl SyncEngine {
         let (page, mut record) = find_comment(ws, comment_id)?;
         let storage = confed_converter::markdown_to_storage(
             body_markdown,
-            &comment_convert_options(ws, &page.local_path),
+            &comment_convert_options(ws, &page.local_path)?,
         )?;
         self.client
             .update_comment(
@@ -3573,7 +3620,7 @@ impl SyncEngine {
 
             let body = draft.draft_body().unwrap_or_default();
             let storage =
-                confed_converter::markdown_to_storage(body, &comment_convert_options(ws, &path))?;
+                confed_converter::markdown_to_storage(body, &comment_convert_options(ws, &path)?)?;
             let posted = self
                 .client
                 .add_inline_comment(&PageId::new(&record.page_id), &anchor, &storage)
@@ -3617,7 +3664,7 @@ impl SyncEngine {
             return Ok(());
         }
         let path = base.local_path.clone();
-        let opts = page_convert_options(ws, &path);
+        let opts = page_convert_options(ws, &path)?;
         if page.summary.version != base.version {
             let marker = posted.anchor.as_ref().and_then(|a| a.marker_ref.as_deref());
             let unmarked = match marker {
@@ -3888,7 +3935,7 @@ fn refuse_unpushed_block(
     let block_start = body[..start].rfind("\n\n").map_or(0, |i| i + 2);
     let block_end = body[end..].find("\n\n").map_or(body.len(), |i| end + i);
     let block = body[block_start..block_end].trim();
-    let base_md = comparable_markdown(&base.storage_body, &page_convert_options(ws, path))?;
+    let base_md = comparable_markdown(&base.storage_body, &page_convert_options(ws, path)?)?;
     if block.is_empty() || base_md.contains(block) {
         return Ok(());
     }
@@ -4225,33 +4272,32 @@ fn decide_pull(
 /// How a comment on a page is converted: in the page's context, so a mention
 /// (`[@Alice Ng](<profile>)` or `[@Alice](user:<key>)`) becomes a real mention
 /// and `[Title](Other.md)` a page link, as they would in the page itself.
-pub fn comment_convert_options(ws: &Workspace, page_path: &str) -> ConvertOptions {
-    let mut opts = page_convert_options(ws, page_path);
+pub fn comment_convert_options(ws: &Workspace, page_path: &str) -> Result<ConvertOptions> {
+    let mut opts = page_convert_options(ws, page_path)?;
     opts.inline_marks.clear();
-    opts
+    Ok(opts)
 }
 
-/// Conversion context for one page file.
 /// Conversion context for a page, built from what the workspace knows.
 ///
-/// Every caller must use this. Rendering the same storage with different
-/// options produces different Markdown, and confed compares those renderings
-/// against each other — `diff` against the file on disk, and push's block
-/// patcher against the base. Options assembled ad hoc at one call site show up
-/// as changes the user never made.
-pub fn page_convert_options(ws: &Workspace, page_path: &str) -> ConvertOptions {
-    let links = ws
-        .state()
-        .all_pages()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|page| (page.page_id, page.local_path))
-        .collect();
-    let mut opts = convert_options(ws, page_path, &links);
-    if let Ok(Some(record)) = ws.state().get_page_by_path(page_path) {
-        opts.inline_marks = inline_marks_for(ws, &record.page_id);
+/// Every caller must use this (or [`ConvertContext::options`], which it
+/// wraps). Rendering the same storage with different options produces
+/// different Markdown, and confed compares those renderings against each
+/// other — `diff` against the file on disk, and push's block patcher against
+/// the base. Options assembled ad hoc at one call site show up as changes the
+/// user never made.
+///
+/// A state database that cannot be read is an error, not an empty map: a
+/// page rendered without its links would be recorded as clean with every link
+/// broken.
+pub fn page_convert_options(ws: &Workspace, page_path: &str) -> Result<ConvertOptions> {
+    let ctx = ConvertContext::load(ws)?;
+    let links = ctx.base_links(ws)?;
+    let mut opts = ctx.options(page_path, &links);
+    if let Some(record) = ws.state().get_page_by_path(page_path)? {
+        opts.inline_marks = inline_marks_for(ws, &record.page_id)?;
     }
-    opts
+    Ok(opts)
 }
 
 /// A stored body rendered for comparison with a page file's body.
@@ -4265,64 +4311,104 @@ pub fn comparable_markdown(storage: &str, opts: &ConvertOptions) -> Result<Strin
     Ok(marks::strip(&markdown).body)
 }
 
-fn convert_options(ws: &Workspace, path: &str, links: &HashMap<String, String>) -> ConvertOptions {
-    let mut page_links: HashMap<String, String> =
-        links.iter().map(|(id, target)| (id.clone(), paths::relative_link(path, target))).collect();
-    let link_targets = page_links.iter().map(|(id, link)| (link.clone(), id.clone())).collect();
+/// What converting any page of this workspace depends on beyond the page
+/// itself, read once: titles, people, the site. Loading it touches no page
+/// body, and an operation over many pages loads it once, not once per page.
+#[derive(Clone, Debug, Default)]
+pub struct ConvertContext {
+    /// Titles as the server has them — not file names, which may be truncated
+    /// or sanitized. Data Center links pages by title, so the same titles also
+    /// find the local file for a link read from storage.
+    titles: HashMap<String, String>,
+    /// People this workspace has already resolved. A mention of anyone else
+    /// keeps its block verbatim rather than linking to the wrong profile.
+    pub users: HashMap<String, confed_converter::UserLink>,
+    space_key: String,
+    base_url: String,
+    links_by_title: bool,
+}
 
-    // Titles as the server has them — not file names, which may be truncated
-    // or sanitized. Data Center links pages by title, so the same titles also
-    // find the local file for a link read from storage.
-    let space_key = ws.space_key().unwrap_or_default();
-    let mut page_titles: HashMap<String, String> = ws
-        .state()
-        .all_remote()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|r| !r.deleted)
-        .map(|r| (r.page_id, r.title))
-        .collect();
-    for page in ws.state().all_pages().unwrap_or_default() {
-        page_titles.insert(page.page_id, page.title);
+impl ConvertContext {
+    pub fn load(ws: &Workspace) -> Result<Self> {
+        let state = ws.state();
+        let mut titles: HashMap<String, String> = state
+            .remote_index()?
+            .into_iter()
+            .filter(|r| !r.deleted)
+            .map(|r| (r.page_id, r.title))
+            .collect();
+        for page in state.page_index()? {
+            titles.insert(page.page_id, page.title);
+        }
+        let users = state
+            .all_users()?
+            .into_iter()
+            .map(|u| {
+                (
+                    u.id.clone(),
+                    confed_converter::UserLink {
+                        display_name: u.display_name,
+                        profile_url: u.profile_url,
+                        id_attr: u.id_attr,
+                        id_value: u.id,
+                    },
+                )
+            })
+            .collect();
+        Ok(Self {
+            titles,
+            users,
+            space_key: ws.space_key().unwrap_or_default(),
+            base_url: ws.base_url()?.unwrap_or_default(),
+            links_by_title: ws.flavor()? == Some(confed_api::Flavor::DataCenter),
+        })
     }
-    for (id, title) in &page_titles {
-        if let Some(link) = page_links.get(id).cloned() {
-            page_links.entry(format!("{space_key}:{title}")).or_insert_with(|| link.clone());
-            page_links.entry(title.clone()).or_insert(link);
+
+    /// page id → file path, for the pages the workspace has files for.
+    pub fn base_links(&self, ws: &Workspace) -> Result<HashMap<String, String>> {
+        Ok(ws.state().page_index()?.into_iter().map(|p| (p.page_id, p.local_path)).collect())
+    }
+
+    /// Options for the page whose file is `path`, with `links` (page id →
+    /// file path) as the pages it can link to.
+    pub fn options(&self, path: &str, links: &HashMap<String, String>) -> ConvertOptions {
+        let mut page_links: HashMap<String, String> = links
+            .iter()
+            .map(|(id, target)| (id.clone(), paths::relative_link(path, target)))
+            .collect();
+        let link_targets = page_links.iter().map(|(id, link)| (link.clone(), id.clone())).collect();
+        for (id, title) in &self.titles {
+            if let Some(link) = page_links.get(id).cloned() {
+                page_links
+                    .entry(format!("{}:{title}", self.space_key))
+                    .or_insert_with(|| link.clone());
+                page_links.entry(title.clone()).or_insert(link);
+            }
+        }
+        ConvertOptions {
+            attachment_dir: paths::sidecar_ref(path),
+            page_links,
+            link_targets,
+            page_titles: self.titles.clone(),
+            links_by_title: self.links_by_title,
+            base_url: self.base_url.clone(),
+            space_key: self.space_key.clone(),
+            users: self.users.clone(),
+            inline_marks: HashMap::new(),
         }
     }
-    let links_by_title = ws.flavor().ok().flatten() == Some(confed_api::Flavor::DataCenter);
+}
 
-    // People this workspace has already resolved. A mention of anyone else keeps
-    // its block verbatim rather than linking to the wrong profile.
-    let users = ws
-        .state()
-        .all_users()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|u| {
-            (
-                u.id.clone(),
-                confed_converter::UserLink {
-                    display_name: u.display_name,
-                    profile_url: u.profile_url,
-                    id_attr: u.id_attr,
-                    id_value: u.id,
-                },
-            )
-        })
-        .collect();
+/// Everything a pull needs to render its pages: where each will live, and the
+/// context they are converted in.
+struct Rendering {
+    links: HashMap<String, String>,
+    ctx: ConvertContext,
+}
 
-    ConvertOptions {
-        attachment_dir: paths::sidecar_ref(path),
-        page_links,
-        link_targets,
-        page_titles,
-        links_by_title,
-        base_url: ws.base_url().ok().flatten().unwrap_or_default(),
-        space_key,
-        users,
-        inline_marks: HashMap::new(),
+impl Rendering {
+    fn options(&self, path: &str) -> ConvertOptions {
+        self.ctx.options(path, &self.links)
     }
 }
 
@@ -4372,13 +4458,13 @@ pub fn marks_mode(ws: &Workspace) -> MarksMode {
 
 /// A page's open inline comments, keyed by Confluence marker ref, for the
 /// converter to place as marks.
-pub fn inline_marks_for(ws: &Workspace, page_id: &str) -> HashMap<String, InlineMark> {
+pub fn inline_marks_for(ws: &Workspace, page_id: &str) -> Result<HashMap<String, InlineMark>> {
     let mode = marks_mode(ws);
     if mode == MarksMode::Off {
-        return HashMap::new();
+        return Ok(HashMap::new());
     }
-    let records = ws.state().page_comments(page_id).unwrap_or_default();
-    live_inline(&records)
+    let records = ws.state().page_comments(page_id)?;
+    Ok(live_inline(&records)
         .filter_map(|(record, anchor)| {
             let marker_ref = anchor.marker_ref.clone()?;
             Some((
@@ -4389,7 +4475,7 @@ pub fn inline_marks_for(ws: &Workspace, page_id: &str) -> HashMap<String, Inline
                 },
             ))
         })
-        .collect()
+        .collect())
 }
 
 fn mark_preview(record: &CommentRecord, all: &[CommentRecord], mode: MarksMode) -> String {

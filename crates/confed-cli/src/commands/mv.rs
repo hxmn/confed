@@ -4,95 +4,23 @@ use crate::cli::MvArgs;
 use crate::context::Context;
 use crate::output::Output;
 use confed_core::error::{ConfedError, Result};
-use confed_core::paths;
-use confed_core::slug::slugify;
-use confed_core::sync::{write_atomic, PushOptions};
+use confed_core::local::{self, LocalMove};
+use confed_core::sync::PushOptions;
 use serde_json::json;
 
-pub async fn run(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
+/// The move on disk, and what it would reorder: everything `confed mv` does
+/// before the server, with no credential needed.
+struct Planned {
+    page_id: String,
+    moved: LocalMove,
+    sibling: Option<Option<ReorderTarget>>,
+}
+
+fn move_locally(ctx: &mut Context, args: &MvArgs) -> Result<Planned> {
     if let Some(destination) = &args.destination {
         refuse_other_space(ctx, &args.source, destination)?;
     }
     let page_id = ctx.resolve_page(&args.source)?;
-    let ws = ctx.workspace()?;
-    let record = ws
-        .state()
-        .get_page(&page_id)?
-        .ok_or_else(|| ConfedError::NotFound(format!("no page {}", args.source)))?;
-
-    let old_path = record.local_path.clone();
-    let mut title_changed = false;
-    let mut parent_changed = false;
-    let mut new_path = old_path.clone();
-
-    if let Some(destination) = &args.destination {
-        let destination = ctx.workspace_path(destination);
-        let raw = destination.trim_end_matches(".md");
-        let (dir, name) = match raw.rsplit_once('/') {
-            Some((dir, name)) => (Some(dir.to_string()), name.to_string()),
-            None => (None, raw.to_string()),
-        };
-        new_path = match &dir {
-            Some(dir) => format!("{dir}/{}.md", slugify(&name)),
-            None => format!("{}.md", slugify(&name)),
-        };
-
-        let old_dir = old_path.rsplit_once('/').map(|(d, _)| d.to_string());
-        parent_changed = dir != old_dir;
-        // Renaming the file renames the page unless told otherwise.
-        title_changed = args.rename_title || name != record.title;
-
-        let absolute_new = ws.absolute(&new_path);
-        if absolute_new.exists() && new_path != old_path {
-            return Err(ConfedError::state(format!("{new_path} already exists")));
-        }
-
-        if new_path != old_path {
-            let absolute_old = ws.absolute(&old_path);
-            if let Some(parent) = absolute_new.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| ConfedError::io(format!("creating {}", parent.display()), e))?;
-            }
-            std::fs::rename(&absolute_old, &absolute_new)
-                .map_err(|e| ConfedError::io(format!("moving {old_path}"), e))?;
-
-            // The sidecar and the children directory follow the page.
-            for (from, to) in [
-                (paths::sidecar_for(&old_path), paths::sidecar_for(&new_path)),
-                (paths::children_dir(&old_path), paths::children_dir(&new_path)),
-            ] {
-                let from_abs = ws.absolute(&from);
-                if from_abs.is_dir() {
-                    let _ = std::fs::rename(from_abs, ws.absolute(&to));
-                }
-            }
-        }
-
-        // Update the file's own frontmatter to match its new home.
-        let content = std::fs::read_to_string(ws.absolute(&new_path))
-            .map_err(|e| ConfedError::io(format!("reading {new_path}"), e))?;
-        let mut file = confed_core::frontmatter::parse(&content, &new_path)?;
-        if title_changed {
-            file.frontmatter.title = name.clone();
-        }
-        if parent_changed {
-            file.frontmatter.parent_id = match &dir {
-                Some(dir) => ws.state().get_page_by_path(&format!("{dir}.md"))?.map(|p| p.page_id),
-                None => None,
-            };
-        }
-        write_atomic(&ws.absolute(&new_path), &file.render()?)?;
-
-        let mut updated = record.clone();
-        updated.local_path = new_path.clone();
-        updated.slug = new_path
-            .rsplit('/')
-            .next()
-            .and_then(|f| f.strip_suffix(".md"))
-            .unwrap_or(&new_path)
-            .to_string();
-        ctx.workspace()?.state().upsert_page(&updated)?;
-    }
 
     // Order among siblings lives only on the server, and a push does not
     // carry it: it is made there, now, or not at all.
@@ -103,64 +31,100 @@ pub async fn run(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
             "add --push to reorder on the server now",
         ));
     }
-    let sibling = if reorder { Some(reorder_target(ctx, &page_id, args)?) } else { None };
-    let asked_to_reorder = sibling.is_some();
 
-    let mut human = format!("Moved {old_path} -> {new_path}\n");
-    let mut pushed = false;
-    let mut reordered = false;
-    let mut warnings = Vec::new();
-    if args.push {
-        let client = ctx.build_client()?;
-        let engine = ctx.engine(client.clone())?;
-        let ws = ctx.workspace_mut()?;
-        let _lock = ws.lock()?;
-        let outcome = engine
-            .push(ws, &PushOptions { scope: vec![new_path.clone()], ..Default::default() })
-            .await?;
-        if let Some(refused) = outcome.cross_space.first().or(outcome.skipped.first()) {
-            return Err(ConfedError::state(format!("{}: {}", refused.path, refused.reason)));
+    let ws = ctx.workspace()?;
+    let moved = match &args.destination {
+        Some(destination) => {
+            local::move_page(ws, &page_id, &ctx.workspace_path(destination), args.rename_title)?
         }
-        if let Some(failed) = outcome.failed.first() {
-            return Err(ConfedError::Other(format!("{}: {}", failed.page_id, failed.error)));
-        }
-        pushed = !outcome.pushed.is_empty() || !outcome.created.is_empty();
-        if let Some(target) = sibling.flatten() {
-            client
-                .move_page(&confed_api::PageId::new(&page_id), &target.parent, target.position)
-                .await?;
-            reordered = true;
-            if client.flavor() == confed_api::Flavor::DataCenter {
-                warnings.push(
-                    "Data Center does not report the order of pages, so confed cannot read it \
-                     back; check it in the browser"
-                        .to_string(),
-                );
+        None => {
+            let record = ws
+                .state()
+                .get_page(&page_id)?
+                .ok_or_else(|| ConfedError::NotFound(format!("no page {}", args.source)))?;
+            LocalMove {
+                page_id: page_id.clone(),
+                from: record.local_path.clone(),
+                to: record.local_path,
+                title_changed: false,
+                parent_changed: false,
             }
         }
-        human.push_str(match (pushed, reordered) {
-            (_, true) => "Applied on the server, and reordered there.\n",
-            (true, false) => "Applied on the server.\n",
-            (false, false) if asked_to_reorder => "Already in that place; nothing to send.\n",
-            (false, false) => "Nothing to send to the server.\n",
-        });
-    } else {
-        human.push_str(&ctx.style.dim("Run `confed push` to apply it on the server.\n"));
-    }
+    };
+    let sibling = if reorder { Some(reorder_target(ctx, &page_id, args)?) } else { None };
+    Ok(Planned { page_id, moved, sibling })
+}
 
-    Ok(Output::new(
-        json!({
-            "page_id": page_id,
-            "from": old_path,
-            "to": new_path,
-            "title_changed": title_changed,
-            "parent_changed": parent_changed,
-            "pushed": pushed,
-            "reordered": reordered,
-        }),
-        human,
-    )
-    .warn_all(warnings))
+fn result(planned: &Planned, pushed: bool, reordered: bool) -> serde_json::Value {
+    let m = &planned.moved;
+    json!({
+        "page_id": planned.page_id,
+        "from": m.from,
+        "to": m.to,
+        "title_changed": m.title_changed,
+        "parent_changed": m.parent_changed,
+        "pushed": pushed,
+        "reordered": reordered,
+    })
+}
+
+/// `confed mv` without `--push`: the files move, and the next push sends it.
+pub fn run(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
+    let planned = move_locally(ctx, args)?;
+    let human = format!(
+        "Moved {} -> {}\n{}",
+        planned.moved.from,
+        planned.moved.to,
+        ctx.style.dim("Run `confed push` to apply it on the server.\n")
+    );
+    Ok(Output::new(result(&planned, false, false), human))
+}
+
+/// `confed mv --push`: the same, then applied on the server.
+pub async fn run_and_push(ctx: &mut Context, args: &MvArgs) -> Result<Output> {
+    let planned = move_locally(ctx, args)?;
+    let new_path = planned.moved.to.clone();
+    let page_id = planned.page_id.clone();
+    let asked_to_reorder = planned.sibling.is_some();
+
+    let mut human = format!("Moved {} -> {new_path}\n", planned.moved.from);
+    let mut warnings = Vec::new();
+    let client = ctx.build_client()?;
+    let engine = ctx.engine(client.clone())?;
+    let ws = ctx.workspace_mut()?;
+    let _lock = ws.lock()?;
+    let outcome = engine
+        .push(ws, &PushOptions { scope: vec![new_path.clone()], ..Default::default() })
+        .await?;
+    if let Some(refused) = outcome.cross_space.first().or(outcome.skipped.first()) {
+        return Err(ConfedError::state(format!("{}: {}", refused.path, refused.reason)));
+    }
+    if let Some(failed) = outcome.failed.first() {
+        return Err(ConfedError::Other(format!("{}: {}", failed.page_id, failed.error)));
+    }
+    let pushed = !outcome.pushed.is_empty() || !outcome.created.is_empty();
+    let mut reordered = false;
+    if let Some(Some(target)) = &planned.sibling {
+        client
+            .move_page(&confed_api::PageId::new(&page_id), &target.parent, target.position)
+            .await?;
+        reordered = true;
+        if client.flavor() == confed_api::Flavor::DataCenter {
+            warnings.push(
+                "Data Center does not report the order of pages, so confed cannot read it \
+                 back; check it in the browser"
+                    .to_string(),
+            );
+        }
+    }
+    human.push_str(match (pushed, reordered) {
+        (_, true) => "Applied on the server, and reordered there.\n",
+        (true, false) => "Applied on the server.\n",
+        (false, false) if asked_to_reorder => "Already in that place; nothing to send.\n",
+        (false, false) => "Nothing to send to the server.\n",
+    });
+
+    Ok(Output::new(result(&planned, pushed, reordered), human).warn_all(warnings))
 }
 
 /// Where a reorder puts the page: before or after a sibling, as the server

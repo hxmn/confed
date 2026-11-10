@@ -63,7 +63,18 @@ pub async fn collect_cursor<T: DeserializeOwned>(
             break;
         }
         let Some(next) = page.links.next.take() else { break };
-        let url = resolve_under_base(http.base_url(), &next)?;
+        let mut url = resolve_under_base(http.base_url(), &next)?;
+        // A next link on another host — a proxy's own name, a misconfigured
+        // base URL — is followed on this one: the request carries the
+        // credential, and only the path and cursor are the server's to say.
+        if !http.same_origin(&url) {
+            tracing::debug!(target: "confed::http", next = %url, "next page link on another host; following it on the base");
+            let tail = match url.query() {
+                Some(q) => format!("{}?{q}", url.path()),
+                None => url.path().to_string(),
+            };
+            url = resolve_under_base(http.base_url(), &tail)?;
+        }
         page = http.get_json(url.as_str(), &[]).await?;
     }
     if let Some(l) = limit {

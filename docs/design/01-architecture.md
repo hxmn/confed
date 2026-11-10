@@ -52,7 +52,7 @@ Why a workspace and not one crate:
 | `confed` | `main` | The binary; wires the CLI and the TUI together |
 | `confed-cli` | `cli`, `commands/*`, `context`, `output` (human+JSON envelope), `prompt`, `progress`, `changelog` | Commands and their output; no business logic |
 | `confed-tui` | `app`, `tree`, `pane`, `conflict`, `ui`, `term` | Interactive views over the same engine calls |
-| `confed-core` | `config`, `session`, `state`, `worktree`, `sync`, `merge`, `slug`, `comments`, `attachments` | State machine, DBs, filesystem mapping |
+| `confed-core` | `config`, `session`, `state`, `worktree`, `sync`, `merge`, `resolve`, `local`, `lock`, `interrupt`, `agent_docs`, `slug`, `comments`, `attachments` | State machine, DBs, filesystem mapping; every change to files and state, local ones (`mv`, `rm`, `resolve`, the agent contract) included, under the workspace lock |
 | `confed-converter` | `storage_parse`, `to_markdown`, `to_storage`, `macros`, `blockmap`, `marks`, `selection` | Content conversion, macro preservation, block map |
 | `confed-api` | `client` (trait), `types`, `error`, `http`, `paginate`, `secret`, `wire::v1`, `mock` | The client contract and what both clients share |
 | `confed-dc` | `lib` (`DcClient`), `inline` | Data Center: REST v1 and the inline-comment API |
@@ -215,8 +215,12 @@ commit: on success update `pages` (base) with the server's response body/version
 
 1. `pages` (base) is only ever updated to a state the *server confirmed* (fetch result or
    push response). Never from local edits alone.
-2. Every state mutation per page is one SQLite transaction; a killed process leaves a
-   consistent DB and an idempotently re-runnable command.
+2. Every state mutation per page is one SQLite transaction (`StateDb::atomically`,
+   `Workspace::atomically`); a killed process leaves a consistent DB and an idempotently
+   re-runnable command. A fetch writes the whole listing in one transaction too.
+5. Ctrl-C is honoured between pages, never inside one: the first raises
+   `interrupt::request`, which fetch, pull and push check before each page, so a page's
+   file and its base record are always written together. The command exits 130.
 3. Working files are written atomically (temp file + rename) and never modified while a
    push is computing its plan (plan reads a snapshot of hashes).
 4. `push` never uploads a page whose status is `Conflicted`.

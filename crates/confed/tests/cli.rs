@@ -2509,3 +2509,37 @@ async fn clone_takes_the_base_url_from_a_space_url() {
     assert_eq!(envelope(&output, "clone")["result"]["init"]["base_url"], json!(server.uri()));
     assert!(read(&parent.path().join(SPACE), ROOT_FILE).contains("Team Handbook"));
 }
+
+/// `mv` and `rm` without `--push` change files and nothing else: they work
+/// with no credential anywhere and no server to reach.
+#[tokio::test]
+async fn local_moves_and_removals_need_no_credentials() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    // No credential left, and nothing listening.
+    std::fs::remove_file(dir.path().join(".session.db")).unwrap();
+    drop(server);
+
+    let output = run(confed(dir.path(), &["mv", CHILD_FILE, "Week One.md", "--json"]));
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    let value = envelope(&output, "mv");
+    assert_eq!(value["result"]["to"], json!("Week One.md"), "{value}");
+    assert!(dir.path().join("Week One.md").exists());
+    assert!(!dir.path().join(CHILD_FILE).exists());
+
+    let output = run(confed(dir.path(), &["rm", "Week One.md", "--dry-run", "--json"]));
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    assert!(dir.path().join("Week One.md").exists(), "a dry run removes nothing");
+
+    let output = run(confed(dir.path(), &["rm", "Week One.md", "--json"]));
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    assert!(!dir.path().join("Week One.md").exists());
+
+    let status = envelope(&run(confed(dir.path(), &["status", "--json"])), "status");
+    assert!(
+        status.to_string().contains("deleted"),
+        "the next push has a deletion to send: {status}"
+    );
+}

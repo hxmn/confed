@@ -274,6 +274,26 @@ pub struct SyncLogEntry {
     pub detail: Option<String>,
 }
 
+/// A base page without its body. See [`StateDb::page_index`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct PageEntry {
+    pub page_id: String,
+    pub title: String,
+    pub local_path: String,
+    pub parent_id: Option<String>,
+    pub version: u32,
+}
+
+/// A remote page without its body. See [`StateDb::remote_index`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteEntry {
+    pub page_id: String,
+    pub title: String,
+    pub parent_id: Option<String>,
+    pub version: u32,
+    pub deleted: bool,
+}
+
 #[derive(Debug)]
 pub struct StateDb {
     conn: Connection,
@@ -326,6 +346,43 @@ impl StateDb {
 
     pub fn transaction(&mut self) -> Result<Transaction<'_>> {
         Ok(self.conn.transaction()?)
+    }
+
+    /// Run `f` as one transaction: every write it makes lands, or none does.
+    /// Inside another, it joins that one, so a function can be atomic on its
+    /// own and still part of a larger whole.
+    pub fn atomically<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let began = self.begin()?;
+        let result = f(self);
+        self.finish(began, result.is_ok())?;
+        result
+    }
+
+    /// Open a transaction unless one is open already, saying which. Pair it
+    /// with [`Self::finish`]; [`Self::atomically`] does both, for code that
+    /// does not need the workspace while the transaction is open.
+    pub fn begin(&self) -> Result<bool> {
+        if !self.conn.is_autocommit() {
+            return Ok(false);
+        }
+        // IMMEDIATE takes the write lock now, so a second confed waits here
+        // (busy_timeout) instead of failing at the first write.
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        Ok(true)
+    }
+
+    /// Commit what [`Self::begin`] opened when `ok`, roll it back otherwise.
+    /// Does nothing when `began` is false: the outer transaction decides.
+    pub fn finish(&self, began: bool, ok: bool) -> Result<()> {
+        if !began {
+            return Ok(());
+        }
+        if ok {
+            self.conn.execute_batch("COMMIT")?;
+        } else {
+            self.conn.execute_batch("ROLLBACK")?;
+        }
+        Ok(())
     }
 
     fn migrate(&self) -> Result<()> {
@@ -439,13 +496,50 @@ impl StateDb {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Every page's identity and place, without its body: for what needs the
+    /// whole space but none of its content (links, titles, paths).
+    pub fn page_index(&self) -> Result<Vec<PageEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT page_id, title, local_path, parent_id, version FROM pages ORDER BY local_path",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(PageEntry {
+                page_id: r.get(0)?,
+                title: r.get(1)?,
+                local_path: r.get(2)?,
+                parent_id: r.get(3)?,
+                version: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// [`Self::page_index`] for what fetch last saw.
+    pub fn remote_index(&self) -> Result<Vec<RemoteEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT page_id, title, parent_id, version, deleted FROM remote_pages ORDER BY page_id",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(RemoteEntry {
+                page_id: r.get(0)?,
+                title: r.get(1)?,
+                parent_id: r.get(2)?,
+                version: r.get(3)?,
+                deleted: r.get::<_, i32>(4)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     pub fn delete_page(&self, page_id: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM pages WHERE page_id = ?1", params![page_id])?;
-        self.conn.execute("DELETE FROM attachments WHERE page_id = ?1", params![page_id])?;
-        self.conn
-            .execute("DELETE FROM removed_attachments WHERE page_id = ?1", params![page_id])?;
-        self.conn.execute("DELETE FROM comments WHERE page_id = ?1", params![page_id])?;
-        Ok(())
+        self.atomically(|db| {
+            db.conn.execute("DELETE FROM pages WHERE page_id = ?1", params![page_id])?;
+            db.conn.execute("DELETE FROM attachments WHERE page_id = ?1", params![page_id])?;
+            db.conn
+                .execute("DELETE FROM removed_attachments WHERE page_id = ?1", params![page_id])?;
+            db.conn.execute("DELETE FROM comments WHERE page_id = ?1", params![page_id])?;
+            Ok(())
+        })
     }
 
     pub fn set_sync_state(&self, page_id: &str, state: SyncState) -> Result<()> {
@@ -924,7 +1018,7 @@ fn page_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PageRecord> {
         author: r.get(9)?,
         created_at: r.get(10)?,
         updated_at: r.get(11)?,
-        storage_body: decompress(&body).unwrap_or_default(),
+        storage_body: decompress(&body).map_err(|e| corrupt_body(12, e))?,
         storage_hash: r.get(13)?,
         markdown_hash: r.get(14)?,
         block_map: r.get(15)?,
@@ -948,11 +1042,17 @@ fn remote_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RemotePage> {
         author: r.get(7)?,
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
-        storage_body: body.and_then(|b| decompress(&b).ok()),
+        storage_body: body.map(|b| decompress(&b)).transpose().map_err(|e| corrupt_body(10, e))?,
         storage_hash: r.get(11)?,
         fetched_at: r.get(12)?,
         deleted: r.get::<_, i32>(13)? != 0,
     })
+}
+
+/// A stored body that will not decompress. Reading it as empty would make
+/// the page look emptied — and a push would send that.
+fn corrupt_body(column: usize, e: ConfedError) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(column, rusqlite::types::Type::Blob, Box::new(e))
 }
 
 /// Bodies are stored compressed: a space of a few thousand pages is mostly XHTML.
@@ -1002,6 +1102,51 @@ mod tests {
             synced_at: now(),
             render_key: String::new(),
         }
+    }
+
+    /// A failure anywhere in an atomic run leaves nothing of it behind, and a
+    /// run inside another becomes part of it rather than committing early.
+    #[test]
+    fn atomic_runs_commit_whole_or_not_at_all_and_nest() {
+        let db = StateDb::open_in_memory().unwrap();
+        let failed: Result<()> = db.atomically(|db| {
+            db.upsert_page(&sample_page("1001"))?;
+            db.set_meta("halfway", "yes")?;
+            Err(ConfedError::Other("stopped".into()))
+        });
+        assert!(failed.is_err());
+        assert!(db.get_page("1001").unwrap().is_none(), "rolled back");
+        assert!(db.get_meta("halfway").unwrap().is_none(), "rolled back");
+        assert!(db.conn().is_autocommit(), "no transaction left open");
+
+        let outer: Result<()> = db.atomically(|db| {
+            db.upsert_page(&sample_page("1002"))?;
+            // delete_page is atomic on its own; here it joins the outer run.
+            db.delete_page("1002")?;
+            db.upsert_page(&sample_page("1003"))?;
+            Err(ConfedError::Other("stopped".into()))
+        });
+        assert!(outer.is_err());
+        assert!(db.get_page("1003").unwrap().is_none(), "the inner run did not commit");
+
+        db.atomically(|db| db.upsert_page(&sample_page("1004"))).unwrap();
+        assert!(db.get_page("1004").unwrap().is_some());
+        assert_eq!(db.page_index().unwrap()[0].page_id, "1004");
+    }
+
+    /// A body that will not decompress is an error. Read as empty, it would
+    /// look like a page emptied on purpose — and push would send that.
+    #[test]
+    fn a_corrupt_stored_body_is_an_error_not_an_empty_page() {
+        let db = StateDb::open_in_memory().unwrap();
+        db.upsert_page(&sample_page("1001")).unwrap();
+        db.conn()
+            .execute("UPDATE pages SET storage_body = X'00' WHERE page_id = '1001'", [])
+            .unwrap();
+        assert!(db.get_page("1001").is_err());
+        assert!(db.all_pages().is_err());
+        // What needs no body still reads.
+        assert_eq!(db.page_index().unwrap().len(), 1);
     }
 
     #[test]
@@ -1263,8 +1408,8 @@ mod migration_tests {
             conn.execute(
                 "INSERT INTO pages (page_id, title, slug, local_path, version, status,
                                     storage_body, storage_hash, markdown_hash, synced_at)
-                 VALUES ('1', 'Kept', 'Kept', 'Kept.md', 3, 'current', X'00', 'h', 'h', '2026-01-01T00:00:00Z')",
-                [],
+                 VALUES ('1', 'Kept', 'Kept', 'Kept.md', 3, 'current', ?1, 'h', 'h', '2026-01-01T00:00:00Z')",
+                params![compress("<p>Kept.</p>").unwrap()],
             )
             .unwrap();
         }
@@ -1279,6 +1424,7 @@ mod migration_tests {
         assert_eq!(page.title, "Kept");
         assert_eq!(page.version, 3);
         assert_eq!(page.render_key, "", "an unknown fingerprint means 'render it again'");
+        assert_eq!(page.storage_body, "<p>Kept.</p>");
 
         // The people cache exists and works.
         db.upsert_user(&UserRecord {

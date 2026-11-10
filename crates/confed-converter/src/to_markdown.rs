@@ -425,6 +425,10 @@ impl Renderer<'_> {
             Node::Text(c) => out.push_str(&escape_md(&collapse_ws(&dom::unescape(&c.raw)))),
             Node::CData(c) => out.push_str(&escape_md(&c.raw)),
             Node::Comment(_) | Node::Raw(_) => {}
+            // `classify` preserves any block holding one, so this is never
+            // reached; should it be, the block falls back to verbatim rather
+            // than dropping what it could not read.
+            Node::Deep(_) => self.unresolved_user = true,
             Node::Element(el) => self.inline_element(el, out),
         }
     }
@@ -1126,7 +1130,7 @@ mod tests {
     fn block_map_invariants_hold() {
         let storage = "<h1>T</h1><p>a</p><ul><li>x</li></ul><hr/>";
         let c = crate::storage_to_markdown(storage, &ConvertOptions::default()).unwrap();
-        c.block_map.validate_spans(storage.len()).unwrap();
+        c.block_map.validate_spans(storage).unwrap();
         c.block_map.validate_md_spans().unwrap();
         for (i, b) in c.block_map.blocks.iter().enumerate() {
             let text = c.block_map.block_markdown(i, &c.markdown).unwrap();

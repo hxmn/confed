@@ -20,6 +20,57 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-10
+
+Robustness and layering: state written as whole transactions, errors no longer
+swallowed, pulls that scale with the space, a lock that cannot be stolen, Ctrl-C that
+leaves every page consistent, and the credential kept to the one host it belongs to.
+
+### Changed
+
+- **Exit code 130 (`INTERRUPTED`)**: Ctrl-C during `fetch`, `pull` or `push` now
+  finishes the page in hand, records it, and stops; a second Ctrl-C quits at once. Run
+  the command again to carry on. `envelope.schema.json` lists the new code.
+- **The workspace lock is an operating-system lock** (`flock` on Unix, `LockFileEx` on
+  Windows) on `.confed.lock`, released by the system when its holder exits. Two
+  processes could both reclaim a stale lock before, and a live confed run by another
+  user counted as dead. The file now stays in place; leaving it is harmless. confed has
+  no `unsafe` code left, and every crate forbids it.
+- **Local edits to the workspace moved into `confed-core`**: moving, renaming and
+  removing a page (`confed_core::local`), finishing a conflict resolution
+  (`confed_core::resolve`) and the agent contract files with their rules
+  (`confed_core::agent_docs`). Each takes the workspace lock, which `confed mv`, `rm`
+  and `resolve` did not before, and the TUI reaches them in core rather than through the
+  CLI crate. For Rust callers, `page_convert_options` and `comment_convert_options`
+  return a `Result`, and `BlockMap::validate_spans` takes the storage body.
+
+### Fixed
+
+- **State updates were not transactional.** A fetch's listing, the body, attachments
+  and comments read for a page, a page's comments, a page deletion and a push's record
+  of a page were each runs of separate statements, so a crash could leave half of one.
+  Each is now one SQLite transaction; a first fetch of a large space is faster for it.
+- **A busy or unreadable state database rendered pages with broken links** and
+  recorded them as clean: the link, title and people maps silently fell back to empty.
+  Those errors now stop the command. A stored body that will not decompress is an error
+  too, instead of an empty page that a push would send.
+- **Pull and push were quadratic in the size of the space**: rendering each page loaded
+  and decompressed every page body, several times over. What conversion needs is now
+  read once per command, without touching bodies; a 2000-page pull takes a sixth of the
+  time it did.
+- **An absolute link in a server response received the credential**, whatever host it
+  named, in pagination and attachment downloads. The credential now goes only to the
+  configured server's origin: a next-page link elsewhere is followed on that server, a
+  download elsewhere is fetched without it, and any other API call elsewhere is refused.
+- **`confed mv` and `confed rm` without `--push` demanded a credential** and failed
+  without one, though they only change files. They now run offline, like `status`.
+- **A deeply nested page crashed confed with a stack overflow.** Storage nested more than
+  100 elements deep is kept verbatim in a `confluence` fence, byte for byte; Markdown
+  nested that deep is refused with its line number.
+- **A stale block map could panic** on a Cyrillic body: a recorded offset inside a
+  multi-byte letter was sliced unchecked. It is now reported as stale, and the push
+  regenerates the body as for any other stale map.
+
 ## [0.18.0] - 2026-11-10
 
 A round of fixes for things that lost data or stopped work: duplicate pages and
@@ -1203,7 +1254,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/hxmn/confed/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/hxmn/confed/compare/v0.17.1...v0.18.0
 [0.17.1]: https://github.com/hxmn/confed/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/hxmn/confed/compare/v0.16.0...v0.17.0

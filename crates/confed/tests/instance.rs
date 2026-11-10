@@ -891,15 +891,15 @@ async fn moves_that_cannot_be_made_are_refused_before_any_write() {
     assert!(message.contains("Week One.md: has local changes"), "{message}");
     assert!(message.contains(r#"title "Onboarding""#), "{message}");
 
-    // A lock held by a live process.
-    std::fs::write(root.path().join("ENG/.confed.lock"), format!("{}\n", std::process::id()))
-        .unwrap();
+    // A lock held by a live process: this one, through the operating system.
+    let held = std::fs::File::create(root.path().join("ENG/.confed.lock")).unwrap();
+    held.lock().unwrap();
     let out = run(
         root.path(),
         &["instance", "mv", "DOCS:Team Handbook/Policies.md", "ENG:", "-y", "--json"],
     );
     assert_eq!(code(&out), 7, "{}", stderr(&out));
-    std::fs::remove_file(root.path().join("ENG/.confed.lock")).unwrap();
+    drop(held);
 
     // Bad arguments are exit 2.
     let out =

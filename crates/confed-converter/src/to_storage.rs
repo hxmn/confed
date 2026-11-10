@@ -47,6 +47,16 @@ fn generate_at(markdown: &str, opts: &ConvertOptions, line_offset: usize) -> Con
     // Checked block by block, so a failure names the Markdown line that
     // caused it rather than a byte offset into storage nobody has seen.
     for block in root.children() {
+        // Generating recurses through the block; one nested past what any page
+        // needs would overflow the stack, so it is refused first.
+        if depth_of(block) > dom::MAX_DEPTH {
+            let line = block.data.borrow().sourcepos.start.line + line_offset;
+            return Err(ConvertError::Generate(format!(
+                "line {line}: this block nests more than {} levels deep (quotes, lists or \
+                 emphasis inside one another), which confed does not write",
+                dom::MAX_DEPTH
+            )));
+        }
         let start = out.len();
         g.block(block, &mut out)?;
         if let Err(detail) = dom::check_well_formed(&out[start..]) {
@@ -686,7 +696,7 @@ fn check_map_matches(
     base_map: &BlockMap,
     base_markdown: &str,
 ) -> ConvertResult<()> {
-    base_map.validate_spans(base_storage.len()).map_err(ConvertError::StaleBlockMap)?;
+    base_map.validate_spans(base_storage).map_err(ConvertError::StaleBlockMap)?;
     base_map.validate_md_spans().map_err(ConvertError::StaleBlockMap)?;
 
     let ranges = mdblock::split_blocks(base_markdown);
@@ -785,6 +795,17 @@ fn split_details(literal: &str) -> Option<(String, String)> {
 }
 
 /// A first child that is a paragraph consisting solely of bold text.
+/// How deep a Markdown node's subtree goes, counted without recursion.
+fn depth_of<'a>(node: &'a AstNode<'a>) -> usize {
+    let mut deepest = 0;
+    let mut pending = vec![(node, 1usize)];
+    while let Some((next, depth)) = pending.pop() {
+        deepest = deepest.max(depth);
+        pending.extend(next.children().map(|c| (c, depth + 1)));
+    }
+    deepest
+}
+
 /// One piece of inline HTML, as CommonMark split it out of the text.
 #[derive(Debug, PartialEq)]
 enum HtmlTag {

@@ -1508,7 +1508,8 @@ async fn the_base_re_renders_to_exactly_what_is_on_disk() {
                 confed_core::frontmatter::parse(&h.read(&record.local_path), &record.local_path)
                     .unwrap();
 
-            let options = confed_core::sync::page_convert_options(&h.ws, &record.local_path);
+            let options =
+                confed_core::sync::page_convert_options(&h.ws, &record.local_path).unwrap();
             let rendered = confed_converter::storage_to_markdown(&record.storage_body, &options)
                 .unwrap()
                 .markdown;
@@ -1998,7 +1999,7 @@ both_flavors!(the_base_and_the_file_agree_with_marks_present, |mut h: Harness| a
     let record = h.ws.state().get_page("1001").unwrap().unwrap();
     let on_disk =
         confed_core::frontmatter::parse(&h.read(&record.local_path), &record.local_path).unwrap();
-    let options = confed_core::sync::page_convert_options(&h.ws, &record.local_path);
+    let options = confed_core::sync::page_convert_options(&h.ws, &record.local_path).unwrap();
     let rendered = confed_core::sync::comparable_markdown(&record.storage_body, &options).unwrap();
     assert_eq!(
         rendered.trim_end(),

@@ -4,7 +4,7 @@
 //! `confed resolve`; this module only tracks which side the user picked for each
 //! hunk and renders the file back out.
 
-use confed_cli::commands::resolve::{ConflictHunk, Segment};
+use confed_core::resolve::{ConflictHunk, Segment};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
@@ -41,7 +41,7 @@ pub struct Resolver {
 impl Resolver {
     /// `None` when the file has no conflict markers left.
     pub fn new(page_id: &str, path: &str, content: &str) -> Option<Self> {
-        let segments = confed_cli::commands::resolve::split_conflicts(content);
+        let segments = confed_core::resolve::split_conflicts(content);
         let hunks: Vec<usize> = segments
             .iter()
             .enumerate()

@@ -327,14 +327,48 @@ impl Http {
         &self.auth
     }
 
-    /// Resolve a server-relative path against the base URL.
+    /// Resolve a server-relative path against the base URL. An absolute URL
+    /// is taken only when it is on the base's own origin: the API calls built
+    /// from it carry the credential.
     pub fn url(&self, path: &str) -> ApiResult<Url> {
         let trimmed = path.trim_start_matches('/');
-        Ok(self.base.join(trimmed)?)
+        let url = self.base.join(trimmed)?;
+        if !self.same_origin(&url) {
+            return Err(ApiError::Url(format!(
+                "{url} is not on {}; confed sends its credentials nowhere else",
+                origin_of(&self.base)
+            )));
+        }
+        Ok(url)
     }
 
+    /// Whether `url` is on the server confed was pointed at — the one origin
+    /// its credential may be sent to. The same host and port, by the same
+    /// scheme or upgraded from http to https.
+    pub fn same_origin(&self, url: &Url) -> bool {
+        let base = &self.base;
+        let host = |u: &Url| u.host_str().map(str::to_ascii_lowercase);
+        if host(url) != host(base) {
+            return false;
+        }
+        match (base.scheme(), url.scheme()) {
+            (a, b) if a == b => url.port_or_known_default() == base.port_or_known_default(),
+            ("http", "https") => url.port_or_known_default() == Some(443),
+            _ => false,
+        }
+    }
+
+    /// A request, with the credential only when it goes to the base's origin.
+    /// A link from a response can point anywhere: following one must never
+    /// hand the token to another host.
     fn request(&self, method: reqwest::Method, url: Url) -> reqwest::RequestBuilder {
-        self.auth.apply(self.client.request(method, url))
+        let same = self.same_origin(&url);
+        let rb = self.client.request(method, url);
+        if same {
+            self.auth.apply(rb)
+        } else {
+            rb
+        }
     }
 
     /// Run a request with retry/backoff. `build` is called once per attempt so the
@@ -703,9 +737,14 @@ impl Http {
     }
 
     /// Stream a download straight to disk (never buffers the whole file).
+    /// A download link on another host is fetched without the credential.
     pub async fn download_to(&self, path_or_url: &str, dest: &Path) -> ApiResult<u64> {
         let url = if path_or_url.starts_with("http://") || path_or_url.starts_with("https://") {
-            Url::parse(path_or_url)?
+            let url = Url::parse(path_or_url)?;
+            if !self.same_origin(&url) {
+                debug!(target: "confed::http", url = %url, "download from another host, sent without credentials");
+            }
+            url
         } else {
             self.url(path_or_url)?
         };
@@ -772,6 +811,10 @@ impl Http {
             .await?;
         decode(resp, &ctx).await
     }
+}
+
+fn origin_of(url: &Url) -> String {
+    url.origin().ascii_serialization()
 }
 
 /// Where a download is staged before it is renamed into place.
