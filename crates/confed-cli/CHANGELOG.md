@@ -20,6 +20,78 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-11
+
+Administration without a script around it. Creating a space with a group like another
+space's took an agent eight shell calls, six of them piping confed's output through
+`grep`, `python3` or `awk`; it is now three calls, or one, each of whose results
+confirms its own change.
+
+### Added
+
+- **`confed admin perms copy --from SRC --to DST`** grants in one space what subjects
+  hold in another: every subject's permissions (and role, on a Cloud site with roles),
+  or with `--subject` one subject's, to itself or to the subject `--as` names. Nothing is
+  revoked. `copied` has one entry per subject — `granted`, `already_granted`, and
+  `held`, everything it holds in the destination afterwards — so a second run grants
+  nothing and says so. `--dry-run` reads both spaces and reports the same.
+- **`confed admin group create NEW --members-from OLD`** creates a group with the
+  members of another, and `group add NEW --members-from OLD` adds them to one that
+  exists. A group that exists already is exit 4 with `kind` `group_exists`.
+- **`confed instance create KEY --permissions-from SRC`** gives the new space another
+  space's permissions in the same command; `--map group:OLD=group:NEW` grants what OLD
+  holds to NEW instead, and `--create-groups` makes a NEW that does not exist yet with
+  OLD's members. All of it is checked before the space is created.
+- **`perms list --subject S`** keeps one subject's permissions, and **`--compact`** gives
+  one entry per subject with all its operations, each subject written the way `grant`,
+  `revoke` and `--subject` take it. A listed Data Center user now carries the
+  `username`. **`group list --match TEXT`** keeps the groups whose name contains it.
+- **`instance spaces --space KEY`** keeps only the spaces named, and with `--remote`
+  asks the server for each by its key instead of listing the site.
+- **`--select` filters lists**: `[field=value]` after a key keeps the elements that
+  match — `--select 'permissions[subject.name=writers].operation'` — with `!=`, several
+  filters at once, and a list matching by any of its elements.
+- **`confed commands --json`** prints every command with its arguments and flags, read
+  off the command-line definition of the binary itself; `confed commands admin perms`
+  narrows it. No workspace and no network are needed.
+- **A `perms` command names its space as `KEY:`** (or a space URL) beside the subject,
+  as well as with `--space`.
+- **The root `CLAUDE.md` has an Administration section** — who can read a space,
+  copying a group, copying a space's permissions, a new space for a new team — which
+  `confed instance doctor --fix` writes into a root an older confed set up.
+
+### Changed
+
+- **A permission or membership change reports what it came to**, read back from the
+  server. `perms grant` and `revoke` give `held`, every operation the subject holds in
+  the space now. `group add` and `remove` give `members`, everybody in the group now,
+  with `already_members` (or `not_members`) for whom nothing was sent.
+- **A user that does not exist is reported per user**: `unknown_users` in the result
+  and an entry in `errors` with `kind` `unknown_user`, where it was a bare 404. With
+  several users named the others are still changed (exit 8). A group that does not
+  exist is found out before anything is sent.
+- **`--select '*'` over an object keeps its keys**: it gives `{key: value}`, where it
+  gave an array of the values and lost them. Over a list nothing changes.
+- **A `--select` that cannot be read** (an unclosed `[`) is exit 2 before the command
+  runs.
+- **For Rust callers:** `confed-api`'s `Principal` has a `username` field.
+
+### Fixed
+
+- **`confed admin` at an instance root failed with "missing API token"** when the root
+  kept no shared credential — one adopted without `--move-credentials`, whose workspaces
+  each keep their own — although every `confed instance` command worked there. `admin`
+  now finds the credential the way those do: the root's shared one, else the first
+  workspace's own.
+- **A `perms` command with no space to act on said "missing space key"** and suggested
+  `confed init`. It now exits 2 with `kind` `space_required`, names the spaces
+  registered in the root, and asks the server nothing first.
+- **The generated `CLAUDE.md` showed `--select spaces.*.result.clean` unquoted**, which
+  zsh refuses with "no matches found" before confed starts. Every `--select` example in
+  the generated files and the docs is quoted.
+- **`instance.schema.json` rejected what `instance spaces --remote` prints**: it took
+  a row's `status` for a clone's only, and did not allow `current` or `archived`.
+
 ## [0.21.1] - 2026-11-10
 
 ### Fixed
@@ -1414,7 +1486,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.21.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/hxmn/confed/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/hxmn/confed/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/hxmn/confed/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/hxmn/confed/compare/v0.20.0...v0.20.1

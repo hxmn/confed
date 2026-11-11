@@ -16,7 +16,7 @@ members = [
 exclude = ["crates/confed-converter/fuzz"]
 
 [workspace.package]
-version = "0.21.1"
+version = "0.22.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -47,13 +47,13 @@ inefficient_to_string = "warn"
 uninlined_format_args = "warn"
 
 [workspace.dependencies]
-confed-api = { path = "crates/confed-api", version = "0.21.1" }
-confed-cli = { path = "crates/confed-cli", version = "0.21.1" }
-confed-cloud = { path = "crates/confed-cloud", version = "0.21.1" }
-confed-converter = { path = "crates/confed-converter", version = "0.21.1" }
-confed-core = { path = "crates/confed-core", version = "0.21.1" }
-confed-dc = { path = "crates/confed-dc", version = "0.21.1" }
-confed-tui = { path = "crates/confed-tui", version = "0.21.1" }
+confed-api = { path = "crates/confed-api", version = "0.22.0" }
+confed-cli = { path = "crates/confed-cli", version = "0.22.0" }
+confed-cloud = { path = "crates/confed-cloud", version = "0.22.0" }
+confed-converter = { path = "crates/confed-converter", version = "0.22.0" }
+confed-core = { path = "crates/confed-core", version = "0.22.0" }
+confed-dc = { path = "crates/confed-dc", version = "0.22.0" }
+confed-tui = { path = "crates/confed-tui", version = "0.22.0" }
 
 async-trait = "0.1"
 base64 = "0.22"
