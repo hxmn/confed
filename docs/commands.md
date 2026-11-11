@@ -1122,6 +1122,10 @@ do. Each workspace's `CLAUDE.md` gains a short "Part of an instance" section.
 A table of registered workspaces: key, name, directory, pages, dirty and conflicted
 pages, last fetch. `--remote` adds the server's spaces, marking those not cloned.
 `--type global|personal` and `--status current|archived` filter the server's list.
+`--space KEY` (repeatable) keeps only the spaces named; with `--remote` each is asked
+for by its key, cloned here or not, without listing the site, so
+`confed instance spaces --remote --space DOCS --json` is how to read one space's name,
+type and status. A key that names no space is exit 6, `errors[].kind` `unknown_space`.
 
 ### confed instance clone
 

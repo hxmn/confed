@@ -318,10 +318,14 @@
         "ok": { "type": "boolean", "description": "True for exit codes 0 and 10." },
         "exit_code": { "type": "integer", "minimum": 0, "maximum": 10 },
         "status": {
-          "type": "string",
-          "description": "`clone` only: what became of the space.",
-          "enum": ["cloned", "skipped", "failed", "would_clone", "would_reinit"]
+          "type": ["string", "null"],
+          "description": "`clone`: what became of the space. `spaces --remote`: the space's status on the server, `current` or `archived`.",
+          "enum": ["cloned", "skipped", "failed", "would_clone", "would_reinit", "current", "archived", null]
         },
+        "name": { "type": ["string", "null"], "description": "`spaces`: the space's name, as last fetched or, with `--remote`, as the server has it." },
+        "type": { "type": ["string", "null"], "description": "`spaces --remote`: `global` or `personal`." },
+        "cloned": { "type": "boolean", "description": "`spaces`: whether its workspace is in this root." },
+        "on_server": { "type": "boolean", "description": "`spaces --remote`: whether the server lists it." },
         "result": { "type": "object", "description": "The single-space command's own result." },
         "errors": {
           "type": "array",

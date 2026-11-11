@@ -2075,3 +2075,44 @@ async fn listings_are_narrowed_by_the_command_not_by_a_script() {
     let groups = result(&["admin", "group", "list", "--match", "docs", "--limit", "1"]);
     assert_eq!(groups["groups"].as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn spaces_narrows_to_the_spaces_named_without_listing_the_site() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+    let rows = |args: &[&str]| -> Vec<Value> {
+        let out = run(root.path(), &[&["instance", "spaces", "--json"], args].concat());
+        assert_eq!(code(&out), 0, "{args:?}: {}", stderr(&out));
+        envelope(&out, "instance")["result"]["spaces"].as_array().unwrap().clone()
+    };
+
+    let before = server.received_requests().await.unwrap().len();
+    let ops = rows(&["--remote", "--space", "OPS"]);
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    assert_eq!(ops[0]["space_key"], "OPS");
+    assert_eq!(ops[0]["name"], "Operations");
+    assert_eq!(
+        (ops[0]["cloned"].clone(), ops[0]["on_server"].clone()),
+        (json!(false), json!(true))
+    );
+    let asked: Vec<String> = server.received_requests().await.unwrap()[before..]
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .collect();
+    assert_eq!(asked, ["/rest/api/space/OPS"], "one space is asked for by its key");
+
+    let docs = rows(&["--remote", "--space", "DOCS"]);
+    assert_eq!(docs.len(), 1);
+    assert_eq!(
+        (docs[0]["name"].clone(), docs[0]["cloned"].clone()),
+        (json!("Documentation"), json!(true))
+    );
+    assert_eq!(rows(&["--space", "ENG"]).len(), 1, "without the server too");
+    assert_eq!(rows(&["--remote", "--space", "DOCS,OPS"]).len(), 2);
+
+    for args in [&["--remote", "--space", "NOSUCH"][..], &["--space", "OPS"]] {
+        let out = run(root.path(), &[&["instance", "spaces", "--json"], args].concat());
+        assert_eq!(code(&out), 6, "{args:?}: {}", stderr(&out));
+        assert_eq!(envelope(&out, "instance")["errors"][0]["kind"], "unknown_space");
+    }
+}

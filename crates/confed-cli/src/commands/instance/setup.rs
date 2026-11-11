@@ -555,17 +555,51 @@ pub async fn spaces(
     connection: Option<Connection>,
 ) -> Result<Output> {
     let instance = ctx.instance()?;
+    // --space narrows the table to the spaces named, cloned here or not.
+    let wanted = ctx.global.space.clone();
+    let asked = |key: &str| wanted.is_empty() || wanted.iter().any(|w| w.eq_ignore_ascii_case(key));
     let mut rows: Vec<Value> = Vec::new();
-    for member in instance.members()? {
+    for member in instance.members()?.into_iter().filter(|m| asked(&m.space_key)) {
         rows.push(local_row(&instance, &member));
     }
+    let unknown = |key: &str, where_: &str, hint: String| {
+        ConfedError::refused(
+            "unknown_space",
+            ExitCode::NotFound,
+            format!("no space {key} {where_}"),
+            Some(hint),
+        )
+    };
 
     let mut warnings = Vec::new();
     if let Some(connection) = connection.filter(|_| args.remote) {
         let client = connection.client(ctx)?;
-        let mut listed = match args.status.as_deref() {
-            Some("archived") => client.list_archived_spaces().await?,
-            _ => client.list_spaces(None).await?,
+        let mut listed = if wanted.is_empty() {
+            match args.status.as_deref() {
+                Some("archived") => client.list_archived_spaces().await?,
+                _ => client.list_spaces(None).await?,
+            }
+        } else {
+            // A space that is named is asked for by its key, whatever its
+            // status: the whole site is not listed to find one.
+            let mut found = Vec::new();
+            for key in &wanted {
+                match client.find_space(key).await? {
+                    Some(space) => found.push(space),
+                    None if rows.iter().any(|r| asked_row(r, key)) => {}
+                    None => {
+                        return Err(unknown(
+                            key,
+                            "on the server that this account can see, or registered here",
+                            "`confed instance spaces --remote` lists every space".into(),
+                        ))
+                    }
+                }
+            }
+            if let Some(status) = args.status.as_deref() {
+                found.retain(|s| s.status.as_deref().unwrap_or("current") == status);
+            }
+            found
         };
         listed.retain(|s| match args.space_type.as_deref() {
             Some("personal") => is_personal(s),
@@ -619,6 +653,12 @@ pub async fn spaces(
         if args.space_type.is_some() || args.status.is_some() {
             rows.retain(|r| r["on_server"] == json!(true));
         }
+    } else if let Some(key) = wanted.iter().find(|w| !rows.iter().any(|r| asked_row(r, w))) {
+        return Err(unknown(
+            key,
+            "is registered in this instance",
+            format!("`confed instance spaces --remote --space {key}` asks the server for it"),
+        ));
     }
 
     let style = &ctx.style;
@@ -660,6 +700,11 @@ pub async fn spaces(
     }
     Ok(Output::new(json!({ "root": instance.root().display().to_string(), "spaces": rows }), human)
         .warn_all(warnings))
+}
+
+/// Whether `row` is the space `--space` named as `key`.
+fn asked_row(row: &Value, key: &str) -> bool {
+    row["space_key"].as_str().is_some_and(|k| k.eq_ignore_ascii_case(key))
 }
 
 /// What a registered workspace looks like on disk.
