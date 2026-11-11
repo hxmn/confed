@@ -312,6 +312,10 @@ pub fn render_instance(
 ",
         );
     }
+    let user_named = match flavor {
+        Flavor::Cloud => "an account id",
+        Flavor::DataCenter => "a username",
+    };
     format!(
         r#"{STAMP_PREFIX}{VERSION} -->
 # confed instance root
@@ -367,6 +371,7 @@ confed instance push -m "reason" -y      # -m is required; without -y it asks fi
 confed instance doctor --json
 confed instance search "text" --json     # results name their space, dir and path
 confed instance spaces --remote          # what is cloned, and what is not
+confed instance spaces --remote --space KEY --json   # one space: name, type, status
 confed instance clone KEY                # clone a missing space; --all for every one
 confed instance create KEY --name "…"    # a new space on the server, cloned into KEY/
 ```
@@ -382,10 +387,24 @@ failed has `"ok": false`, its `exit_code` and `errors`, and its errors are also 
 the envelope's `errors`. The exit code is 0 when every space succeeded, the shared
 code when every space failed the same way, and 8 otherwise.
 
-`--select PATH` prints only part of the result, with no script around it:
-`--select spaces.*.result.clean`, `--select moved.*.to.path,renamed`. A long command
-shows its progress as JSON lines on stderr with `--progress jsonl`, each with
-`elapsed_ms`. `| head` and the like are safe: confed stops quietly when the pipe closes.
+`--select PATH` prints only part of the result, so no `grep`, `jq` or script is needed
+to read one. **Always quote the path**: `*` and `[` are the shell's too, and zsh refuses
+an unquoted one with "no matches found" before confed starts.
+
+```bash
+confed instance status --select 'spaces.*.result.clean'       # one value per space
+confed instance status --select 'spaces[ok=false].space_key'  # only the elements that match
+confed instance mv … --dry-run --select 'moved.*.to.path,renamed'   # several paths at once
+```
+
+`*` is every element of a list, or every entry of an object (which keeps its keys);
+`[field=value]` keeps the elements whose field has that value (`!=` those that differ;
+`field` may be a path, `subject.name`). What is not there is `null`.
+
+A long command shows its progress as JSON lines on stderr with `--progress jsonl`, each
+with `elapsed_ms`. `| head` and the like are safe: confed stops quietly when the pipe
+closes. `confed commands --json` lists every command with its arguments and flags
+(`confed commands admin --json` for one group of them): never parse `--help` for it.
 
 ## Creating a space
 
@@ -402,6 +421,11 @@ registers it and lists it in this file. `--private` makes a space only you can s
 nothing. The result is `space` (`key`, `id`, `name`, `home_page_id`, `url`) and
 `cloned` (`dir`, `pages`).
 
+`--permissions-from SRC` also grants in the new space what every subject holds in SRC
+(see Administration below), `--map group:OLD=group:NEW` grants what OLD holds to NEW
+instead, and `--create-groups` makes a NEW that does not exist, with OLD's members. The
+result then has `permissions` (`copied`, `skipped`, `groups_created`).
+
 A refusal is in `errors`, with a `kind`:
 
 | `kind` | Exit | Meaning |
@@ -412,8 +436,86 @@ A refusal is in `errors`, with a `kind`:
 | `no_permission` | 7 | you lack the global permission to create spaces: ask an administrator |
 | `dir_not_empty` | 7 | `KEY/` exists here already |
 | `clone_failed` | 8 | the space **was created**; `confed instance clone KEY` finishes the clone |
+| `nothing_to_copy`, `unknown_group` | 6 | `--permissions-from`: a `--map` names nobody who holds anything in SRC, or a group that does not exist (add `--create-groups`); nothing was created |
 
 After `clone_failed`, never run `instance create` again for that key: the space exists.
+The same holds when the space was created and a permission could not be copied (exit 8,
+`permissions.copied[].ok` false): `confed admin perms copy --from SRC --to KEY`
+finishes it.
+
+## Administration
+
+Users, groups and space permissions are `confed admin …`. Run it here, at the root: it
+uses the instance's credential (never read `.confed-instance-session.db` for it, and no
+`-C` is needed). The account has to be an administrator: exit 3 means it is not.
+
+- Users and groups belong to the whole site: `admin user` and `admin group` name no space.
+- A `perms` command is about one space, named `KEY:` after the command or `--space KEY`.
+  Without one it exits 2 with `kind` `space_required`.
+- A subject is `group:NAME`, `user:NAME` ({user_named} here) or `anonymous`.
+  `subjects[].subject` in `perms list --compact` is written the same way, ready to
+  pass back.
+- Every write takes `--dry-run`, and every change reports what it came to, read back
+  from the server. Read the result; never list again, or `grep`, to check it.
+
+**Who can read a space**
+
+```bash
+confed admin perms list DOCS: --compact --json     # one entry per subject, all its operations
+confed admin perms list DOCS: --compact --select 'subjects[operations=space:read].subject'
+confed admin perms list DOCS: --subject group:NAME --compact --json   # what one subject holds
+confed admin group members NAME --json             # who is in a group that can
+confed admin group list --match TEXT --json        # groups, by a part of the name
+```
+
+**Copy a group**
+
+```bash
+confed admin group create NEW --members-from OLD --dry-run --json
+confed admin group create NEW --members-from OLD --json
+```
+
+The result has `members` (everybody in NEW now), `users` (those added) and
+`unknown_users`. If NEW exists (exit 4, `kind` `group_exists`), `confed admin group add
+NEW --members-from OLD` adds to it, and is safe to run again.
+
+**Copy a space's permissions**
+
+```bash
+confed admin perms copy --from SRC --to DST --dry-run --json
+confed admin perms copy --from SRC --to DST --json                  # every subject's
+confed admin perms copy --from SRC --to DST --subject group:OLD --as group:NEW --json
+```
+
+`copied` has one entry per subject: `from`, `subject` (who got them), `granted`,
+`already_granted` and `held` — everything the subject holds in DST afterwards. Nothing
+is revoked, and a second run grants nothing. `--as` grants one subject's permissions to
+another, which has to exist first.
+
+**A new space for a new team**, with its own group and another space's permissions:
+
+```bash
+confed instance create NEW --name "…" -y --json
+confed admin group create NEW_GROUP --members-from OLD_GROUP --json
+confed admin perms copy --from SRC --to NEW --subject group:OLD_GROUP --as group:NEW_GROUP --json
+```
+
+or all of it at once: `confed instance create NEW --name "…" --permissions-from SRC
+--map group:OLD_GROUP=group:NEW_GROUP --create-groups -y --json`.
+
+| Change | What its result says |
+|---|---|
+| `perms grant`, `perms revoke` | `held`: every operation the subject holds in the space now |
+| `group add`, `group remove` | `members`: everybody in the group now; `users`: those changed; `already_members` or `not_members`; `unknown_users` |
+| `perms copy` | `copied[]`: `granted`, `already_granted`, `held`; `skipped[]`: who nothing can be granted to, and why |
+
+| `kind` in `errors` | Exit | Meaning |
+|---|---|---|
+| `space_required` | 2 | a `perms` command with no space named |
+| `unknown_user` | 6 | the server knows nobody by that name; with several users named the others are still changed (exit 8) |
+| `unknown_group` | 6 | no such group to grant to: `confed admin group create` makes it |
+| `group_exists` | 4 | `group create` for a group that is there: `group add --members-from` adds to it |
+| `nothing_to_copy` | 6 | the `--subject` holds nothing in the source space |
 
 ## Moving pages between spaces
 
@@ -631,7 +733,10 @@ confed space create KEY --name "…" --dry-run --json   # a new space, and nothi
 Page arguments are paths relative to the current directory, like git's, page ids,
 or the page's URL as the browser shows it; a path that names nothing there is read
 from the workspace root. `--select PATH` prints only part of a `--json` result
-(`--select pages.*.path`), so no script is needed to read it.
+(`--select 'pages.*.path'`, `--select 'pages[state=modified].path'`), so no script is
+needed to read it. Always quote the path: `*` and `[` are the shell's too, and zsh
+refuses an unquoted one before confed starts. `confed commands --json` lists every
+command with its arguments and flags.
 
 `confed space create` makes a space on the server and does not clone it (`confed clone
 KEY` does). From an instance root, use `confed instance create`, which clones it too.
@@ -965,6 +1070,51 @@ mod tests {
             "no permission to create spaces",
         ] {
             assert!(workspace.contains(required), "workspace contract is missing: {required}");
+        }
+    }
+
+    #[test]
+    fn the_root_contract_covers_administration_from_the_root() {
+        let root = render_instance("https://wiki.corp", Flavor::DataCenter, &[]);
+        for required in [
+            "## Administration",
+            "confed admin group create NEW --members-from OLD --json",
+            "confed admin perms copy --from SRC --to DST --json",
+            "--subject group:OLD --as group:NEW",
+            "confed admin perms list DOCS: --compact --json",
+            "| `space_required` | 2 |",
+            "| `unknown_user` | 6 |",
+            "`user:NAME` (a username here)",
+            "confed commands --json",
+            "--permissions-from SRC",
+        ] {
+            assert!(root.contains(required), "root contract is missing: {required}");
+        }
+        let cloud = render_instance("https://example.atlassian.net/wiki", Flavor::Cloud, &[]);
+        assert!(cloud.contains("`user:NAME` (an account id here)"));
+    }
+
+    /// `*` and `[` are the shell's too: under zsh an unquoted
+    /// `--select spaces.*.result.clean` fails with "no matches found" before
+    /// confed runs, so no example may be written that way.
+    #[test]
+    fn every_select_example_is_quoted() {
+        let root = render_instance("https://wiki.corp", Flavor::DataCenter, &[]);
+        let workspace = render("https://wiki.corp", Flavor::DataCenter, "DOCS");
+        for (name, doc) in [("root", &root), ("workspace", &workspace)] {
+            let mut examples = 0;
+            for (at, _) in doc.match_indices("--select ") {
+                let path = &doc[at + "--select ".len()..];
+                // `--select PATH` is the flag being described, not an example.
+                if path.starts_with("PATH") {
+                    continue;
+                }
+                examples += 1;
+                let line = path.lines().next().unwrap_or_default();
+                assert!(path.starts_with('\''), "{name} contract: unquoted --select {line}");
+                assert!(line[1..].contains('\''), "{name} contract: unclosed quote in {line}");
+            }
+            assert!(examples >= 2, "{name} contract shows --select at work");
         }
     }
 

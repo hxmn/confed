@@ -2518,3 +2518,103 @@ async fn permissions_that_fail_after_the_create_say_so_and_perms_copy_finishes_t
     assert_eq!(granted, [0, 0, 0, 0, 1]);
     assert_eq!(confluence.world().writes.len(), writes + 1);
 }
+
+#[tokio::test]
+async fn doctor_fix_writes_the_administration_section_and_its_examples_run() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+
+    // A root whose contract was written by an older confed.
+    let path = root.path().join("CLAUDE.md");
+    std::fs::write(&path, "<!-- confed:agent-docs version=0.0.1 -->\n# confed instance root\n")
+        .unwrap();
+    let out = run(root.path(), &["instance", "doctor", "--fix", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let guide = read(root.path(), "CLAUDE.md");
+    assert!(guide.contains("## Administration"), "{guide}");
+    for task in ["**Who can read a space**", "**Copy a group**", "**Copy a space's permissions**"] {
+        assert!(guide.contains(task), "{task}");
+    }
+    assert!(guide.contains("--select 'spaces.*.result.clean'"), "quoted, for zsh");
+    assert!(!guide.contains("--select spaces"), "never unquoted");
+
+    // What it tells an agent to type works as written, here at the root.
+    let select = |args: &[&str]| -> Value {
+        let out = run(root.path(), args);
+        assert_eq!(code(&out), 0, "{args:?}: {}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    let readers = select(&[
+        "admin",
+        "perms",
+        "list",
+        "DOCS:",
+        "--compact",
+        "--select",
+        "subjects[operations=space:read].subject",
+    ]);
+    assert_eq!(readers, json!(["group:confluence-users", "group:docs-team", "anonymous"]));
+    assert_eq!(
+        select(&["instance", "status", "--select", "spaces[ok=false].space_key"]),
+        json!([])
+    );
+    let flags =
+        select(&["commands", "admin", "group", "create", "--select", "commands.0.flags.*.long"]);
+    assert_eq!(flags, json!(["--members-from", "--dry-run"]));
+}
+
+/// The task this was built for, as an agent now runs it: a new space, and a
+/// group with the members and the permissions of another space's group. Three
+/// calls at the root, no `-C`, and each result enough to confirm its change.
+#[tokio::test]
+async fn a_space_and_a_group_like_anothers_take_three_calls_that_confirm_themselves() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let call = |args: &[&str]| -> Value {
+        let out = run(root.path(), args);
+        assert_eq!(code(&out), 0, "{args:?}: {}", stderr(&out));
+        let command = if args[0] == "instance" { "instance" } else { "admin" };
+        let env = envelope(&out, command);
+        assert_eq!(env["errors"], json!([]), "{args:?}");
+        env["result"].clone()
+    };
+
+    let space = call(&["instance", "create", "NOTES", "--name", "Team Notes", "-y", "--json"]);
+    assert_eq!(space["space"]["key"], "NOTES");
+    assert_eq!(space["cloned"]["dir"], "NOTES");
+
+    let group =
+        call(&["admin", "group", "create", "notes-team", "--members-from", "docs-team", "--json"]);
+    assert_eq!(group["group"]["name"], "notes-team");
+    assert_eq!(usernames(&group["members"]), ["alice.ng", "bob.lee"]);
+    assert_eq!(group["unknown_users"], json!([]));
+
+    let perms = call(&[
+        "admin",
+        "perms",
+        "copy",
+        "--from",
+        "DOCS",
+        "--to",
+        "NOTES",
+        "--subject",
+        "group:docs-team",
+        "--as",
+        "group:notes-team",
+        "--json",
+    ]);
+    let held = json!(["space:read", "page:create", "comment:create"]);
+    assert_eq!(perms["copied"][0]["subject"], "group:notes-team");
+    assert_eq!(perms["copied"][0]["granted"], held);
+    assert_eq!(perms["copied"][0]["held"], held);
+
+    // The server agrees with what the three results said.
+    let world = confluence.world();
+    assert_eq!(world.groups["notes-team"], ["alice.ng", "bob.lee"]);
+    let granted: Vec<String> = world.grants["NOTES"]
+        .iter()
+        .filter(|(who, _, _)| who == "group/notes-team")
+        .map(|(_, target, key)| format!("{target}:{key}"))
+        .collect();
+    assert_eq!(json!(granted), held);
+}
