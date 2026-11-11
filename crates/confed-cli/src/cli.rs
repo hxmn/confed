@@ -1281,6 +1281,22 @@ pub struct InstanceCreateArgs {
     #[arg(long)]
     pub no_clone: bool,
 
+    /// Grant in the new space what every subject holds in this one, as
+    /// `confed admin perms copy` does. Nothing the new space grants by
+    /// default is taken away.
+    #[arg(long, value_name = "KEY")]
+    pub permissions_from: Option<String>,
+
+    /// With --permissions-from: grant what OLD holds there to NEW instead,
+    /// written `group:OLD=group:NEW`. Repeatable.
+    #[arg(long = "map", value_name = "OLD=NEW", requires = "permissions_from")]
+    pub map: Vec<String>,
+
+    /// With --map: create a group NEW names that does not exist yet, with
+    /// the members of the group OLD.
+    #[arg(long, requires = "map")]
+    pub create_groups: bool,
+
     /// Do not generate CLAUDE.md and AGENTS.md in the new workspace.
     #[arg(long)]
     pub no_agent_docs: bool,
@@ -1656,6 +1672,24 @@ mod tests {
             parse(&["--from", "DOCS", "--to", "ENG", "--as", "group:b"]).is_err(),
             "--as whom?"
         );
+    }
+
+    #[test]
+    fn a_new_space_can_take_another_spaces_permissions() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from([&["confed", "instance", "create", "NOTES"], args].concat())
+        };
+        let all = ["--permissions-from", "DOCS", "--map", "group:a=group:b", "--create-groups"];
+        match parse(&all).unwrap().command {
+            Command::Instance(InstanceCommand::Create(args)) => {
+                assert_eq!(args.permissions_from.as_deref(), Some("DOCS"));
+                assert_eq!(args.map, ["group:a=group:b"]);
+                assert!(args.create_groups);
+            }
+            other => panic!("expected instance create, got {other:?}"),
+        }
+        assert!(parse(&["--map", "group:a=group:b"]).is_err(), "from which space?");
+        assert!(parse(&["--permissions-from", "DOCS", "--create-groups"]).is_err());
     }
 
     #[test]

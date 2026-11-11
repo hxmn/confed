@@ -183,6 +183,46 @@
       }
     },
     "clone": { "type": ["object", "null"], "description": "`create`, when the clone failed: the space's entry as `instance clone` reports it." },
+    "permissions": {
+      "type": ["object", "null"],
+      "description": "`create --permissions-from`: what was granted in the new space, as `confed admin perms copy` reports it (admin.schema.json), and the groups made for it. Under `--dry-run`, what would be. Null when the copy could not run at all after the space was created: then `errors` has `kind: permissions_failed`. A subject that failed alone has `ok: false` in `copied` and its own entry in `errors`; either way the exit code is 8 and `confed admin perms copy --from SRC --to KEY` finishes it.",
+      "required": ["from", "to", "copied", "skipped", "groups_created"],
+      "properties": {
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "mode": { "type": "string", "enum": ["permissions", "transition", "roles"] },
+        "copied": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "subject", "ok", "granted", "already_granted"],
+            "properties": {
+              "from": { "type": "string" },
+              "subject": { "type": "string" },
+              "ok": { "type": "boolean" },
+              "granted": { "type": "array", "items": { "type": "string" } },
+              "already_granted": { "type": "array", "items": { "type": "string" } },
+              "held": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "skipped": { "type": "array", "items": { "type": "object", "required": ["subject", "reason"] } },
+        "groups_created": {
+          "type": "array",
+          "description": "The groups `--create-groups` made, each with the members of the group it was mapped from.",
+          "items": {
+            "type": "object",
+            "required": ["group"],
+            "properties": {
+              "group": { "type": "string" },
+              "members_from": { "type": ["string", "null"] },
+              "users": { "type": "array", "items": { "type": "string" } },
+              "members": { "type": "array", "items": { "type": "object" } }
+            }
+          }
+        }
+      }
+    },
     "cancelled": { "type": "boolean", "description": "`create`: the confirmation was declined; nothing was created." },
     "dry_run": { "type": "boolean" },
     "blocked": {

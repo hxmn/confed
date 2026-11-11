@@ -2393,3 +2393,128 @@ async fn every_grant_of_a_space_is_copied_and_one_that_fails_stops_no_other() {
     );
     assert_eq!(confluence.world().grants["ENG"].len(), 6);
 }
+
+#[tokio::test]
+async fn a_new_space_takes_another_spaces_permissions_in_the_same_command() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let create = |args: &[&str]| {
+        let base = ["instance", "create", "NOTES", "--name", "Team Notes", "--json"];
+        run(root.path(), &[&base[..], args].concat())
+    };
+    let mapped = ["--permissions-from", "DOCS", "--map", "group:docs-team=group:notes-team"];
+    let team = ["space:read", "page:create", "comment:create"];
+
+    // What the copy needs is checked before the space exists.
+    for (args, kind) in [
+        (&mapped[..], "unknown_group"),
+        (
+            &["--permissions-from", "DOCS", "--map", "group:docs-readers=group:docs-team"],
+            "nothing_to_copy",
+        ),
+    ] {
+        let out = create(&[args, &["-y"]].concat());
+        assert_eq!(code(&out), 6, "{args:?}: {}", stderr(&out));
+        assert_eq!(kinds(&envelope(&out, "instance")), [kind], "{args:?}");
+    }
+    assert_eq!(code(&create(&["--permissions-from", "NOSUCH", "-y"])), 6);
+    assert_eq!(code(&create(&["--permissions-from", "DOCS", "--map", "docs-team", "-y"])), 2);
+    assert!(confluence.world().created.is_empty());
+    assert!(confluence.world().writes.is_empty(), "{:?}", confluence.world().writes);
+
+    // A dry run: the group it would make, and what it would grant.
+    let out = create(&[&mapped[..], &["--create-groups", "--dry-run"]].concat());
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let plan = envelope(&out, "instance")["result"].clone();
+    assert_eq!(
+        plan["permissions"]["groups_created"],
+        json!([{ "group": "notes-team", "members_from": "docs-team", "users": ["alice.ng", "bob.lee"] }])
+    );
+    assert_eq!(plan["permissions"]["copied"][1]["subject"], "group:notes-team");
+    assert_eq!(plan["permissions"]["copied"][1]["granted"], json!(team));
+    let steps: Vec<&str> =
+        plan["planned"].as_array().unwrap().iter().map(|s| s.as_str().unwrap()).collect();
+    assert!(
+        steps.contains(&"create group notes-team with the 2 members of docs-team"),
+        "{steps:?}"
+    );
+    assert!(confluence.world().writes.is_empty(), "{:?}", confluence.world().writes);
+
+    // The whole task, in one command.
+    let out = create(&[&mapped[..], &["--create-groups", "-y"]].concat());
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let done = envelope(&out, "instance")["result"].clone();
+    assert_eq!(done["space"]["key"], "NOTES");
+    assert_eq!(done["cloned"]["dir"], "NOTES");
+    let permissions = &done["permissions"];
+    assert_eq!(
+        (permissions["from"].clone(), permissions["to"].clone()),
+        (json!("DOCS"), json!("NOTES"))
+    );
+    assert_eq!(permissions["groups_created"][0]["group"], "notes-team");
+    assert_eq!(usernames(&permissions["groups_created"][0]["members"]), ["alice.ng", "bob.lee"]);
+    assert_eq!(
+        permissions["copied"][1],
+        json!({ "from": "group:docs-team", "subject": "group:notes-team", "ok": true,
+                "granted": team, "already_granted": [], "held": team })
+    );
+    // What the new space grants by default is there already, and stays.
+    assert_eq!(permissions["copied"][0]["subject"], "group:confluence-users");
+    assert_eq!(permissions["copied"][0]["already_granted"], json!(["space:read"]));
+    let world = confluence.world();
+    assert_eq!(world.groups["notes-team"], ["alice.ng", "bob.lee"]);
+    assert_eq!(world.grants["NOTES"].len(), 6, "{:?}", world.grants["NOTES"]);
+    assert!(!world.grants["NOTES"].iter().any(|(who, _, _)| who == "group/docs-team"));
+}
+
+#[tokio::test]
+async fn permissions_that_fail_after_the_create_say_so_and_perms_copy_finishes_them() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    // A group that was deleted still holds a permission in the source.
+    confluence.world().grants.get_mut("DOCS").unwrap().push((
+        "group/gone-team".into(),
+        "page".into(),
+        "delete".into(),
+    ));
+
+    let out = run(
+        root.path(),
+        &[
+            "instance",
+            "create",
+            "NOTES",
+            "--name",
+            "Team Notes",
+            "--permissions-from",
+            "DOCS",
+            "-y",
+            "--json",
+        ],
+    );
+    assert_eq!(code(&out), 8, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(kinds(&env), ["unknown_group"]);
+    assert_eq!(env["result"]["space"]["key"], "NOTES", "the space was created");
+    assert_eq!(env["result"]["cloned"]["dir"], "NOTES", "and cloned");
+    let copied = env["result"]["permissions"]["copied"].as_array().unwrap();
+    assert_eq!(copied.iter().filter(|e| e["ok"] == true).count(), 4, "{copied:?}");
+    let warning =
+        env["warnings"].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect::<String>();
+    assert!(warning.contains("confed admin perms copy --from DOCS --to NOTES"), "{warning}");
+
+    // Finishing it grants nothing twice.
+    confluence.world().groups.insert("gone-team".into(), Vec::new());
+    let writes = confluence.world().writes.len();
+    let out =
+        run(root.path(), &["admin", "perms", "copy", "--from", "DOCS", "--to", "NOTES", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let granted: Vec<usize> = envelope(&out, "admin")["result"]["copied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["granted"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(granted, [0, 0, 0, 0, 1]);
+    assert_eq!(confluence.world().writes.len(), writes + 1);
+}

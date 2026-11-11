@@ -1203,6 +1203,29 @@ is null, and `errors` has `kind: clone_failed` (exit 8), saying the space exists
 `confed instance clone NOTES` then finishes the job: it clones a workspace that
 was made but never fetched again, rather than skipping it as already cloned.
 
+**With another space's permissions.** `--permissions-from SRC` then grants in the new
+space what every subject holds in SRC, as
+[`admin perms copy --from SRC --to NOTES`](#confed-admin) does, and nothing the new
+space grants by default is taken away. `--map group:OLD=group:NEW` (repeatable) grants
+what OLD holds to NEW instead, and `--create-groups` makes a NEW that does not exist
+yet, with the members of OLD — so a space for a new team is one command:
+
+```bash
+confed instance create NOTES --name "Team Notes" --permissions-from DOCS \
+  --map group:tech-writers=group:notes-team --create-groups -y --json
+```
+
+The result adds `permissions`: `copied`, one entry per subject as `perms copy` reports
+it (`from`, `subject`, `granted`, `already_granted`, `held`), `skipped`, and
+`groups_created` (`group`, `members_from`, `users`, `members`). All of it is checked
+before the space is created: an SRC that cannot be read, a `--map` whose OLD holds
+nothing in SRC (`kind: nothing_to_copy`) and a NEW that does not exist without
+`--create-groups` (`kind: unknown_group`) are exit 6 with nothing made, and `--dry-run`
+lists the groups it would make and what it would grant. A subject that fails after the
+create fails alone: the result still has the space and the rest, `errors` names it, the
+exit is 8, and `confed admin perms copy --from SRC --to NOTES` finishes the job without
+granting anything twice.
+
 ### confed instance add / remove
 
 `add KEY [DIR]` registers an existing workspace (default `DIR`: the key). `remove KEY`

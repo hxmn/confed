@@ -831,6 +831,175 @@ impl PermsCopy {
     }
 }
 
+/// What `instance create --permissions-from` asks for, checked while there is
+/// still nothing to undo: the source is readable, every `--map` names a
+/// subject that holds something there, and whoever it maps to exists or is a
+/// group that will be made.
+pub(crate) struct PermissionPlan {
+    from: String,
+    renames: Vec<(Subject, Subject)>,
+    /// Groups to make first: the name, the group whose members it gets, and
+    /// those members.
+    groups: Vec<(String, Option<String>, Vec<String>)>,
+    /// What the copy would grant in a space that grants nothing yet.
+    preview: PermsCopy,
+}
+
+impl PermissionPlan {
+    /// One sentence per change, for a dry run.
+    pub(crate) fn steps(&self) -> Vec<String> {
+        let groups = self.groups.iter().map(|(name, source, users)| match source {
+            Some(source) => format!(
+                "create group {name} with the {} of {source}",
+                crate::output::plural(users.len(), "member", "members")
+            ),
+            None => format!("create group {name}"),
+        });
+        groups.chain(self.preview.planned.iter().cloned()).collect()
+    }
+
+    /// What a dry run reports as `permissions`.
+    pub(crate) fn preview(&self) -> Value {
+        let mut result = json!({});
+        self.preview.report(&mut result);
+        result["groups_created"] = self
+            .groups
+            .iter()
+            .map(|(name, source, users)| {
+                json!({ "group": name, "members_from": source, "users": users })
+            })
+            .collect();
+        result
+    }
+
+    pub(crate) fn from(&self) -> &str {
+        &self.from
+    }
+}
+
+/// `group:OLD=group:NEW`.
+fn parse_map(text: &str) -> Result<(Subject, Subject)> {
+    let (old, new) = text.split_once('=').ok_or_else(|| {
+        ConfedError::usage_with_hint(
+            format!("--map `{text}` names nobody to grant to"),
+            "write it OLD=NEW, each a subject: --map group:tech-writers=group:notes-team",
+        )
+    })?;
+    Ok((parse_subject(old.trim())?, parse_subject(new.trim())?))
+}
+
+/// Check a copy of `from`'s permissions into `to`, a space that does not
+/// exist yet, and say what it would do.
+pub(crate) async fn plan_permissions(
+    client: &Arc<dyn ConfluenceClient>,
+    from: &str,
+    to: &str,
+    maps: &[String],
+    create_groups: bool,
+) -> Result<PermissionPlan> {
+    let from = space_target(from)?;
+    let renames = maps.iter().map(|m| parse_map(m)).collect::<Result<Vec<_>>>()?;
+    let request = CopyRequest {
+        from: &from,
+        to,
+        only: None,
+        renames: &renames,
+        dry_run: true,
+        read_destination: false,
+    };
+    let preview = copy_permissions(client, &request).await?;
+    let mut groups = Vec::new();
+    for (old, new) in &renames {
+        let old_arg = subject_arg_of(old);
+        let holds = |entry: &Value| {
+            entry["from"].as_str().is_some_and(|held| held.eq_ignore_ascii_case(&old_arg))
+        };
+        if !preview.copied.iter().any(holds) {
+            return Err(ConfedError::refused(
+                "nothing_to_copy",
+                ExitCode::NotFound,
+                format!("{old} holds nothing in {from}, so --map {old_arg}=… would grant nothing"),
+                Some(format!("`confed admin perms list {from}: --compact` lists who does")),
+            ));
+        }
+        match (subject_exists(client, new).await, new, old) {
+            (Ok(()), _, _) => {}
+            (Err(e), Subject::Group(name), _) if e.kind() == Some("unknown_group") => {
+                if !create_groups {
+                    return Err(ConfedError::refused(
+                        "unknown_group",
+                        ExitCode::NotFound,
+                        format!("no group {name}"),
+                        Some(format!(
+                            "--create-groups makes it, with the members of {old}; or create it \
+                             first with `confed admin group create {name}`"
+                        )),
+                    ));
+                }
+                let (source, users) = match old {
+                    Subject::Group(source) => {
+                        (Some(source.clone()), members_of(client, source, name).await?)
+                    }
+                    _ => (None, Vec::new()),
+                };
+                if !groups.iter().any(|(made, _, _)| made == name) {
+                    groups.push((name.clone(), source, users));
+                }
+            }
+            (Err(e), _, _) => return Err(e),
+        }
+    }
+    Ok(PermissionPlan { from, renames, groups, preview })
+}
+
+/// What [`apply_permissions`] did.
+pub(crate) struct PermissionsApplied {
+    /// `permissions` in the result: the copy, and the groups made for it.
+    pub result: Value,
+    pub human: String,
+    /// What failed, one error each; the rest went through.
+    pub failed: Vec<ConfedError>,
+}
+
+/// Make the groups a plan needs, then copy the permissions into `to`.
+pub(crate) async fn apply_permissions(
+    client: &Arc<dyn ConfluenceClient>,
+    plan: &PermissionPlan,
+    to: &str,
+) -> Result<PermissionsApplied> {
+    let mut human = String::new();
+    let mut failed = Vec::new();
+    let mut made = Vec::new();
+    for (name, source, users) in &plan.groups {
+        if let Err(e) = admin(client)?.create_group(name).await {
+            failed.push(e.into());
+            continue;
+        }
+        let changed = change_members(client, name, users, true, Some(Vec::new())).await?;
+        let mut entry = json!({ "group": name, "members_from": source });
+        changed.report(&mut entry, true);
+        let _ = writeln!(human, "Created group {name}.");
+        changed.describe(&mut human, name, true);
+        failed.extend(changed.failed.into_iter().map(|(_, e)| e));
+        made.push(entry);
+    }
+    let request = CopyRequest {
+        from: &plan.from,
+        to,
+        only: None,
+        renames: &plan.renames,
+        dry_run: false,
+        read_destination: true,
+    };
+    let mut copied = copy_permissions(client, &request).await?;
+    let mut result = json!({});
+    copied.report(&mut result);
+    result["groups_created"] = json!(made);
+    human.push_str(&copied.human);
+    failed.append(&mut copied.failed);
+    Ok(PermissionsApplied { result, human, failed })
+}
+
 /// Everything a space grants: its permissions, and on a site that assigns
 /// them its roles. Each is asked for only where the site's mode has it.
 async fn space_grants(
