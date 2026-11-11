@@ -18,7 +18,8 @@ same list from the binary itself.
   [`open`](#confed-open)
 - Maintenance: [`whoami`](#confed-whoami), [`config`](#confed-config),
   [`doctor`](#confed-doctor), [`export`](#confed-export),
-  [`version`](#confed-version), [`completion`](#confed-completion)
+  [`version`](#confed-version), [`commands`](#confed-commands),
+  [`completion`](#confed-completion)
 - Administration: [`space create`](#confed-space-create), [`admin`](#confed-admin) —
   users, groups, space permissions
 - Interactive: [`tui`](#confed-tui)
@@ -987,6 +988,27 @@ trusting them, then runs `confed doctor --fix` to regenerate them.
 
 An empty answer is not an error: `--since` the current version exits 0 with an empty
 `changelog` array and a warning on stderr.
+
+## confed commands
+
+Every command, with its arguments and flags. `--help` is one command at a time, written
+for a reader; this is all of them in one result, for a program, read off the definition
+of the binary that prints it. Needs neither a workspace nor credentials.
+
+```bash
+confed commands --json                     # the whole tree
+confed commands admin perms --json         # one command, and those below it
+confed commands admin                      # a usage line per command, for people
+confed commands admin perms copy --select 'commands.0.flags[required=true].long'
+```
+
+`result.commands` is a list of commands, each with `name`, `path` (`confed admin perms
+copy`), `about`, `aliases`, `args` (positional: `name`, `required`, `multiple`, `help`),
+`flags` (`long`, `short`, `value` — the name of the value it takes, null for a switch —
+`required`, `multiple`, `help`, and `values`, `default` and `env` where there are any)
+and `commands`, those below it. `result.global_flags` are the flags every command takes.
+A name that is no command is exit 2, and the hint lists those that are.
+[commands.schema.json](reference/json/commands.schema.json) describes it.
 
 ## confed completion
 

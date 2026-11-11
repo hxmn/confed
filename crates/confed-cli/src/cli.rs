@@ -205,6 +205,10 @@ pub enum Command {
     /// Generate a shell completion script.
     Completion(CompletionArgs),
 
+    /// Every command with its arguments and flags: the whole tree under
+    /// --json, or the commands below the one named.
+    Commands(CommandsArgs),
+
     /// Manage an instance root: one workspace per space of one Confluence,
     /// with a shared credential, commands that run across every space, and
     /// moves between spaces.
@@ -247,6 +251,7 @@ impl Command {
             Command::Tree(_) => "tree",
             Command::Version(_) => "version",
             Command::Completion(_) => "completion",
+            Command::Commands(_) => "commands",
             Command::Instance(_) => "instance",
             Command::Tui => "tui",
         }
@@ -1529,6 +1534,13 @@ pub struct InstanceSearchArgs {
 pub struct InstanceJournalArgs {
     /// The journal entry [default: the only unfinished one].
     pub id: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct CommandsArgs {
+    /// Only this command and those below it: `admin`, or `admin perms`.
+    #[arg(value_name = "COMMAND")]
+    pub path: Vec<String>,
 }
 
 #[derive(Args, Debug)]

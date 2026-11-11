@@ -335,6 +335,12 @@ conversion is stretch). JSON: `{ "exported": [{"path","out"}…] }`.
 Shell completions (bash/zsh/fish); version prints binary + JSON-schema + state-schema
 versions (`--json`).
 
+### `confed commands [command…]`
+
+The command tree with every argument and flag, read off the command-line definition.
+JSON: `{ "version", "global_flags": [flag…], "commands": [{"name","path","about",
+"args","flags","commands"}…] }`. No workspace, no network.
+
 ### `confed instance <subcommand>` (alias `i`)
 
 One workspace per space of one instance, under an instance root

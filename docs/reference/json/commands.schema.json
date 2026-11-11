@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/commands.schema.json",
+  "title": "confed commands result",
+  "description": "The `result` of `confed commands --json`: every command with its arguments and flags, read off the command-line definition of the binary that prints it. `confed commands admin perms` gives the one command named, with those below it.",
+  "type": "object",
+  "required": ["version", "global_flags", "commands"],
+  "properties": {
+    "version": { "type": "string", "description": "The binary's release." },
+    "global_flags": {
+      "type": "array",
+      "description": "The flags every command takes, before or after it.",
+      "items": { "$ref": "#/$defs/flag" }
+    },
+    "commands": {
+      "type": "array",
+      "description": "Every top-level command, or the one named on the command line.",
+      "items": { "$ref": "#/$defs/command" }
+    }
+  },
+  "$defs": {
+    "command": {
+      "type": "object",
+      "required": ["name", "path", "args", "flags", "commands"],
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string", "description": "How it is typed, from the binary: `confed admin perms copy`." },
+        "about": { "type": ["string", "null"] },
+        "aliases": { "type": "array", "items": { "type": "string" } },
+        "args": {
+          "type": "array",
+          "description": "Its positional arguments, in order.",
+          "items": {
+            "type": "object",
+            "required": ["name", "required", "multiple"],
+            "properties": {
+              "name": { "type": "string", "description": "As help shows it: `SUBJECT`, `KEY:`." },
+              "required": { "type": "boolean" },
+              "multiple": { "type": "boolean", "description": "Takes several values." },
+              "help": { "type": ["string", "null"] },
+              "values": { "type": "array", "items": { "type": "string" }, "description": "The only values it takes, when it takes only some." }
+            }
+          }
+        },
+        "flags": { "type": "array", "items": { "$ref": "#/$defs/flag" } },
+        "commands": {
+          "type": "array",
+          "description": "The commands below it; empty for one that runs something.",
+          "items": { "$ref": "#/$defs/command" }
+        }
+      }
+    },
+    "flag": {
+      "type": "object",
+      "required": ["long", "short", "value", "required", "multiple"],
+      "properties": {
+        "long": { "type": ["string", "null"], "description": "With its dashes: `--dry-run`." },
+        "short": { "type": ["string", "null"], "description": "With its dash: `-y`." },
+        "value": { "type": ["string", "null"], "description": "The name of the value it takes; null for a switch, which takes none." },
+        "required": { "type": "boolean", "description": "Whether the command refuses to run without it. A flag one of several of which is needed (`--op` or `--role`) is not marked." },
+        "multiple": { "type": "boolean", "description": "Can be repeated, or takes several values." },
+        "help": { "type": ["string", "null"] },
+        "values": { "type": "array", "items": { "type": "string" }, "description": "The only values it takes, when it takes only some." },
+        "default": { "type": "string" },
+        "env": { "type": "string", "description": "The environment variable that sets it." }
+      }
+    }
+  }
+}

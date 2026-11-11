@@ -879,6 +879,38 @@ async fn help_and_a_bare_invocation_behave_like_a_normal_cli() {
 }
 
 #[tokio::test]
+async fn the_command_tree_is_printed_for_a_program_with_no_workspace_and_no_network() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let output = run(confed(dir.path(), &["commands", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "commands");
+    let names: Vec<&str> = value["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    for name in ["pull", "push", "admin", "instance", "commands"] {
+        assert!(names.contains(&name), "{name} in {names:?}");
+    }
+
+    // One command, read with --select: no script, and no help text to parse.
+    let output = run(confed(
+        dir.path(),
+        &["commands", "admin", "perms", "copy", "--select", "commands.0.flags.*.long"],
+    ));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let flags: Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(flags, json!(["--from", "--to", "--subject", "--as", "--dry-run"]));
+
+    let output = run(confed(dir.path(), &["commands", "admin", "nosuch", "--json"]));
+    assert_eq!(exit_code(&output), 2);
+    let value = envelope(&output, "commands");
+    assert!(value["errors"][0]["hint"].as_str().unwrap().contains("perms"), "{value}");
+}
+
+#[tokio::test]
 async fn version_reports_the_compatibility_contract_and_the_release_notes() {
     // Deliberately not a workspace: an agent must be able to ask what confed is
     // before it has one.

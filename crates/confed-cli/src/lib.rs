@@ -128,6 +128,7 @@ fn run(cli: Cli, views: Views) -> Result<Output> {
     // These describe the binary itself: no config, no workspace, no network.
     match &command {
         Command::Completion(args) => return commands::completion::run(args),
+        Command::Commands(args) => return commands::command_tree::run(args),
         Command::Version(args) => return commands::version::run(args),
         _ => {}
     }
@@ -355,6 +356,7 @@ async fn dispatch(
         | Command::Resolve(_)
         | Command::Version(_)
         | Command::Completion(_)
+        | Command::Commands(_)
         | Command::Mkdocs(_)
         | Command::Tui => {
             unreachable!("handled before the runtime starts")

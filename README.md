@@ -161,7 +161,7 @@ keyring, or a `0600` file).
 
 | Sync | Authoring | Discussion | Explore | Workspace | Admin |
 |---|---|---|---|---|---|
-| `clone` · `fetch` · `pull` · `push` · `status` · `tree` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `completion` | `space create` · `admin user · group · perms` |
+| `clone` · `fetch` · `pull` · `push` · `status` · `tree` · `diff` · `resolve` | `new` · `mv` · `rm` · `attach` | `comment list · add · reply · resolve · edit · rm` · `user search` | `log` · `search` · `open` · `spaces` · `export` · `mkdocs` · `tui` | `init` · `config` · `doctor` · `whoami` · `version` · `commands` · `completion` | `space create` · `admin user · group · perms` |
 
 Every command, flag and exit code is in [docs/commands.md](https://github.com/hxmn/confed/blob/main/docs/commands.md).
 

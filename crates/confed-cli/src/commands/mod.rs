@@ -7,6 +7,7 @@ pub mod admin;
 pub use confed_core::agent_docs;
 pub mod attach;
 pub mod clone;
+pub mod command_tree;
 pub mod comment;
 pub mod completion;
 pub mod config;

@@ -66,6 +66,7 @@
             "tree",
             "version",
             "completion",
+            "commands",
             "instance",
             "tui"
           ]
