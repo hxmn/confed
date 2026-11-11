@@ -205,16 +205,61 @@ async fn group(ctx: &mut Context, action: &str, command: &AdminGroupCommand) -> 
                 human,
             ))
         }
-        AdminGroupCommand::Create { name, dry_run } => {
+        AdminGroupCommand::Create { name, members_from, dry_run } => {
+            // Whose members to copy is read first: a source that is not
+            // there stops the command before the group is made.
+            let copied = match members_from {
+                Some(source) => Some((source, members_of(&client, source, name).await?)),
+                None => None,
+            };
+            let exists = |name: &str| {
+                let rerun = match members_from {
+                    Some(source) => format!(
+                        "`confed admin group add {name} --members-from {source}` adds to it"
+                    ),
+                    None => format!("`confed admin group members {name}` lists who is in it"),
+                };
+                ConfedError::refused(
+                    "group_exists",
+                    ExitCode::Conflict,
+                    format!("group {name} already exists"),
+                    Some(rerun),
+                )
+            };
             if *dry_run {
-                return Ok(planned(action, vec![format!("create group {name}")]));
+                // A member listing answers only for a group that is there.
+                match admin(&client)?.group_members(name, Some(1)).await {
+                    Ok(_) => return Err(exists(name)),
+                    Err(confed_api::ApiError::NotFound(_)) => {}
+                    Err(e) => return Err(e.into()),
+                }
+                let mut steps = vec![format!("create group {name}")];
+                let users = copied.as_ref().map(|(_, users)| users.as_slice()).unwrap_or_default();
+                steps.extend(users.iter().map(|u| format!("add {u} to {name}")));
+                let mut output = planned(action, steps);
+                if let Some((source, users)) = &copied {
+                    output.result["members_from"] = json!(source);
+                    output.result["users"] = json!(users);
+                }
+                return Ok(output);
             }
-            let created = admin(&client)?.create_group(name).await?;
-            Ok(done(
-                action,
-                json!({ "group": group_json(&created) }),
-                format!("Created group {name}.\n"),
-            ))
+            let created = match admin(&client)?.create_group(name).await {
+                Ok(created) => created,
+                Err(confed_api::ApiError::Conflict(_)) => return Err(exists(name)),
+                Err(e) => return Err(e.into()),
+            };
+            let mut result =
+                json!({ "action": action, "dry_run": false, "group": group_json(&created) });
+            let mut human = format!("Created group {name}.\n");
+            let Some((source, users)) = copied else {
+                return Ok(Output::new(result, human));
+            };
+            // A new group has nobody in it: there is no need to ask.
+            let changed = change_members(&client, name, &users, true, Some(Vec::new())).await?;
+            result["members_from"] = json!(source);
+            changed.report(&mut result, true);
+            changed.describe(&mut human, name, true);
+            Ok(changed.finish(Output::new(result, human)))
         }
         AdminGroupCommand::Delete { name, dry_run } => {
             if *dry_run {
@@ -252,20 +297,32 @@ async fn group(ctx: &mut Context, action: &str, command: &AdminGroupCommand) -> 
                 human,
             ))
         }
-        AdminGroupCommand::Add { group, users, dry_run }
-        | AdminGroupCommand::Remove { group, users, dry_run } => {
-            let add = matches!(command, AdminGroupCommand::Add { .. });
-            let sentence = |u: &str| {
-                if add {
-                    format!("add {u} to {group}")
-                } else {
-                    format!("remove {u} from {group}")
-                }
-            };
-            if *dry_run {
-                return Ok(planned(action, users.iter().map(|u| sentence(u)).collect()));
+        AdminGroupCommand::Add { group, users, members_from, dry_run } => {
+            let mut users = users.clone();
+            if let Some(source) = members_from {
+                users.extend(members_of(&client, source, group).await?);
             }
-            membership(client, action, group, users, add).await
+            if *dry_run {
+                let steps = users.iter().map(|u| format!("add {u} to {group}")).collect();
+                let mut output = planned(action, steps);
+                if let Some(source) = members_from {
+                    output.result["members_from"] = json!(source);
+                    output.result["users"] = json!(users);
+                }
+                return Ok(output);
+            }
+            let mut output = membership(client, action, group, &users, true).await?;
+            if let Some(source) = members_from {
+                output.result["members_from"] = json!(source);
+            }
+            Ok(output)
+        }
+        AdminGroupCommand::Remove { group, users, dry_run } => {
+            if *dry_run {
+                let steps = users.iter().map(|u| format!("remove {u} from {group}")).collect();
+                return Ok(planned(action, steps));
+            }
+            membership(client, action, group, users, false).await
         }
     }
 }
@@ -307,6 +364,22 @@ fn unknown_user(user: &str) -> ConfedError {
                 .into(),
         ),
     )
+}
+
+/// Everybody in `source`, named as `group add` takes them, to be added to
+/// `target`.
+async fn members_of(
+    client: &Arc<dyn ConfluenceClient>,
+    source: &str,
+    target: &str,
+) -> Result<Vec<String>> {
+    if source == target {
+        return Err(ConfedError::usage(format!(
+            "--members-from {source} names the group itself: its members are in it already"
+        )));
+    }
+    let members = admin(client)?.group_members(source, None).await?;
+    Ok(members.iter().filter_map(user_arg).collect())
 }
 
 /// Add `users` to `group`, or remove them, one at a time, carrying on past a

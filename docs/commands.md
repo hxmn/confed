@@ -722,6 +722,7 @@ workspace's own.
 ```bash
 confed admin group create tech-writers
 confed admin group add tech-writers alice.ng bob.lee
+confed admin group create notes-team --members-from tech-writers   # a copy of a group
 confed admin perms grant group:tech-writers --op space:read,page:create,comment:create
 confed admin perms list --space DOCS
 confed admin perms list DOCS:                       # the same
@@ -736,8 +737,8 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
 | `user delete <USERNAME>` | Delete a user, following the server's background task. Asks first. |
 | `user groups <USER>` | The groups a user is in. |
 | `group list [--match TEXT] [--limit N]`, `group members <NAME>` | Every group, or those whose name contains TEXT in any letter case; who is in one. |
-| `group create <NAME>`, `group delete <NAME>` | Create or delete a group (deleting asks first; its members stay). |
-| `group add` / `group remove <NAME> <USER>…` | Change who is in a group, one user at a time: those that fail are listed in `errors` and make the exit 8, and the rest are still changed. |
+| `group create <NAME> [--members-from GROUP]`, `group delete <NAME>` | Create a group, empty or with everybody who is in another; delete one (deleting asks first; its members stay). |
+| `group add <NAME> [<USER>…] [--members-from GROUP]` / `group remove <NAME> <USER>…` | Change who is in a group, one user at a time: those that fail are listed in `errors` and make the exit 8, and the rest are still changed. |
 | `perms list [KEY:] [--subject S] [--compact]` | Every permission granted in the space and, on a Cloud site with roles, every role assigned. `--subject` keeps one subject's; `--compact` gives one entry per subject. |
 | `perms roles [KEY:]` | The roles a Cloud space can assign. |
 | `perms grant <SUBJECT> [KEY:] --op T:K…` | Grant operations, leaving the subject's others alone. |
@@ -755,6 +756,12 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
   do; and `unknown_users`, those the server knows nobody by — each also an entry in
   `errors` with `kind` `unknown_user`. With several users named, an unknown one stops
   none of the others (exit 8); named alone, it is the command's failure (exit 6).
+- **Copying a group.** `group create NEW --members-from OLD` reads who is in OLD, creates
+  NEW and adds them, and reports it as `group add` does (`users`, `members`, `errors`),
+  with `members_from`. A source that does not exist is exit 6 before NEW is made, and a
+  NEW that exists already is exit 4, `kind` `group_exists`: `group add NEW
+  --members-from OLD` adds to it, and is safe to run again. `--dry-run` reads OLD and
+  lists who would be added.
 - **Reading a listing.** `perms list --json` has one entry per permission in
   `permissions`, each with its `subject` (`type`, `id`, `name`, and a Data Center
   user's `username`). `--compact` gives `subjects` instead: one entry per subject with
@@ -796,7 +803,8 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
   changing, disabling or deleting one exits 9: that is done in admin.atlassian.com or
   through the Organization API. Groups and space access work.
 - **Exit codes.** 3: the credential is not an administrator's. 4: the user or group
-  already exists. 6: no such user, group, space or role.
+  already exists (a group: `kind` `group_exists`). 6: no such user (`unknown_user`),
+  group, space or role.
 
 The JSON `result` carries `action` (`group.create`, `perms.grant`…) and the fields of
 [admin.schema.json](reference/json/admin.schema.json).

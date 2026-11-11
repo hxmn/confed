@@ -816,9 +816,12 @@ pub enum AdminGroupCommand {
         #[arg(long)]
         limit: Option<usize>,
     },
-    /// Create a group.
+    /// Create a group, empty or with the members of another.
     Create {
         name: String,
+        /// Add everybody who is in this group to the new one.
+        #[arg(long, value_name = "GROUP")]
+        members_from: Option<String>,
         /// Say what would be done, and send nothing that changes the server.
         #[arg(long)]
         dry_run: bool,
@@ -839,8 +842,11 @@ pub enum AdminGroupCommand {
     /// Add users to a group: usernames on Data Center, account ids on Cloud.
     Add {
         group: String,
-        #[arg(required = true, num_args = 1..)]
+        #[arg(required_unless_present = "members_from", num_args = 1..)]
         users: Vec<String>,
+        /// Add everybody who is in this group, too.
+        #[arg(long, value_name = "GROUP")]
+        members_from: Option<String>,
         /// Say what would be done, and send nothing that changes the server.
         #[arg(long)]
         dry_run: bool,
@@ -1601,6 +1607,17 @@ mod tests {
         }
         let grant = ["confed", "admin", "perms", "grant", "group:writers", "DOCS:", "--op", "a:b"];
         assert!(Cli::try_parse_from(grant).is_ok());
+    }
+
+    #[test]
+    fn a_group_takes_users_or_another_groups_members() {
+        let parse =
+            |args: &[&str]| Cli::try_parse_from([&["confed", "admin", "group"], args].concat());
+        assert!(parse(&["create", "writers", "--members-from", "editors", "--dry-run"]).is_ok());
+        assert!(parse(&["add", "writers", "--members-from", "editors"]).is_ok());
+        assert!(parse(&["add", "writers", "alice.ng", "--members-from", "editors"]).is_ok());
+        assert!(parse(&["add", "writers"]).is_err(), "somebody to add");
+        assert!(parse(&["remove", "writers"]).is_err());
     }
 
     #[test]

@@ -36,6 +36,10 @@
       "items": { "$ref": "#/$defs/user" },
       "description": "`group.members`: who is in the group. `group.add`, `group.remove`: who is in it after the change, read back from the server."
     },
+    "members_from": {
+      "type": "string",
+      "description": "`group.create`, `group.add` with `--members-from`: the group whose members were copied."
+    },
     "already_members": {
       "type": "array",
       "items": { "type": "string" },
@@ -54,7 +58,7 @@
     "users": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "`group.add`, `group.remove`: the users changed. Those that failed are in the envelope's `errors`, and make the exit 8."
+      "description": "`group.add`, `group.remove`, and `group.create --members-from`: the users changed — under `--dry-run` with `--members-from`, those that would be. Those that failed are in the envelope's `errors`, and make the exit 8."
     },
     "space": { "type": "string" },
     "mode": {

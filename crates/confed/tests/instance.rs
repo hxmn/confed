@@ -2181,3 +2181,57 @@ async fn a_change_reports_what_it_came_to() {
     assert_eq!(code(&out), 6, "{}", stderr(&out));
     assert_eq!(confluence.world().writes.len(), writes);
 }
+
+#[tokio::test]
+async fn a_group_is_created_with_the_members_of_another() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let admin =
+        |args: &[&str]| run(root.path(), &[&["admin", "group"], args, &["--json"]].concat());
+
+    // A dry run reads who would be added and sends nothing.
+    let out = admin(&["create", "notes-team", "--members-from", "docs-team", "--dry-run"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let plan = envelope(&out, "admin")["result"].clone();
+    assert_eq!(plan["dry_run"], true);
+    assert_eq!(plan["users"], json!(["alice.ng", "bob.lee"]));
+    assert_eq!(plan["planned"].as_array().unwrap().len(), 3, "{plan}");
+    assert!(!confluence.world().groups.contains_key("notes-team"));
+    assert!(confluence.world().writes.is_empty(), "{:?}", confluence.world().writes);
+
+    let out = admin(&["create", "notes-team", "--members-from", "docs-team"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let made = envelope(&out, "admin")["result"].clone();
+    assert_eq!(made["action"], "group.create");
+    assert_eq!(made["group"]["name"], "notes-team");
+    assert_eq!(made["members_from"], "docs-team");
+    assert_eq!(made["users"], json!(["alice.ng", "bob.lee"]));
+    assert_eq!(usernames(&made["members"]), ["alice.ng", "bob.lee"], "read back from the server");
+    assert_eq!(confluence.world().groups["notes-team"], ["alice.ng", "bob.lee"]);
+
+    // A source that is not there stops it before the group is made, and a
+    // group that is there already says how to add to it instead.
+    let out = admin(&["create", "other-team", "--members-from", "nosuch"]);
+    assert_eq!(code(&out), 6, "{}", stderr(&out));
+    assert!(!confluence.world().groups.contains_key("other-team"));
+    for dry in [&[][..], &["--dry-run"]] {
+        let out =
+            admin(&[&["create", "notes-team", "--members-from", "docs-readers"], dry].concat());
+        assert_eq!(code(&out), 4, "{dry:?}: {}", stderr(&out));
+        let env = envelope(&out, "admin");
+        assert_eq!(kinds(&env), ["group_exists"]);
+        assert!(env["errors"][0]["hint"].as_str().unwrap().contains("group add notes-team"));
+    }
+    let out = admin(&["add", "notes-team", "--members-from", "docs-readers"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let added = envelope(&out, "admin")["result"].clone();
+    assert_eq!(added["users"], json!(["carol"]));
+    assert_eq!(usernames(&added["members"]), ["alice.ng", "bob.lee", "carol"]);
+
+    // Run again, it has nothing left to do and says so.
+    let out = admin(&["add", "notes-team", "--members-from", "docs-team"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let again = envelope(&out, "admin")["result"].clone();
+    assert_eq!(again["users"], json!([]));
+    assert_eq!(again["already_members"], json!(["alice.ng", "bob.lee"]));
+}
