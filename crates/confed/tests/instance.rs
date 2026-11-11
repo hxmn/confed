@@ -63,6 +63,13 @@ struct World {
     no_create_permission: bool,
     /// Spaces created through the REST API, private ones marked.
     created: Vec<(String, bool)>,
+    /// People by username: their user key and display name.
+    users: BTreeMap<String, (String, String)>,
+    /// Groups, and the usernames in each.
+    groups: BTreeMap<String, Vec<String>>,
+    /// What each space grants: who (`group/NAME`, `user/KEY` or `anonymous`,
+    /// as the permission routes name them), then the operation's target and key.
+    grants: BTreeMap<String, Vec<(String, String, String)>>,
 }
 
 /// Confluence's check against forged form submissions.
@@ -145,6 +152,34 @@ impl Confluence {
         );
         page("3001", "Operations", "OPS", None, "<p>Ops.</p>");
         page("4001", "Alice Ng", PERSONAL, None, "<p>Notes.</p>");
+        for (username, key, name) in [
+            ("alice.ng", "ff80a1", "Alice Ng"),
+            ("bob.lee", "ff80b2", "Bob Lee"),
+            ("carol", "ff80c3", "Carol"),
+        ] {
+            world.users.insert(username.into(), (key.into(), name.into()));
+        }
+        let names = |users: &[&str]| users.iter().map(|u| u.to_string()).collect::<Vec<_>>();
+        world.groups.insert("confluence-users".into(), names(&["alice.ng", "bob.lee", "carol"]));
+        world.groups.insert("docs-team".into(), names(&["alice.ng", "bob.lee"]));
+        world.groups.insert("docs-readers".into(), names(&["carol"]));
+        let grant = |who: &str, op: &str| {
+            let (target, key) = op.split_once(':').unwrap();
+            (who.to_string(), target.to_string(), key.to_string())
+        };
+        world.grants.insert(
+            "DOCS".into(),
+            vec![
+                grant("group/confluence-users", "space:read"),
+                grant("group/docs-team", "space:read"),
+                grant("group/docs-team", "page:create"),
+                grant("group/docs-team", "comment:create"),
+                grant("user/ff80a1", "space:administer"),
+                grant("anonymous", "space:read"),
+            ],
+        );
+        world.grants.insert("ENG".into(), vec![grant("group/confluence-users", "space:read")]);
+        world.grants.insert("OPS".into(), vec![grant("group/confluence-users", "space:read")]);
         Self(Arc::new(Mutex::new(world)))
     }
 
@@ -208,6 +243,11 @@ impl World {
         })
     }
 
+    fn user(&self, username: &str) -> Value {
+        let (key, name) = &self.users[username];
+        json!({ "type": "known", "username": username, "userKey": key, "displayName": name })
+    }
+
     fn subtree(&self, root: &str) -> Vec<String> {
         let mut out = vec![root.to_string()];
         let mut i = 0;
@@ -259,12 +299,99 @@ impl Respond for Confluence {
                 "type": "known", "username": "tester", "userKey": "ff8081",
                 "displayName": "Test User", "email": "tester@example.com",
             })),
-            ("GET", ["rest", "api", "user"]) => match query.get("key").map(String::as_str) {
-                Some(key) if PERSONAL.ends_with(key) => ok(json!({
-                    "type": "known", "username": "alice", "userKey": key, "displayName": "Alice Ng",
-                })),
-                _ => error(404, "No user found"),
+            ("GET", ["rest", "api", "user"]) => {
+                let by_key = query.get("key").and_then(|key| {
+                    world.users.iter().find(|(_, (k, _))| k == key).map(|(name, _)| name.clone())
+                });
+                let by_name = query.get("username").filter(|u| world.users.contains_key(*u));
+                match (by_key.as_ref().or(by_name), query.get("key").map(String::as_str)) {
+                    (Some(username), _) => ok(world.user(username)),
+                    (None, Some(key)) if PERSONAL.ends_with(key) => ok(json!({
+                        "type": "known", "username": "alice", "userKey": key, "displayName": "Alice Ng",
+                    })),
+                    _ => error(404, "No user found"),
+                }
+            }
+            ("GET", ["rest", "api", "group"]) => ok(listing(
+                world.groups.keys().map(|g| json!({ "type": "group", "name": g })).collect(),
+            )),
+            ("GET", ["rest", "api", "group", group]) => match world.groups.contains_key(*group) {
+                true => ok(json!({ "type": "group", "name": group })),
+                false => error(404, &format!("No group with name : {group}")),
             },
+            // As a server does: a group that does not exist has no members.
+            ("GET", ["rest", "api", "group", group, "member"]) => ok(listing(
+                world.groups.get(*group).into_iter().flatten().map(|u| world.user(u)).collect(),
+            )),
+            ("POST", ["rest", "api", "admin", "group"]) => {
+                let name = sent["name"].as_str().unwrap_or_default().to_string();
+                if world.groups.contains_key(&name) {
+                    return error(409, &format!("Group {name} already exists"));
+                }
+                world.groups.insert(name.clone(), Vec::new());
+                ok(json!({ "type": "group", "name": name }))
+            }
+            ("PUT" | "DELETE", ["rest", "api", "user", username, "group", group]) => {
+                if !world.users.contains_key(*username) {
+                    return error(404, &format!("No user found with username : {username}"));
+                }
+                let Some(members) = world.groups.get_mut(*group) else {
+                    return error(404, &format!("No group with name : {group}"));
+                };
+                members.retain(|m| m != username);
+                if method == "PUT" {
+                    members.push(username.to_string());
+                }
+                ResponseTemplate::new(204)
+            }
+            ("GET", ["rest", "api", "space", key, "permissions"]) => {
+                let Some(grants) = world.grants.get(*key) else {
+                    return error(404, &format!("No space with key : {key}"));
+                };
+                // As a 9.1 server lists them: a user by userkey alone.
+                let subject = |who: &str| match who.split_once('/') {
+                    Some(("group", name)) => json!({ "type": "group", "name": name }),
+                    Some((_, user_key)) => json!({ "type": "user", "userKey": user_key }),
+                    None => Value::Null,
+                };
+                ok(json!(grants
+                    .iter()
+                    .map(|(who, target, op)| {
+                        let mut entry =
+                            json!({ "operation": { "targetType": target, "operationKey": op } });
+                        if who != "anonymous" {
+                            entry["subject"] = subject(who);
+                        }
+                        entry
+                    })
+                    .collect::<Vec<_>>()))
+            }
+            ("PUT", ["rest", "api", "space", key, "permissions", who @ .., change]) => {
+                let who = who.join("/");
+                let known = match who.split_once('/') {
+                    Some(("group", name)) => world.groups.contains_key(name),
+                    Some((_, user_key)) => world.users.values().any(|(k, _)| k == user_key),
+                    None => who == "anonymous",
+                };
+                if !known {
+                    return error(404, &format!("No subject {who}"));
+                }
+                let Some(grants) = world.grants.get_mut(*key) else {
+                    return error(404, &format!("No space with key : {key}"));
+                };
+                for op in sent.as_array().into_iter().flatten() {
+                    let entry = (
+                        who.clone(),
+                        op["targetType"].as_str().unwrap_or_default().to_string(),
+                        op["operationKey"].as_str().unwrap_or_default().to_string(),
+                    );
+                    grants.retain(|g| *g != entry);
+                    if *change == "grant" {
+                        grants.push(entry);
+                    }
+                }
+                ok(json!({}))
+            }
             ("GET", ["rest", "api", "space"]) => {
                 let archived = query.get("status").map(String::as_str) == Some("archived");
                 let listed = |k: &String| world.archived.contains(k) == archived;
@@ -320,6 +447,11 @@ impl Respond for Confluence {
                     },
                 );
                 world.created.push((key.clone(), segments.len() == 4));
+                // What the site gives every new space.
+                world.grants.insert(
+                    key.clone(),
+                    vec![("group/confluence-users".into(), "space".into(), "read".into())],
+                );
                 // The answer names the home page only as a link to it.
                 ok(json!({ "id": numeric, "key": key, "name": name, "type": "global",
                            "status": "current", "_expandable": { "homepage": "/rest/api/content/x" } }))
@@ -1776,4 +1908,79 @@ async fn space_create_only_creates_the_space() {
         run(dir.path(), &[&["space", "create", "SOLO", "--name", "Solo"][..], &flags].concat());
     assert_eq!(code(&out), 7);
     assert_eq!(kinds(&envelope(&out, "space")), ["key_taken"]);
+}
+
+// --------------------------------------------------------- administration ---
+
+#[tokio::test]
+async fn admin_runs_at_the_root_with_the_shared_credential() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+
+    let out = run(root.path(), &["admin", "group", "members", "docs-team", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let value = envelope(&out, "admin");
+    assert_eq!(value["result"]["members"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn admin_at_a_root_without_a_shared_credential_uses_a_workspaces_own() {
+    let (server, _) = server().await;
+    let root = tempfile::tempdir().unwrap();
+    clone_alone(root.path(), &server, "DOCS");
+    let out = run(root.path(), &["instance", "adopt", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(!root.path().join(".confed-instance-session.db").exists());
+
+    let out = run(root.path(), &["admin", "group", "members", "docs-team", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(envelope(&out, "admin")["result"]["members"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn perms_at_the_root_take_the_space_as_a_flag_or_a_target_and_say_when_none_is_named() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+
+    for args in [
+        &["admin", "perms", "list", "--space", "DOCS", "--json"][..],
+        &["admin", "perms", "list", "DOCS:", "--json"],
+    ] {
+        let out = run(root.path(), args);
+        assert_eq!(code(&out), 0, "{args:?}: {}", stderr(&out));
+        let value = envelope(&out, "admin");
+        assert_eq!(value["result"]["space"], "DOCS", "{args:?}");
+        assert_eq!(value["result"]["permissions"].as_array().unwrap().len(), 6, "{args:?}");
+    }
+
+    // A space that is not cloned here is a space all the same.
+    let out = run(root.path(), &["admin", "perms", "list", "OPS:", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert_eq!(envelope(&out, "admin")["result"]["permissions"].as_array().unwrap().len(), 1);
+    let out = run(root.path(), &["admin", "perms", "list", "NOSUCH:", "--json"]);
+    assert_eq!(code(&out), 6, "{}", stderr(&out));
+
+    // No space named: said as such, before the server is asked anything.
+    let before = server.received_requests().await.unwrap().len();
+    for args in [
+        &["admin", "perms", "list", "--json"][..],
+        &["admin", "perms", "grant", "group:docs-team", "--op", "space:read", "--json"],
+    ] {
+        let out = run(root.path(), args);
+        assert_eq!(code(&out), 2, "{args:?}: {}", stderr(&out));
+        let value = envelope(&out, "admin");
+        assert_eq!(value["errors"][0]["kind"], "space_required", "{args:?}");
+        assert!(value["errors"][0]["hint"].as_str().unwrap().contains("DOCS, ENG"), "{value}");
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
+
+    // The subject and the space, in either order.
+    for args in [
+        &["admin", "perms", "grant", "group:docs-readers", "ENG:", "--op", "space:read"][..],
+        &["admin", "perms", "grant", "ENG:", "group:docs-readers", "--op", "comment:create"],
+    ] {
+        let out = run(root.path(), &[args, &["--json"]].concat());
+        assert_eq!(code(&out), 0, "{args:?}: {}", stderr(&out));
+        assert_eq!(envelope(&out, "admin")["result"]["space"], "ENG");
+    }
 }

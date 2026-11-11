@@ -703,13 +703,16 @@ Administer the instance: users, groups, and who may do what in a space. It needs
 administrator's credential (on Data Center the Confluence Administrator permission, on
 Cloud a site admin; space permissions need the space's admin permission) and no
 workspace — a base URL and a token are enough, from flags, the environment, or the
-workspace or instance root you run it in.
+workspace or instance root you run it in. At an instance root the credential is the
+instance's, found as `confed instance` finds it: the root's shared one, else the first
+workspace's own.
 
 ```bash
 confed admin group create tech-writers
 confed admin group add tech-writers alice.ng bob.lee
 confed admin perms grant group:tech-writers --op space:read,page:create,comment:create
 confed admin perms list --space DOCS
+confed admin perms list DOCS:                       # the same
 confed admin user create carol --full-name "Carol Diaz" --email carol@example.com --notify
 ```
 
@@ -723,15 +726,20 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
 | `group list [--limit N]`, `group members <NAME>` | Every group; who is in one. |
 | `group create <NAME>`, `group delete <NAME>` | Create or delete a group (deleting asks first; its members stay). |
 | `group add` / `group remove <NAME> <USER>…` | Change who is in a group, one user at a time: those that fail are listed in `errors` and make the exit 8. |
-| `perms list` | Every permission granted in the space and, on a Cloud site with roles, every role assigned. |
-| `perms roles` | The roles a Cloud space can assign. |
-| `perms grant <SUBJECT> --op T:K…` | Grant operations, leaving the subject's others alone. |
-| `perms grant <SUBJECT> --role R` | Assign a role, by name or id (Cloud sites with roles). |
-| `perms revoke <SUBJECT> --op T:K…` / `--role` | Revoke operations, or take the subject's role away. Asks first. |
+| `perms list [KEY:]` | Every permission granted in the space and, on a Cloud site with roles, every role assigned. |
+| `perms roles [KEY:]` | The roles a Cloud space can assign. |
+| `perms grant <SUBJECT> [KEY:] --op T:K…` | Grant operations, leaving the subject's others alone. |
+| `perms grant <SUBJECT> [KEY:] --role R` | Assign a role, by name or id (Cloud sites with roles). |
+| `perms revoke <SUBJECT> [KEY:] --op T:K…` / `--role` | Revoke operations, or take the subject's role away. Asks first. |
 
 - **People and groups.** A user is a username on Data Center and an account id on Cloud
   — `confed user search` prints both. A `perms` subject is `group:NAME`, `user:NAME` or
-  `anonymous`. The space is `--space`, else the workspace's.
+  `anonymous`.
+- **The space** of a `perms` command is a `KEY:` argument (or a space URL) beside the
+  subject, else `--space KEY`, else the workspace's. Users and groups belong to the
+  whole site and take none. Where none is named and there is no workspace to take it
+  from — at an instance root, say — `perms` exits 2 with `errors[].kind`
+  `space_required`, before asking the server anything.
 - **Operations** are `target:key`, repeated or comma-separated, and checked before
   anything is sent (exit 2 with the valid list):
 

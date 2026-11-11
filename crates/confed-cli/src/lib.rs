@@ -216,6 +216,10 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
             prepared_instance = Some(commands::instance::prepare(&mut ctx, cmd)?);
             None
         }
+        Command::Admin(_) => {
+            commands::admin::prepare(&mut ctx)?;
+            None
+        }
         _ => {
             // A credential is read only by a command that will use one. Any
             // other loads it itself, should it turn out to need the server.

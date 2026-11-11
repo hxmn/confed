@@ -4,18 +4,42 @@
 //! operations, the site's role mode, the role named) and then says what it
 //! would do without doing it. Deleting a user or a group and revoking ask first
 //! on a terminal, as `comment rm` does.
+//!
+//! No workspace is needed. At an instance root the credential is the
+//! instance's, read as `confed instance` reads it; users and groups belong to
+//! the whole site, and a `perms` command names its space with `KEY:` or
+//! `--space`.
 
 use crate::cli::{AdminCommand, AdminGroupCommand, AdminPermsCommand, AdminUserCommand};
 use crate::context::Context;
 use crate::output::{ErrorEntry, Output};
+use crate::pageref::{self, UrlRef};
 use confed_api::{
     AdminClient, ConfluenceClient, Group, NewUser, Principal, RoleMode, Secret, SpaceOperation,
     Subject, User, UserUpdate,
 };
+use confed_core::config;
 use confed_core::error::{ConfedError, ExitCode, Result};
 use serde_json::{json, Value};
 use std::fmt::Write;
 use std::sync::Arc;
+
+/// The synchronous half: read the credential before the runtime starts.
+///
+/// At an instance root there is no workspace to read one from, so it is the
+/// instance's, found as `confed instance` finds it: the root's shared one, else
+/// the first workspace's own. A base URL given by flag or environment names
+/// another server, and takes the ordinary path.
+pub fn prepare(ctx: &mut Context) -> Result<()> {
+    let elsewhere = ctx.resolver.lookup(&config::BASE_URL, ctx.global.base_url.as_deref());
+    if !ctx.has_workspace() && ctx.instance_root().is_some() && elsewhere.is_none() {
+        let connection = super::instance::connection(ctx, &ctx.instance()?)?;
+        let client = connection.client(ctx)?;
+        ctx.set_client(client);
+        return Ok(());
+    }
+    ctx.preload_credentials()
+}
 
 pub async fn run(ctx: &mut Context, command: &AdminCommand) -> Result<Output> {
     let action = command.action();
@@ -285,11 +309,20 @@ async fn membership(
 // ----------------------------------------------------------- permissions ---
 
 async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> Result<Output> {
-    let space = ctx.space_key()?.value;
+    let (subject, target) = match command {
+        AdminPermsCommand::List { target } | AdminPermsCommand::Roles { target } => {
+            ("", target.as_deref())
+        }
+        AdminPermsCommand::Grant { subject, target, .. }
+        | AdminPermsCommand::Revoke { subject, target, .. } => {
+            subject_and_space(subject, target.as_deref())
+        }
+    };
+    let space = perms_space(ctx, target)?;
     let client = ctx.build_client()?;
     let mode = admin(&client)?.space_role_mode().await?;
     match command {
-        AdminPermsCommand::List => {
+        AdminPermsCommand::List { .. } => {
             let permissions = if mode.grants_permissions() {
                 admin(&client)?.space_permissions(&space).await?
             } else {
@@ -343,7 +376,7 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
                 human,
             ))
         }
-        AdminPermsCommand::Roles => {
+        AdminPermsCommand::Roles { .. } => {
             require_roles(mode, "list space roles")?;
             let roles = admin(&client)?.space_roles(&space).await?;
             let mut human = String::new();
@@ -362,7 +395,7 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
                 human,
             ))
         }
-        AdminPermsCommand::Grant { subject, ops, role, dry_run } => {
+        AdminPermsCommand::Grant { ops, role, dry_run, .. } => {
             let who = parse_subject(subject)?;
             if let Some(role) = role {
                 require_roles(mode, "assign a space role")?;
@@ -407,7 +440,7 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
                 format!("Granted {who} {listed} in {space}.\n"),
             ))
         }
-        AdminPermsCommand::Revoke { subject, ops, role, dry_run } => {
+        AdminPermsCommand::Revoke { ops, role, dry_run, .. } => {
             let who = parse_subject(subject)?;
             if *role {
                 require_roles(mode, "take a space role away")?;
@@ -443,7 +476,69 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
     }
 }
 
-/// `group:NAME`, `user:NAME` or `anonymous`.
+/// The space a `perms` command is about: its `KEY:` target, else `--space`
+/// (or `CONFED_SPACE`), else the workspace's. Nothing is guessed: at an
+/// instance root, with every space to choose from, one must be named.
+fn perms_space(ctx: &Context, target: Option<&str>) -> Result<String> {
+    if let Some(target) = target {
+        return space_target(target);
+    }
+    if let Some(found) = ctx.resolver.lookup(&config::SPACE, ctx.global.space_flag()) {
+        return Ok(found.value);
+    }
+    if ctx.is_interactive() {
+        return Ok(ctx.space_key()?.value);
+    }
+    let registered: Vec<String> = ctx
+        .instance()
+        .and_then(|i| i.enabled_members())
+        .map(|members| members.into_iter().map(|m| m.space_key).collect())
+        .unwrap_or_default();
+    let mut hint = "name the space: `KEY:` after the command, or --space KEY".to_string();
+    if !registered.is_empty() {
+        let _ = write!(hint, " (registered here: {})", registered.join(", "));
+    }
+    Err(ConfedError::refused(
+        "space_required",
+        ExitCode::Usage,
+        "this command is about one space, and none was named",
+        Some(hint),
+    ))
+}
+
+/// `DOCS:`, `DOCS` or a space URL → `DOCS`.
+fn space_target(text: &str) -> Result<String> {
+    let no_space = || {
+        ConfedError::usage_with_hint(
+            format!("`{text}` names no space"),
+            "write the space as `KEY:` (DOCS:), or pass --space KEY",
+        )
+    };
+    if pageref::is_url(text) {
+        return match pageref::parse(text).map(|parsed| parsed.target) {
+            Some(UrlRef::Space { space }) => Ok(space),
+            _ => Err(no_space()),
+        };
+    }
+    let key = text.strip_suffix(':').unwrap_or(text).trim();
+    if key.is_empty() || key.contains([':', '/', ' ']) {
+        return Err(no_space());
+    }
+    Ok(key.to_string())
+}
+
+/// `grant` and `revoke` take the subject and, optionally, the space as `KEY:`.
+/// Written the other way round they mean the same: only one of the two can
+/// name somebody.
+fn subject_and_space<'a>(subject: &'a str, target: Option<&'a str>) -> (&'a str, Option<&'a str>) {
+    match target {
+        Some(other) if parse_subject(subject).is_err() && parse_subject(other).is_ok() => {
+            (other, Some(subject))
+        }
+        _ => (subject, target),
+    }
+}
+
 /// The administration half of `client`, or why it has none.
 fn admin(client: &Arc<dyn ConfluenceClient>) -> Result<&dyn AdminClient> {
     client.admin().ok_or_else(|| {
@@ -451,6 +546,7 @@ fn admin(client: &Arc<dyn ConfluenceClient>) -> Result<&dyn AdminClient> {
     })
 }
 
+/// `group:NAME`, `user:NAME` or `anonymous`.
 fn parse_subject(text: &str) -> Result<Subject> {
     let hint =
         "name it group:NAME, user:NAME (username on Data Center, account id on Cloud) or anonymous";
@@ -589,5 +685,35 @@ fn capitalize(word: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_space_is_named_by_key_or_url() {
+        assert_eq!(space_target("DOCS:").unwrap(), "DOCS");
+        assert_eq!(space_target("DOCS").unwrap(), "DOCS");
+        assert_eq!(space_target("~alice:").unwrap(), "~alice");
+        assert_eq!(space_target("https://wiki.example.test/display/ENG").unwrap(), "ENG");
+        for bad in [":", "DOCS:Team Handbook.md", "group:writers", ""] {
+            assert_eq!(space_target(bad).unwrap_err().exit_code(), ExitCode::Usage, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_subject_and_a_space_are_told_apart_in_either_order() {
+        assert_eq!(subject_and_space("group:writers", None), ("group:writers", None));
+        assert_eq!(
+            subject_and_space("group:writers", Some("DOCS:")),
+            ("group:writers", Some("DOCS:"))
+        );
+        assert_eq!(
+            subject_and_space("DOCS:", Some("group:writers")),
+            ("group:writers", Some("DOCS:"))
+        );
+        assert_eq!(subject_and_space("anonymous", Some("DOCS")), ("anonymous", Some("DOCS")));
     }
 }

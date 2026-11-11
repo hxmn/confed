@@ -711,7 +711,7 @@ pub enum AdminCommand {
     #[command(subcommand)]
     Group(AdminGroupCommand),
     /// Who may do what in a space: permissions, or roles on a Cloud site that
-    /// uses them. The space is --space, else the workspace's.
+    /// uses them. The space is `KEY:` or --space, else the workspace's.
     #[command(subcommand)]
     Perms(AdminPermsCommand),
 }
@@ -737,8 +737,8 @@ impl AdminCommand {
                 AdminGroupCommand::Remove { .. } => "group.remove",
             },
             AdminCommand::Perms(c) => match c {
-                AdminPermsCommand::List => "perms.list",
-                AdminPermsCommand::Roles => "perms.roles",
+                AdminPermsCommand::List { .. } => "perms.list",
+                AdminPermsCommand::Roles { .. } => "perms.roles",
                 AdminPermsCommand::Grant { .. } => "perms.grant",
                 AdminPermsCommand::Revoke { .. } => "perms.revoke",
             },
@@ -855,9 +855,19 @@ pub enum AdminGroupCommand {
 pub enum AdminPermsCommand {
     /// Every permission granted in the space, and on a Cloud site with roles,
     /// every role assigned.
-    List,
+    List {
+        /// The space, as `KEY:` or a space URL [default: --space, else the
+        /// workspace's].
+        #[arg(value_name = "KEY:")]
+        target: Option<String>,
+    },
     /// The roles a Cloud space can assign.
-    Roles,
+    Roles {
+        /// The space, as `KEY:` or a space URL [default: --space, else the
+        /// workspace's].
+        #[arg(value_name = "KEY:")]
+        target: Option<String>,
+    },
     /// Grant operations (--op), or assign a role (--role), to `group:NAME`,
     /// `user:NAME` or `anonymous`.
     #[command(group = clap::ArgGroup::new("what").required(true).args(["ops", "role"]))]
@@ -865,6 +875,10 @@ pub enum AdminPermsCommand {
         /// `group:NAME`, `user:NAME` (username on Data Center, account id on
         /// Cloud) or `anonymous`.
         subject: String,
+        /// The space, as `KEY:` or a space URL [default: --space, else the
+        /// workspace's].
+        #[arg(value_name = "KEY:")]
+        target: Option<String>,
         /// Operations as target:key, e.g. space:read,page:create. Repeatable.
         #[arg(long = "op", value_name = "TARGET:KEY", value_delimiter = ',')]
         ops: Vec<String>,
@@ -880,6 +894,10 @@ pub enum AdminPermsCommand {
     #[command(group = clap::ArgGroup::new("what").required(true).args(["ops", "role"]))]
     Revoke {
         subject: String,
+        /// The space, as `KEY:` or a space URL [default: --space, else the
+        /// workspace's].
+        #[arg(value_name = "KEY:")]
+        target: Option<String>,
         #[arg(long = "op", value_name = "TARGET:KEY", value_delimiter = ',')]
         ops: Vec<String>,
         /// Take away the subject's role (Cloud sites with roles).
@@ -1555,6 +1573,21 @@ mod tests {
             other => panic!("expected instance mv, got {other:?}"),
         }
         assert!(Cli::try_parse_from(["confed", "instance", "clone"]).is_err(), "keys or --all");
+    }
+
+    #[test]
+    fn a_space_for_perms_is_a_flag_or_a_target() {
+        let cli = Cli::try_parse_from(["confed", "admin", "perms", "list", "--space", "DOCS"]);
+        assert_eq!(cli.unwrap().global.space_flag(), Some("DOCS"));
+        let cli = Cli::try_parse_from(["confed", "admin", "perms", "list", "DOCS:"]).unwrap();
+        match cli.command {
+            Command::Admin(AdminCommand::Perms(AdminPermsCommand::List { target, .. })) => {
+                assert_eq!(target.as_deref(), Some("DOCS:"));
+            }
+            other => panic!("expected perms list, got {other:?}"),
+        }
+        let grant = ["confed", "admin", "perms", "grant", "group:writers", "DOCS:", "--op", "a:b"];
+        assert!(Cli::try_parse_from(grant).is_ok());
     }
 
     #[test]
