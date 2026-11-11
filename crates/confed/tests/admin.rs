@@ -208,9 +208,18 @@ async fn without_a_terminal_a_delete_goes_ahead() {
 #[tokio::test]
 async fn adding_several_users_reports_the_ones_that_failed() {
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/rest/api/group/writers/member"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{ "username": "bob.lee", "userKey": "ff80b2", "displayName": "Bob Lee" }],
+            "start": 0, "limit": 100, "size": 1, "_links": {}
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("PUT"))
         .and(path("/rest/api/user/alice.ng/group/writers"))
         .respond_with(ResponseTemplate::new(204))
+        .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("PUT"))
@@ -223,12 +232,17 @@ async fn adding_several_users_reports_the_ones_that_failed() {
     let out = run(admin(
         dir.path(),
         &server,
-        &["group", "add", "writers", "alice.ng", "nobody", "--json"],
+        &["group", "add", "writers", "alice.ng", "bob.lee", "nobody", "--json"],
     ));
     assert_eq!(exit_code(&out), 8, "{}", String::from_utf8_lossy(&out.stderr));
     let value = envelope(&out);
     assert_eq!(value["result"]["users"], json!(["alice.ng"]));
+    assert_eq!(value["result"]["already_members"], json!(["bob.lee"]), "nothing is sent for him");
+    assert_eq!(value["result"]["unknown_users"], json!(["nobody"]));
     assert_eq!(value["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(value["errors"][0]["kind"], json!("unknown_user"));
+    assert_eq!(value["errors"][0]["code"], json!("NOT_FOUND"));
+    assert_eq!(mutations(&server).await.len(), 2, "{:?}", mutations(&server).await);
 }
 
 #[tokio::test]

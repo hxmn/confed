@@ -737,7 +737,7 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
 | `user groups <USER>` | The groups a user is in. |
 | `group list [--match TEXT] [--limit N]`, `group members <NAME>` | Every group, or those whose name contains TEXT in any letter case; who is in one. |
 | `group create <NAME>`, `group delete <NAME>` | Create or delete a group (deleting asks first; its members stay). |
-| `group add` / `group remove <NAME> <USER>…` | Change who is in a group, one user at a time: those that fail are listed in `errors` and make the exit 8. |
+| `group add` / `group remove <NAME> <USER>…` | Change who is in a group, one user at a time: those that fail are listed in `errors` and make the exit 8, and the rest are still changed. |
 | `perms list [KEY:] [--subject S] [--compact]` | Every permission granted in the space and, on a Cloud site with roles, every role assigned. `--subject` keeps one subject's; `--compact` gives one entry per subject. |
 | `perms roles [KEY:]` | The roles a Cloud space can assign. |
 | `perms grant <SUBJECT> [KEY:] --op T:K…` | Grant operations, leaving the subject's others alone. |
@@ -747,6 +747,14 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
 - **People and groups.** A user is a username on Data Center and an account id on Cloud
   — `confed user search` prints both. A `perms` subject is `group:NAME`, `user:NAME` or
   `anonymous`.
+- **A change says what it came to**, read back from the server, so nothing has to be
+  listed afterwards to check it. `perms grant` and `revoke` give `held`: every operation
+  the subject holds in the space now (`operations` is what was asked for). `group add`
+  and `remove` give `members`, everybody in the group now; `users`, those added or
+  removed; `already_members` (or `not_members`), those for whom there was nothing to
+  do; and `unknown_users`, those the server knows nobody by — each also an entry in
+  `errors` with `kind` `unknown_user`. With several users named, an unknown one stops
+  none of the others (exit 8); named alone, it is the command's failure (exit 6).
 - **Reading a listing.** `perms list --json` has one entry per permission in
   `permissions`, each with its `subject` (`type`, `id`, `name`, and a Data Center
   user's `username`). `--compact` gives `subjects` instead: one entry per subject with

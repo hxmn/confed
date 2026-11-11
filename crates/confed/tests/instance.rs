@@ -2116,3 +2116,68 @@ async fn spaces_narrows_to_the_spaces_named_without_listing_the_site() {
         assert_eq!(envelope(&out, "instance")["errors"][0]["kind"], "unknown_space");
     }
 }
+
+/// The usernames in a `members` list.
+fn usernames(members: &Value) -> Vec<&str> {
+    members.as_array().unwrap().iter().map(|m| m["username"].as_str().unwrap()).collect()
+}
+
+#[tokio::test]
+async fn a_change_reports_what_it_came_to() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let admin = |args: &[&str]| run(root.path(), &[&["admin"], args, &["--json"]].concat());
+    let result = |args: &[&str]| -> Value {
+        let out = admin(args);
+        assert_eq!(code(&out), 0, "{args:?}: {}", stderr(&out));
+        envelope(&out, "admin")["result"].clone()
+    };
+
+    // A grant and a revoke: everything the subject holds afterwards.
+    let readers = "group:docs-readers";
+    let granted =
+        result(&["perms", "grant", readers, "DOCS:", "--op", "space:read,comment:create"]);
+    assert_eq!(granted["operations"], json!(["space:read", "comment:create"]));
+    assert_eq!(granted["held"], json!(["space:read", "comment:create"]));
+    let granted = result(&["perms", "grant", readers, "DOCS:", "--op", "page:create"]);
+    assert_eq!(granted["operations"], json!(["page:create"]));
+    assert_eq!(granted["held"], json!(["space:read", "comment:create", "page:create"]));
+    let revoked = result(&["perms", "revoke", readers, "DOCS:", "--op", "space:read"]);
+    assert_eq!(revoked["held"], json!(["comment:create", "page:create"]));
+    let alice = result(&["perms", "grant", "user:alice.ng", "DOCS:", "--op", "page:delete"]);
+    assert_eq!(alice["held"], json!(["space:administer", "page:delete"]));
+
+    // Members: who was added, who was in already, who nobody knows, and who
+    // is in the group now. The unknown one stops nobody else.
+    let out = admin(&["group", "add", "docs-readers", "alice.ng", "carol", "nobody"]);
+    assert_eq!(code(&out), 8, "{}", stderr(&out));
+    let env = envelope(&out, "admin");
+    assert_eq!(env["result"]["users"], json!(["alice.ng"]));
+    assert_eq!(env["result"]["already_members"], json!(["carol"]));
+    assert_eq!(env["result"]["unknown_users"], json!(["nobody"]));
+    assert_eq!(usernames(&env["result"]["members"]), ["carol", "alice.ng"]);
+    assert_eq!(kinds(&env), ["unknown_user"]);
+    assert_eq!(env["errors"][0]["code"], "NOT_FOUND");
+
+    let removed = result(&["group", "remove", "docs-readers", "alice.ng", "bob.lee"]);
+    assert_eq!(removed["users"], json!(["alice.ng"]));
+    assert_eq!(removed["not_members"], json!(["bob.lee"]));
+    assert_eq!(usernames(&removed["members"]), ["carol"]);
+
+    let out = admin(&["group", "remove", "docs-readers", "nobody", "carol"]);
+    assert_eq!(code(&out), 8, "{}", stderr(&out));
+    let env = envelope(&out, "admin");
+    assert_eq!(env["result"]["users"], json!(["carol"]));
+    assert_eq!(env["result"]["unknown_users"], json!(["nobody"]));
+    assert_eq!(env["result"]["members"], json!([]));
+
+    // Alone, an unknown user or group is the command's own failure, and a
+    // group that does not exist is found out before anything is sent.
+    let out = admin(&["group", "add", "docs-readers", "nobody"]);
+    assert_eq!(code(&out), 6, "{}", stderr(&out));
+    assert_eq!(kinds(&envelope(&out, "admin")), ["unknown_user"]);
+    let writes = confluence.world().writes.len();
+    let out = admin(&["group", "add", "nosuch", "alice.ng", "carol"]);
+    assert_eq!(code(&out), 6, "{}", stderr(&out));
+    assert_eq!(confluence.world().writes.len(), writes);
+}

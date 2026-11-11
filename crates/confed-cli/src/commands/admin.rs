@@ -270,8 +270,164 @@ async fn group(ctx: &mut Context, action: &str, command: &AdminGroupCommand) -> 
     }
 }
 
-/// One user at a time, carrying on past a failure: the ones that went through
-/// are reported, and a failure makes the command a partial success.
+/// What became of a change to who is in a group.
+struct Membership {
+    /// The users added or removed.
+    changed: Vec<String>,
+    /// Adding: already in the group. Removing: not in it. Nothing was sent
+    /// for them.
+    unchanged: Vec<String>,
+    /// Those that failed, with why; an unknown user is one of them.
+    failed: Vec<(String, ConfedError)>,
+    /// Who is in the group now, read back after the change.
+    members: Vec<User>,
+}
+
+/// Whether a listed member is the user the command line named: by username
+/// on Data Center, by account id on Cloud.
+fn is_user(member: &User, named: &str) -> bool {
+    member.username.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(named))
+        || member.account_id.as_deref() == Some(named)
+        || member.user_key.as_deref() == Some(named)
+}
+
+/// How a member is named on the command line.
+fn user_arg(member: &User) -> Option<String> {
+    member.username.clone().or_else(|| member.account_id.clone())
+}
+
+fn unknown_user(user: &str) -> ConfedError {
+    ConfedError::refused(
+        "unknown_user",
+        ExitCode::NotFound,
+        format!("no user {user}"),
+        Some(
+            "a user is a username on Data Center and an account id on Cloud; `confed user \
+             search NAME` prints both"
+                .into(),
+        ),
+    )
+}
+
+/// Add `users` to `group`, or remove them, one at a time, carrying on past a
+/// failure. `before` is who is in the group, when the caller knows; reading it
+/// here also says that a group does not exist before anything is sent.
+async fn change_members(
+    client: &Arc<dyn ConfluenceClient>,
+    group: &str,
+    users: &[String],
+    add: bool,
+    before: Option<Vec<User>>,
+) -> Result<Membership> {
+    let api = admin(client)?;
+    let before = match before {
+        Some(members) => members,
+        None => api.group_members(group, None).await?,
+    };
+    let mut done = Membership {
+        changed: Vec::new(),
+        unchanged: Vec::new(),
+        failed: Vec::new(),
+        members: Vec::new(),
+    };
+    let mut seen: Vec<&str> = Vec::new();
+    for user in users {
+        if seen.iter().any(|s| s.eq_ignore_ascii_case(user)) {
+            continue;
+        }
+        seen.push(user);
+        let member = before.iter().any(|m| is_user(m, user));
+        let outcome = match (add, member) {
+            (true, true) | (false, false) => {
+                // Nothing to send. Somebody who is not in the group may be
+                // nobody at all, which only the server can say.
+                let known = match (member, client.flavor()) {
+                    (true, _) => Ok(()),
+                    (false, confed_api::Flavor::Cloud) => client
+                        .lookup_user(&confed_api::UserReference::AccountId(user.clone()))
+                        .await
+                        .map(drop),
+                    (false, confed_api::Flavor::DataCenter) => client
+                        .lookup_user(&confed_api::UserReference::Username(user.clone()))
+                        .await
+                        .map(drop),
+                };
+                match known {
+                    Ok(()) => {
+                        done.unchanged.push(user.clone());
+                        continue;
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            (true, false) => api.add_group_member(group, user).await,
+            (false, true) => api.remove_group_member(group, user).await,
+        };
+        match outcome {
+            Ok(()) => done.changed.push(user.clone()),
+            // The group is there: what was not found is the user.
+            Err(confed_api::ApiError::NotFound(_)) => {
+                done.failed.push((user.clone(), unknown_user(user)));
+            }
+            Err(e) => done.failed.push((user.clone(), e.into())),
+        }
+    }
+    done.members = api.group_members(group, None).await?;
+    Ok(done)
+}
+
+impl Membership {
+    /// The users that failed because the server knows nobody by that name.
+    fn unknown(&self) -> Vec<&str> {
+        self.failed
+            .iter()
+            .filter(|(_, e)| e.kind() == Some("unknown_user"))
+            .map(|(user, _)| user.as_str())
+            .collect()
+    }
+
+    /// The fields every membership change reports, beside its own.
+    fn report(&self, result: &mut Value, add: bool) {
+        result["users"] = json!(self.changed);
+        result[if add { "already_members" } else { "not_members" }] = json!(self.unchanged);
+        result["unknown_users"] = json!(self.unknown());
+        result["members"] = self.members.iter().map(user_json).collect();
+    }
+
+    fn describe(&self, human: &mut String, group: &str, add: bool) {
+        for user in &self.changed {
+            let _ = writeln!(human, "{} {user}", if add { "added  " } else { "removed" });
+        }
+        for user in &self.unchanged {
+            let why = if add { "already a member" } else { "not a member" };
+            let _ = writeln!(human, "kept    {user} ({why})");
+        }
+        for (user, e) in &self.failed {
+            let _ = writeln!(human, "failed  {user}: {e}");
+        }
+        let names: Vec<String> = self.members.iter().filter_map(user_arg).collect();
+        let _ = match names.len() {
+            0 => writeln!(human, "{group} has no members."),
+            n => writeln!(
+                human,
+                "{group} has {}: {}",
+                crate::output::plural(n, "member", "members"),
+                names.join(", ")
+            ),
+        };
+    }
+
+    /// The exit code and the errors of a change some of which failed: a
+    /// partial success when anybody went through, else the first failure's.
+    fn finish(self, mut output: Output) -> Output {
+        let Some(first) = self.failed.first().map(|(_, e)| e.exit_code()) else { return output };
+        let nobody = self.changed.is_empty() && self.unchanged.is_empty();
+        output.exit = if nobody { first } else { ExitCode::Partial };
+        output.with_errors(self.failed.iter().map(|(_, e)| ErrorEntry::from_error(e)).collect())
+    }
+}
+
+/// `group add` and `group remove`.
 async fn membership(
     client: Arc<dyn ConfluenceClient>,
     action: &str,
@@ -279,42 +435,16 @@ async fn membership(
     users: &[String],
     add: bool,
 ) -> Result<Output> {
-    let mut changed = Vec::new();
-    let mut errors = Vec::new();
-    let mut first_failure = None;
+    let mut done = change_members(&client, group, users, add, None).await?;
+    // One user, and it failed: that is the command's own failure.
+    if users.len() == 1 && !done.failed.is_empty() {
+        return Err(done.failed.remove(0).1);
+    }
+    let mut result = json!({ "action": action, "dry_run": false, "group": group });
+    done.report(&mut result, add);
     let mut human = String::new();
-    for user in users {
-        let outcome = if add {
-            admin(&client)?.add_group_member(group, user).await
-        } else {
-            admin(&client)?.remove_group_member(group, user).await
-        };
-        match outcome {
-            Ok(()) => {
-                let _ = writeln!(human, "{} {user}", if add { "added  " } else { "removed" });
-                changed.push(user.clone());
-            }
-            Err(e) => {
-                let e = ConfedError::from(e);
-                if users.len() == 1 {
-                    return Err(e);
-                }
-                let _ = writeln!(human, "failed  {user}: {e}");
-                first_failure.get_or_insert(e.exit_code());
-                errors.push(ErrorEntry::from_error(&e));
-            }
-        }
-    }
-    let mut output = Output::new(
-        json!({ "action": action, "dry_run": false, "group": group, "users": changed }),
-        human,
-    );
-    if let Some(first) = first_failure {
-        // Some went through: a partial success. None did: the first failure's code.
-        output.exit = if changed.is_empty() { first } else { ExitCode::Partial };
-        output = output.with_errors(errors);
-    }
-    Ok(output)
+    done.describe(&mut human, group, add);
+    Ok(done.finish(Output::new(result, human)))
 }
 
 // ----------------------------------------------------------- permissions ---
@@ -465,10 +595,16 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
                 return Ok(planned(action, vec![format!("grant {who} {listed} in {space}")]));
             }
             admin(&client)?.grant_space_permissions(&space, &who, &operations).await?;
+            let held = held_now(&client, &space, &who).await?;
             Ok(done(
                 action,
-                json!({ "space": space, "subject": subject, "operations": operations_json(&operations) }),
-                format!("Granted {who} {listed} in {space}.\n"),
+                json!({
+                    "space": space,
+                    "subject": subject,
+                    "operations": operations_json(&operations),
+                    "held": operations_json(&held),
+                }),
+                format!("Granted {who} {listed} in {space}.\n{}", holds_line(&who, &space, &held)),
             ))
         }
         AdminPermsCommand::Revoke { ops, role, dry_run, .. } => {
@@ -498,10 +634,19 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
                 return Ok(cancelled(action));
             }
             admin(&client)?.revoke_space_permissions(&space, &who, &operations).await?;
+            let held = held_now(&client, &space, &who).await?;
             Ok(done(
                 action,
-                json!({ "space": space, "subject": subject, "operations": operations_json(&operations) }),
-                format!("Revoked {listed} from {who} in {space}.\n"),
+                json!({
+                    "space": space,
+                    "subject": subject,
+                    "operations": operations_json(&operations),
+                    "held": operations_json(&held),
+                }),
+                format!(
+                    "Revoked {listed} from {who} in {space}.\n{}",
+                    holds_line(&who, &space, &held)
+                ),
             ))
         }
     }
@@ -707,6 +852,35 @@ fn is_subject(principal: &Principal, subject: &Subject) -> bool {
                 && (principal.username.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(user))
                     || is(&principal.id, user))
         }
+    }
+}
+
+/// The operations `subject` holds in `space`, read from the server: after a
+/// change, what the change came to.
+async fn held_now(
+    client: &Arc<dyn ConfluenceClient>,
+    space: &str,
+    subject: &Subject,
+) -> Result<Vec<SpaceOperation>> {
+    let permissions = admin(client)?.space_permissions(space).await?;
+    Ok(operations_of(&permissions, subject))
+}
+
+/// What `subject` holds among `permissions`, each operation once.
+fn operations_of(permissions: &[SpacePermission], subject: &Subject) -> Vec<SpaceOperation> {
+    let mut held: Vec<SpaceOperation> = Vec::new();
+    for permission in permissions.iter().filter(|p| is_subject(&p.principal, subject)) {
+        if !held.contains(&permission.operation) {
+            held.push(permission.operation.clone());
+        }
+    }
+    held
+}
+
+fn holds_line(who: &Subject, space: &str, held: &[SpaceOperation]) -> String {
+    match held.is_empty() {
+        true => format!("Nothing is held by {who} in {space} now.\n"),
+        false => format!("Now held by {who} in {space}: {}\n", list_operations(held)),
     }
 }
 

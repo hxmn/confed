@@ -31,7 +31,26 @@
       "description": "`group.create`, `group.delete`: the group. `group.members`, `group.add`, `group.remove`: its name."
     },
     "groups": { "type": "array", "items": { "$ref": "#/$defs/group" } },
-    "members": { "type": "array", "items": { "$ref": "#/$defs/user" } },
+    "members": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/user" },
+      "description": "`group.members`: who is in the group. `group.add`, `group.remove`: who is in it after the change, read back from the server."
+    },
+    "already_members": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "`group.add`: the users that were in the group already. Nothing was sent for them."
+    },
+    "not_members": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "`group.remove`: the users that were not in the group. Nothing was sent for them."
+    },
+    "unknown_users": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "`group.add`, `group.remove`: the users the server knows nobody by. Each is also in the envelope's `errors`, with `kind: unknown_user`; the others were still changed."
+    },
     "users": {
       "type": "array",
       "items": { "type": "string" },
@@ -99,7 +118,12 @@
       }
     },
     "subject": { "type": "string", "description": "`perms.grant`, `perms.revoke`, and `perms.list --subject`: `group:NAME`, `user:NAME` or `anonymous`, as given." },
-    "operations": { "type": "array", "items": { "type": "string" } },
+    "operations": { "type": "array", "items": { "type": "string" }, "description": "`perms.grant`, `perms.revoke`: the operations asked for." },
+    "held": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "`perms.grant`, `perms.revoke` with `--op`: every operation the subject holds in the space after the change, read back from the server."
+    },
     "role": { "type": ["string", "null"], "description": "`perms.grant --role`: the role given; `perms.revoke --role`: null." },
     "role_id": { "type": "string" }
   },
