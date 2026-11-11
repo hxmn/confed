@@ -92,8 +92,10 @@ pub struct GlobalArgs {
     pub progress: String,
 
     /// Print only part of the JSON result: a dot path into `result`, `*` for
-    /// every element (`spaces.*.result.clean`), and `a,b` for several
-    /// fields. Implies --json.
+    /// every element (`'spaces.*.result.clean'`), `[field=value]` for the
+    /// elements that match (`'permissions[subject.name=writers].operation'`),
+    /// and `a,b` for several fields. Quote it: `*` and `[` are the shell's
+    /// too. Implies --json.
     #[arg(long, global = true, value_name = "PATH")]
     pub select: Option<String>,
 }

@@ -89,15 +89,27 @@ The schemas live in [`reference/json/`](reference/json/) — `envelope.schema.js
 per command — and the end-to-end tests validate real output against them.
 
 `--select PATH` prints only part of the envelope instead of all of it, for scripts and
-agents that would otherwise pipe it through `jq`. A path is dot-separated keys into
-`result` (or into the envelope, when it starts with `confed`, `result`, `errors` or
-`warnings`); a number indexes an array; `*` takes every element and applies the rest of
-the path to each; `a,b` gives an object of several paths. What is not there is `null`.
-The exit code is the command's own.
+agents that would otherwise pipe it through `jq`, `grep` or a script:
+
+| In a path | Means |
+|---|---|
+| `a.b` | Keys into `result` — or into the envelope, when the path starts with `confed`, `result`, `errors` or `warnings`. |
+| `0` | An index into an array. |
+| `*` | Every element of an array, or every entry of an object, with the rest of the path applied to each. An array stays an array; an object keeps its keys. |
+| `[field=value]` | The same, for the elements that match only. `field` is a dot path into each element, `!=` keeps those that differ, several filters all have to hold, and a list matches by any of its elements. The value is compared as text; quote it (`[name="Alice Ng"]`) when it has a `]` in it. |
+| `a,b` | Several paths: an object keyed by path. |
+
+What is not there is `null`. A path that cannot be read (an unclosed `[`) is exit 2,
+before the command runs. The exit code is otherwise the command's own.
+
+**Quote the path.** `*` and `[` are the shell's too, and zsh refuses an unquoted
+`spaces.*.result.clean` with "no matches found" before confed starts.
 
 ```bash
-confed instance status --summary --select spaces.*.result.clean      # [true, true]
-confed instance mv … --dry-run --select summary,blocking,renamed
+confed instance status --summary --select 'spaces.*.result.clean'     # [true, true]
+confed instance status --select 'spaces[ok=false].space_key'          # the spaces that failed
+confed admin perms list DOCS: --select 'permissions[subject.name=tech-writers].operation'
+confed instance mv … --dry-run --select 'summary,blocking,renamed'
 ```
 
 stdout may be closed early (`confed status --json | head`): confed stops writing

@@ -48,8 +48,17 @@ pub fn main(views: Views) -> std::process::ExitCode {
         Err(error) => return usage_error(error),
     };
     init_tracing(&cli.global);
-    if cli.global.select.is_some() {
+    if let Some(path) = &cli.global.select {
         cli.global.json = true;
+        if let Err(problem) = output::check_select(path) {
+            let error = ConfedError::usage_with_hint(
+                format!("--select cannot read {problem}"),
+                "a path is keys joined by dots, `*` for every element, and [field=value] to \
+                 keep the elements that match: 'permissions[subject.name=writers].operation'",
+            );
+            output::emit_error(cli.command.name(), &error, true, 0);
+            return std::process::ExitCode::from(error.exit_code().as_i32() as u8);
+        }
     }
 
     let started = Instant::now();

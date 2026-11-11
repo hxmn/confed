@@ -1616,6 +1616,21 @@ async fn status_summarizes_and_select_prints_just_what_is_asked() {
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let selected: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(selected, json!([true, true]));
+
+    // A filter keeps the elements that match; an object keeps its keys.
+    let select = |path: &str| -> Value {
+        let out = run(root.path(), &["instance", "status", "--summary", "--select", path]);
+        assert_eq!(code(&out), 0, "{path}: {}", stderr(&out));
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+    assert_eq!(select("spaces[space_key=ENG].dir"), json!(["ENG"]));
+    assert_eq!(select("spaces.0.result.counts_by_state.*"), json!({ "unchanged": 4 }));
+
+    // One that cannot be read is exit 2, in the envelope, before anything runs.
+    let out = run(root.path(), &["instance", "status", "--select", "spaces[space_key=ENG"]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert!(env["errors"][0]["message"].as_str().unwrap().contains("--select"), "{env}");
 }
 
 #[tokio::test]

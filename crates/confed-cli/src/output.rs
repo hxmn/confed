@@ -182,24 +182,27 @@ pub fn emit_error(command: &str, error: &ConfedError, json_mode: bool, duration_
 ///
 /// A path is dot-separated keys into `result` — or into the envelope when
 /// it starts with `confed`, `result`, `errors` or `warnings`. A number
-/// indexes an array; `*` takes every element of an array (or value of an
-/// object) and applies the rest of the path to each. Several paths separated
-/// by commas give an object keyed by path. What is not there is `null`.
+/// indexes an array; `*` takes every element of an array, or every entry of
+/// an object, and applies the rest of the path to each: an array stays an
+/// array and an object keeps its keys. `[field=value]` after a key (or after
+/// `*`, or alone) does the same for the elements that match only:
+/// `permissions[subject.name=writers].operation`. Several paths separated by
+/// commas give an object keyed by path. What is not there is `null`.
 pub fn select(envelope: &Value, path: &str) -> Value {
     let one = |path: &str| {
-        let path = path.trim();
-        let top = path.split('.').next().unwrap_or_default();
-        let (root, rest) = if ["confed", "result", "errors", "warnings"].contains(&top) {
-            (envelope, path)
+        let Ok(segments) = parse_path(path) else { return Value::Null };
+        let top = segments.first().map(|s| s.key).unwrap_or_default();
+        let root = if ["confed", "result", "errors", "warnings"].contains(&top) {
+            envelope
         } else {
-            (&envelope["result"], path)
+            &envelope["result"]
         };
-        let segments: Vec<&str> = rest.split('.').filter(|s| !s.is_empty()).collect();
         walk(root, &segments)
     };
-    if path.contains(',') {
+    let parts = split_top(path, ',');
+    if parts.len() > 1 {
         let mut out = serde_json::Map::new();
-        for part in path.split(',').filter(|p| !p.trim().is_empty()) {
+        for part in parts.iter().filter(|p| !p.trim().is_empty()) {
             out.insert(part.trim().to_string(), one(part));
         }
         Value::Object(out)
@@ -208,16 +211,154 @@ pub fn select(envelope: &Value, path: &str) -> Value {
     }
 }
 
-fn walk(value: &Value, segments: &[&str]) -> Value {
+/// Whether `--select` can read `path`, said before the command runs: a
+/// filter that is never closed or compares nothing is a mistake to report,
+/// not a `null` to print after the work is done.
+pub fn check_select(path: &str) -> Result<(), String> {
+    for part in split_top(path, ',') {
+        parse_path(part)?;
+    }
+    Ok(())
+}
+
+/// One step of a path: a key (or `*`, or nothing), then the filters on what
+/// it names.
+struct Segment<'a> {
+    key: &'a str,
+    filters: Vec<Filter<'a>>,
+}
+
+/// `[field=value]` or `[field!=value]`: `field` is a dot path into each
+/// element, `value` is compared as text.
+struct Filter<'a> {
+    field: Vec<&'a str>,
+    value: &'a str,
+    equal: bool,
+}
+
+impl Filter<'_> {
+    fn matches(&self, element: &Value) -> bool {
+        let mut found = Some(element);
+        for key in &self.field {
+            found = found.and_then(|v| step(v, key));
+        }
+        let is = |v: &Value| match v {
+            Value::String(text) => text == self.value,
+            Value::Null => self.value == "null",
+            Value::Bool(flag) => self.value.parse() == Ok(*flag),
+            Value::Number(number) => number.to_string() == self.value,
+            Value::Array(_) | Value::Object(_) => false,
+        };
+        // A list matches by any of its elements: `[operations=space:read]`.
+        let equal = match found {
+            Some(Value::Array(items)) => items.iter().any(is),
+            Some(value) => is(value),
+            None => false,
+        };
+        equal == self.equal
+    }
+}
+
+/// `text` cut at each `separator` that is outside `[…]` and outside quotes.
+fn split_top(text: &str, separator: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut quote, mut start) = (0usize, None, 0usize);
+    for (at, c) in text.char_indices() {
+        match (quote, c) {
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') if depth > 0 => quote = Some(c),
+            (None, '[') => depth += 1,
+            (None, ']') => depth = depth.saturating_sub(1),
+            (None, _) if c == separator && depth == 0 => {
+                parts.push(&text[start..at]);
+                start = at + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&text[start..]);
+    parts
+}
+
+fn parse_path(path: &str) -> Result<Vec<Segment<'_>>, String> {
+    split_top(path.trim(), '.').into_iter().filter(|s| !s.is_empty()).map(parse_segment).collect()
+}
+
+fn parse_segment(text: &str) -> Result<Segment<'_>, String> {
+    let Some(open) = text.find('[') else {
+        return match text.contains(']') {
+            true => Err(format!("`{text}`: a `]` with no `[` before it")),
+            false => Ok(Segment { key: text, filters: Vec::new() }),
+        };
+    };
+    let (key, mut rest) = text.split_at(open);
+    let mut filters = Vec::new();
+    while !rest.is_empty() {
+        let unclosed = || format!("`{text}`: a filter is written [field=value]");
+        let inner = rest.strip_prefix('[').ok_or_else(unclosed)?;
+        // The first `]` that is not inside a quoted value.
+        let mut quote = None;
+        let close = inner.char_indices().find_map(|(at, c)| {
+            match (quote, c) {
+                (Some(q), _) if c == q => quote = None,
+                (None, '"' | '\'') => quote = Some(c),
+                (None, ']') => return Some(at),
+                _ => {}
+            }
+            None
+        });
+        let close = close.ok_or_else(unclosed)?;
+        let condition = &inner[..close];
+        rest = &inner[close + 1..];
+        let (field, value, equal) = match (condition.split_once("!="), condition.split_once('=')) {
+            (Some((field, value)), Some((first, _))) if first.len() > field.len() => {
+                (field, value, false)
+            }
+            (_, Some((field, value))) => (field, value, true),
+            _ => return Err(unclosed()),
+        };
+        let value = value.trim();
+        let value = ['"', '\'']
+            .iter()
+            .find_map(|q| value.strip_prefix(*q)?.strip_suffix(*q))
+            .unwrap_or(value);
+        let field: Vec<&str> = field.trim().split('.').filter(|k| !k.is_empty()).collect();
+        if field.is_empty() {
+            return Err(unclosed());
+        }
+        filters.push(Filter { field, value, equal });
+    }
+    Ok(Segment { key, filters })
+}
+
+/// One key into an object, or one index into an array.
+fn step<'v>(value: &'v Value, key: &str) -> Option<&'v Value> {
+    match value {
+        Value::Array(items) => items.get(key.parse::<usize>().ok()?),
+        Value::Object(map) => map.get(key),
+        _ => None,
+    }
+}
+
+fn walk(value: &Value, segments: &[Segment<'_>]) -> Value {
     let Some((first, rest)) = segments.split_first() else { return value.clone() };
-    match (*first, value) {
-        ("*", Value::Array(items)) => Value::Array(items.iter().map(|v| walk(v, rest)).collect()),
-        ("*", Value::Object(map)) => Value::Array(map.values().map(|v| walk(v, rest)).collect()),
-        (key, Value::Array(items)) => match key.parse::<usize>() {
-            Ok(index) => items.get(index).map_or(Value::Null, |v| walk(v, rest)),
-            Err(_) => Value::Null,
-        },
-        (key, Value::Object(map)) => map.get(key).map_or(Value::Null, |v| walk(v, rest)),
+    let inner = match first.key {
+        "*" | "" => Some(value),
+        key => step(value, key),
+    };
+    let Some(inner) = inner else { return Value::Null };
+    if first.key != "*" && first.filters.is_empty() {
+        return walk(inner, rest);
+    }
+    let keep = |element: &Value| first.filters.iter().all(|f| f.matches(element));
+    match inner {
+        Value::Array(items) => {
+            Value::Array(items.iter().filter(|v| keep(v)).map(|v| walk(v, rest)).collect())
+        }
+        Value::Object(map) => Value::Object(
+            map.iter().filter(|(_, v)| keep(v)).map(|(k, v)| (k.clone(), walk(v, rest))).collect(),
+        ),
         _ => Value::Null,
     }
 }
@@ -317,6 +458,75 @@ mod tests {
         );
         assert_eq!(select(&envelope, "nothing.here"), Value::Null);
         assert_eq!(select(&envelope, "spaces.9"), Value::Null);
+    }
+
+    #[test]
+    fn select_keeps_the_keys_of_an_object() {
+        let envelope = json!({
+            "confed": { "exit_code": 0, "ok": true },
+            "result": { "by_space": { "DOCS": { "pages": 4 }, "ENG": { "pages": 2 } } },
+        });
+        assert_eq!(select(&envelope, "by_space.*.pages"), json!({ "DOCS": 4, "ENG": 2 }));
+        assert_eq!(select(&envelope, "confed.*"), json!({ "exit_code": 0, "ok": true }));
+        assert_eq!(select(&envelope, "*"), envelope["result"]);
+        assert_eq!(select(&envelope, "by_space[pages=4]"), json!({ "DOCS": { "pages": 4 } }));
+    }
+
+    #[test]
+    fn select_filters_a_list_by_a_field_of_its_elements() {
+        let envelope = json!({
+            "result": { "permissions": [
+                { "subject": { "type": "group", "name": "docs-team" }, "operation": "space:read" },
+                { "subject": { "type": "group", "name": "docs-team" }, "operation": "page:create" },
+                { "subject": { "type": "user", "name": "Alice Ng" }, "operation": "space:read" },
+                { "subject": { "type": "anonymous", "name": null }, "operation": "space:read" },
+            ], "subjects": [
+                { "subject": "group:a.b", "operations": ["space:read", "page:create"], "count": 2 },
+                { "subject": "user:x,y", "operations": ["space:read"], "count": 1 },
+            ] },
+        });
+        assert_eq!(
+            select(&envelope, "permissions[subject.name=docs-team].operation"),
+            json!(["space:read", "page:create"])
+        );
+        assert_eq!(
+            select(&envelope, "permissions[subject.type=group][operation!=space:read].operation"),
+            json!(["page:create"])
+        );
+        assert_eq!(
+            select(&envelope, "permissions[subject.name=null].subject.type"),
+            json!(["anonymous"])
+        );
+        assert_eq!(select(&envelope, "permissions[subject.name=nobody]"), json!([]));
+        // A value with a dot, a comma or a space in it: no quotes needed for
+        // the first two, and quotes for anything.
+        assert_eq!(select(&envelope, "subjects[subject=group:a.b].count"), json!([2]));
+        assert_eq!(select(&envelope, "subjects[subject=user:x,y].count"), json!([1]));
+        assert_eq!(
+            select(&envelope, "permissions[subject.name=\"Alice Ng\"].operation"),
+            json!(["space:read"])
+        );
+        // A number is compared as written; a list matches by any element.
+        assert_eq!(select(&envelope, "subjects[count=2].subject"), json!(["group:a.b"]));
+        assert_eq!(
+            select(&envelope, "subjects[operations=page:create].subject"),
+            json!(["group:a.b"])
+        );
+        assert_eq!(select(&envelope, "subjects.*[count!=2].subject"), json!(["user:x,y"]));
+        assert_eq!(
+            select(&envelope, "subjects[count=1].subject,permissions.0.operation"),
+            json!({ "subjects[count=1].subject": ["user:x,y"], "permissions.0.operation": "space:read" })
+        );
+    }
+
+    #[test]
+    fn a_select_that_cannot_be_read_is_said_before_the_command_runs() {
+        for good in ["spaces.*.result.clean", "a[b=c].d,e", "a[b.c!=d][e=f]", "*", "a[b=]"] {
+            assert!(check_select(good).is_ok(), "{good}");
+        }
+        for bad in ["a[b=c", "a[b]", "a]b", "a[=c]", "a[b=c]d"] {
+            assert!(check_select(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
