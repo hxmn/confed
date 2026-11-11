@@ -171,7 +171,7 @@ impl CloudClient {
         };
         match kind {
             PrincipalKind::Anonymous => Principal::anonymous(),
-            _ => Principal { kind, id, name },
+            _ => Principal { kind, id, name, username: None },
         }
     }
 

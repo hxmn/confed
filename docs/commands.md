@@ -735,10 +735,10 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
 | `user disable` / `user enable <USERNAME>` | Stop a user signing in, or let them again. Their content stays. |
 | `user delete <USERNAME>` | Delete a user, following the server's background task. Asks first. |
 | `user groups <USER>` | The groups a user is in. |
-| `group list [--limit N]`, `group members <NAME>` | Every group; who is in one. |
+| `group list [--match TEXT] [--limit N]`, `group members <NAME>` | Every group, or those whose name contains TEXT in any letter case; who is in one. |
 | `group create <NAME>`, `group delete <NAME>` | Create or delete a group (deleting asks first; its members stay). |
 | `group add` / `group remove <NAME> <USER>…` | Change who is in a group, one user at a time: those that fail are listed in `errors` and make the exit 8. |
-| `perms list [KEY:]` | Every permission granted in the space and, on a Cloud site with roles, every role assigned. |
+| `perms list [KEY:] [--subject S] [--compact]` | Every permission granted in the space and, on a Cloud site with roles, every role assigned. `--subject` keeps one subject's; `--compact` gives one entry per subject. |
 | `perms roles [KEY:]` | The roles a Cloud space can assign. |
 | `perms grant <SUBJECT> [KEY:] --op T:K…` | Grant operations, leaving the subject's others alone. |
 | `perms grant <SUBJECT> [KEY:] --role R` | Assign a role, by name or id (Cloud sites with roles). |
@@ -747,6 +747,18 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
 - **People and groups.** A user is a username on Data Center and an account id on Cloud
   — `confed user search` prints both. A `perms` subject is `group:NAME`, `user:NAME` or
   `anonymous`.
+- **Reading a listing.** `perms list --json` has one entry per permission in
+  `permissions`, each with its `subject` (`type`, `id`, `name`, and a Data Center
+  user's `username`). `--compact` gives `subjects` instead: one entry per subject with
+  `subject` — written as `grant`, `revoke` and `--subject` take it, `group:tech-writers`
+  or `user:alice.ng` — `type`, `name` and all its `operations`. `--subject` narrows
+  either form to one subject, and `--select` reads a field out of it:
+
+  ```bash
+  confed admin perms list DOCS: --subject group:tech-writers --compact --json
+  confed admin perms list DOCS: --select 'permissions[subject.name=tech-writers].operation'
+  confed admin group list --match writers --json
+  ```
 - **The space** of a `perms` command is a `KEY:` argument (or a space URL) beside the
   subject, else `--space KEY`, else the workspace's. Users and groups belong to the
   whole site and take none. Where none is named and there is no workspace to take it

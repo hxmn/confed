@@ -255,8 +255,9 @@ impl DcClient {
             .http
             .get_json(&format!("rest/api/space/{}/permissions", encode_path(space_key)), &[])
             .await?;
-        // A 9.1 server names a user only by userkey: look each one up once.
-        let mut names: HashMap<String, Option<String>> = HashMap::new();
+        // A 9.1 server names a user only by userkey: look each one up once,
+        // for the name to show and the username to name them by.
+        let mut people: HashMap<String, Option<User>> = HashMap::new();
         let mut out = Vec::with_capacity(raw.len());
         for permission in raw {
             let subject = permission.subject.unwrap_or_default();
@@ -265,25 +266,36 @@ impl DcClient {
                     kind: PrincipalKind::Group,
                     id: subject.name.clone(),
                     name: subject.name,
+                    username: None,
                 },
                 Some("user") | Some("known") => {
-                    let id = subject.user_key.or(subject.username.clone());
-                    let mut name = subject.display_name.or(subject.username);
-                    if let (None, Some(key)) = (&name, &id) {
-                        if !names.contains_key(key) {
-                            let found = self
-                                .lookup_user(&UserReference::UserKey(key.clone()))
-                                .await
-                                .ok()
-                                .map(|u| u.display_name);
-                            names.insert(key.clone(), found);
+                    let mut username = subject.username;
+                    let mut name = subject.display_name;
+                    if let (true, Some(key)) = (username.is_none(), &subject.user_key) {
+                        if !people.contains_key(key) {
+                            let found =
+                                self.lookup_user(&UserReference::UserKey(key.clone())).await.ok();
+                            people.insert(key.clone(), found);
                         }
-                        name = names[key].clone();
+                        if let Some(user) = &people[key] {
+                            username = user.username.clone();
+                            name.get_or_insert_with(|| user.display_name.clone());
+                        }
                     }
-                    Principal { kind: PrincipalKind::User, id, name }
+                    Principal {
+                        kind: PrincipalKind::User,
+                        id: subject.user_key.or(username.clone()),
+                        name: name.or(username.clone()),
+                        username,
+                    }
                 }
                 None | Some("anonymous") => Principal::anonymous(),
-                Some(_) => Principal { kind: PrincipalKind::Other, id: subject.name, name: None },
+                Some(_) => Principal {
+                    kind: PrincipalKind::Other,
+                    id: subject.name,
+                    name: None,
+                    username: None,
+                },
             };
             out.push(SpacePermission {
                 id: None,

@@ -15,8 +15,8 @@ use crate::context::Context;
 use crate::output::{ErrorEntry, Output};
 use crate::pageref::{self, UrlRef};
 use confed_api::{
-    AdminClient, ConfluenceClient, Group, NewUser, Principal, RoleMode, Secret, SpaceOperation,
-    Subject, User, UserUpdate,
+    AdminClient, ConfluenceClient, Group, NewUser, Principal, PrincipalKind, RoleAssignment,
+    RoleMode, Secret, SpaceOperation, SpacePermission, Subject, User, UserUpdate,
 };
 use confed_core::config;
 use confed_core::error::{ConfedError, ExitCode, Result};
@@ -180,14 +180,25 @@ fn read_password_line() -> Result<Secret> {
 async fn group(ctx: &mut Context, action: &str, command: &AdminGroupCommand) -> Result<Output> {
     let client = ctx.build_client()?;
     match command {
-        AdminGroupCommand::List { limit } => {
-            let groups = admin(&client)?.list_groups(*limit).await?;
+        AdminGroupCommand::List { matching, limit } => {
+            // A match is looked for in every group, then cut to the limit.
+            let fetch = if matching.is_some() { None } else { *limit };
+            let mut groups = admin(&client)?.list_groups(fetch).await?;
+            if let Some(text) = matching {
+                let wanted = text.to_lowercase();
+                groups.retain(|g| g.name.to_lowercase().contains(&wanted));
+                groups.truncate(limit.unwrap_or(usize::MAX));
+            }
             let mut human = String::new();
             for g in &groups {
                 let _ = writeln!(human, "{}", g.name);
             }
-            if groups.is_empty() {
-                human.push_str("No groups are visible to this account.\n");
+            match (groups.is_empty(), matching) {
+                (true, Some(text)) => {
+                    let _ = writeln!(human, "No group's name contains `{text}`.");
+                }
+                (true, None) => human.push_str("No groups are visible to this account.\n"),
+                _ => {}
             }
             Ok(Output::new(
                 json!({ "action": action, "groups": groups.iter().map(group_json).collect::<Vec<_>>() }),
@@ -310,7 +321,7 @@ async fn membership(
 
 async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> Result<Output> {
     let (subject, target) = match command {
-        AdminPermsCommand::List { target } | AdminPermsCommand::Roles { target } => {
+        AdminPermsCommand::List { target, .. } | AdminPermsCommand::Roles { target } => {
             ("", target.as_deref())
         }
         AdminPermsCommand::Grant { subject, target, .. }
@@ -322,13 +333,14 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
     let client = ctx.build_client()?;
     let mode = admin(&client)?.space_role_mode().await?;
     match command {
-        AdminPermsCommand::List { .. } => {
-            let permissions = if mode.grants_permissions() {
+        AdminPermsCommand::List { only, compact, .. } => {
+            let only = only.as_deref().map(parse_subject).transpose()?;
+            let mut permissions = if mode.grants_permissions() {
                 admin(&client)?.space_permissions(&space).await?
             } else {
                 Vec::new()
             };
-            let (assignments, roles) = if mode.assigns_roles() {
+            let (mut assignments, roles) = if mode.assigns_roles() {
                 (
                     admin(&client)?.space_role_assignments(&space).await?,
                     admin(&client)?.space_roles(&space).await?,
@@ -336,45 +348,64 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
             } else {
                 (Vec::new(), Vec::new())
             };
+            if let Some(subject) = &only {
+                permissions.retain(|p| is_subject(&p.principal, subject));
+                assignments.retain(|a| is_subject(&a.principal, subject));
+            }
             let role_name = |id: &str| roles.iter().find(|r| r.id == id).map(|r| r.name.clone());
+            let held = holdings(&permissions, &assignments);
 
             let mut human = String::new();
-            let mut by_subject: Vec<(String, Vec<String>)> = Vec::new();
-            for p in &permissions {
-                let who = subject_label(&p.principal);
-                match by_subject.iter_mut().find(|(w, _)| *w == who) {
-                    Some((_, ops)) => ops.push(p.operation.to_string()),
-                    None => by_subject.push((who, vec![p.operation.to_string()])),
+            for h in &held {
+                let mut what = list_operations(&h.operations).replace(", ", " ");
+                if let Some(id) = &h.role {
+                    let role = role_name(id).unwrap_or_else(|| id.clone());
+                    let _ = write!(what, "{}role {role}", if what.is_empty() { "" } else { "  " });
                 }
+                let _ = writeln!(human, "{:<32} {what}", subject_label(&h.principal));
             }
-            for (who, ops) in &by_subject {
-                let _ = writeln!(human, "{who:<32} {}", ops.join(" "));
+            match (held.is_empty(), &only) {
+                (true, Some(subject)) => {
+                    let _ = writeln!(human, "Nothing is granted to {subject} in {space}.");
+                }
+                (true, None) => {
+                    let _ = writeln!(human, "Nothing is granted in {space}.");
+                }
+                _ => {}
             }
-            for a in &assignments {
-                let role = role_name(&a.role_id).unwrap_or_else(|| a.role_id.clone());
-                let _ = writeln!(human, "{:<32} role {role}", subject_label(&a.principal));
+
+            let mut result = json!({ "action": action, "space": space, "mode": mode.as_str() });
+            if let Some(subject) = &only {
+                result["subject"] = json!(subject_arg_of(subject));
             }
-            if by_subject.is_empty() && assignments.is_empty() {
-                let _ = writeln!(human, "Nothing is granted in {space}.");
+            if *compact {
+                result["subjects"] = held
+                    .iter()
+                    .map(|h| holding_json(h, h.role.as_deref().and_then(role_name)))
+                    .collect();
+            } else {
+                result["permissions"] = permissions
+                    .iter()
+                    .map(|p| {
+                        json!({
+                            "subject": principal_json(&p.principal),
+                            "operation": p.operation.to_string(),
+                            "id": p.id,
+                        })
+                    })
+                    .collect();
+                result["assignments"] = assignments
+                    .iter()
+                    .map(|a| {
+                        json!({
+                            "subject": principal_json(&a.principal),
+                            "role_id": a.role_id,
+                            "role": role_name(&a.role_id),
+                        })
+                    })
+                    .collect();
             }
-            Ok(Output::new(
-                json!({
-                    "action": action,
-                    "space": space,
-                    "mode": mode.as_str(),
-                    "permissions": permissions.iter().map(|p| json!({
-                        "subject": principal_json(&p.principal),
-                        "operation": p.operation.to_string(),
-                        "id": p.id,
-                    })).collect::<Vec<_>>(),
-                    "assignments": assignments.iter().map(|a| json!({
-                        "subject": principal_json(&a.principal),
-                        "role_id": a.role_id,
-                        "role": role_name(&a.role_id),
-                    })).collect::<Vec<_>>(),
-                }),
-                human,
-            ))
+            Ok(Output::new(result, human))
         }
         AdminPermsCommand::Roles { .. } => {
             require_roles(mode, "list space roles")?;
@@ -621,11 +652,123 @@ fn operations_json(operations: &[SpaceOperation]) -> Vec<String> {
     operations.iter().map(ToString::to_string).collect()
 }
 
-fn subject_label(principal: &Principal) -> String {
-    match principal.kind {
-        confed_api::PrincipalKind::Anonymous => "anonymous".to_string(),
-        kind => format!("{}:{}", kind.as_str(), principal.label()),
+/// A subject as the command line names it: `group:NAME`, `user:NAME`,
+/// `anonymous`.
+fn subject_arg_of(subject: &Subject) -> String {
+    match subject {
+        Subject::Group(name) => format!("group:{name}"),
+        Subject::User(name) => format!("user:{name}"),
+        Subject::Anonymous => "anonymous".to_string(),
     }
+}
+
+/// A listed principal as a SUBJECT argument names it, so that what a listing
+/// prints can be given back to `grant`, `revoke` or `--subject`: a group by
+/// name, a user by username on Data Center and by account id on Cloud. A
+/// user the server no longer knows is left with the userkey it listed.
+fn subject_arg(principal: &Principal) -> String {
+    let first = |names: [&Option<String>; 3]| {
+        names.into_iter().flatten().next().cloned().unwrap_or_default()
+    };
+    match principal.kind {
+        PrincipalKind::Anonymous => "anonymous".to_string(),
+        PrincipalKind::Group => {
+            format!("group:{}", first([&principal.name, &principal.id, &None]))
+        }
+        PrincipalKind::User => {
+            format!("user:{}", first([&principal.username, &principal.id, &principal.name]))
+        }
+        PrincipalKind::Other => format!("other:{}", first([&principal.id, &principal.name, &None])),
+    }
+}
+
+/// [`subject_arg`], with a person's name beside it for a reader.
+fn subject_label(principal: &Principal) -> String {
+    let arg = subject_arg(principal);
+    match (&principal.kind, &principal.name) {
+        (PrincipalKind::User, Some(name)) if !arg.ends_with(&format!(":{name}")) => {
+            format!("{arg} ({name})")
+        }
+        _ => arg,
+    }
+}
+
+/// Whether a listed principal is the subject the command line named.
+fn is_subject(principal: &Principal, subject: &Subject) -> bool {
+    let is = |held: &Option<String>, wanted: &str| held.as_deref() == Some(wanted);
+    match subject {
+        Subject::Anonymous => principal.kind == PrincipalKind::Anonymous,
+        Subject::Group(name) => {
+            principal.kind == PrincipalKind::Group
+                && (is(&principal.name, name) || is(&principal.id, name))
+        }
+        Subject::User(user) => {
+            principal.kind == PrincipalKind::User
+                && (principal.username.as_deref().is_some_and(|u| u.eq_ignore_ascii_case(user))
+                    || is(&principal.id, user))
+        }
+    }
+}
+
+/// What one subject holds in a space: its operations, in the order the
+/// server lists them, and its role on a site that assigns them.
+struct Holding {
+    principal: Principal,
+    operations: Vec<SpaceOperation>,
+    role: Option<String>,
+}
+
+/// A space's permissions and role assignments, one entry per subject.
+fn holdings(permissions: &[SpacePermission], assignments: &[RoleAssignment]) -> Vec<Holding> {
+    fn entry<'a>(held: &'a mut Vec<Holding>, principal: &Principal) -> &'a mut Holding {
+        let same = |h: &Holding| {
+            h.principal.kind == principal.kind
+                && h.principal.id == principal.id
+                && (principal.id.is_some() || h.principal.name == principal.name)
+        };
+        match held.iter().position(same) {
+            Some(at) => &mut held[at],
+            None => {
+                held.push(Holding {
+                    principal: principal.clone(),
+                    operations: Vec::new(),
+                    role: None,
+                });
+                held.last_mut().expect("pushed above")
+            }
+        }
+    }
+    let mut held = Vec::new();
+    for permission in permissions {
+        let operations = &mut entry(&mut held, &permission.principal).operations;
+        if !operations.contains(&permission.operation) {
+            operations.push(permission.operation.clone());
+        }
+    }
+    for assignment in assignments {
+        entry(&mut held, &assignment.principal).role = Some(assignment.role_id.clone());
+    }
+    held
+}
+
+/// One subject of `perms list --compact`.
+fn holding_json(holding: &Holding, role: Option<String>) -> Value {
+    let principal = &holding.principal;
+    let mut entry = json!({
+        "subject": subject_arg(principal),
+        "type": principal.kind.as_str(),
+        "id": principal.id,
+        "name": principal.name,
+        "operations": operations_json(&holding.operations),
+    });
+    if let Some(username) = &principal.username {
+        entry["username"] = json!(username);
+    }
+    if let Some(id) = &holding.role {
+        entry["role_id"] = json!(id);
+        entry["role"] = json!(role);
+    }
+    entry
 }
 
 // --------------------------------------------------------------- helpers ---
@@ -677,7 +820,12 @@ fn group_json(group: &Group) -> Value {
 }
 
 fn principal_json(principal: &Principal) -> Value {
-    json!({ "type": principal.kind.as_str(), "id": principal.id, "name": principal.name })
+    let mut subject =
+        json!({ "type": principal.kind.as_str(), "id": principal.id, "name": principal.name });
+    if let Some(username) = &principal.username {
+        subject["username"] = json!(username);
+    }
+    subject
 }
 
 fn capitalize(word: &str) -> String {

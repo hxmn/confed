@@ -808,8 +808,11 @@ pub enum AdminUserCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum AdminGroupCommand {
-    /// Every group.
+    /// Every group, or those whose name contains --match.
     List {
+        /// Only groups whose name contains this, in any letter case.
+        #[arg(long = "match", value_name = "TEXT")]
+        matching: Option<String>,
         #[arg(long)]
         limit: Option<usize>,
     },
@@ -862,6 +865,14 @@ pub enum AdminPermsCommand {
         /// workspace's].
         #[arg(value_name = "KEY:")]
         target: Option<String>,
+        /// Only what this subject holds: `group:NAME`, `user:NAME` or
+        /// `anonymous`.
+        #[arg(long = "subject", value_name = "SUBJECT")]
+        only: Option<String>,
+        /// One entry per subject, with all its operations, as `subjects`,
+        /// instead of one per permission.
+        #[arg(long)]
+        compact: bool,
     },
     /// The roles a Cloud space can assign.
     Roles {

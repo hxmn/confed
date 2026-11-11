@@ -1999,3 +1999,79 @@ async fn perms_at_the_root_take_the_space_as_a_flag_or_a_target_and_say_when_non
         assert_eq!(envelope(&out, "admin")["result"]["space"], "ENG");
     }
 }
+
+#[tokio::test]
+async fn listings_are_narrowed_by_the_command_not_by_a_script() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+    let result = |args: &[&str]| -> Value {
+        let out = run(root.path(), &[args, &["--json"]].concat());
+        assert_eq!(code(&out), 0, "{args:?}: {}", stderr(&out));
+        envelope(&out, "admin")["result"].clone()
+    };
+
+    // One subject's permissions.
+    let team = result(&["admin", "perms", "list", "DOCS:", "--subject", "group:docs-team"]);
+    assert_eq!(team["subject"], "group:docs-team");
+    let operations: Vec<&str> = team["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .inspect(|p| assert_eq!(p["subject"]["name"], "docs-team"))
+        .map(|p| p["operation"].as_str().unwrap())
+        .collect();
+    assert_eq!(operations, ["space:read", "page:create", "comment:create"]);
+
+    // One entry per subject, each named as a command takes it.
+    let compact = result(&["admin", "perms", "list", "DOCS:", "--compact"]);
+    assert!(compact.get("permissions").is_none(), "{compact}");
+    let subjects = compact["subjects"].as_array().unwrap();
+    let named: Vec<&str> = subjects.iter().map(|s| s["subject"].as_str().unwrap()).collect();
+    assert_eq!(named, ["group:confluence-users", "group:docs-team", "user:alice.ng", "anonymous"]);
+    assert_eq!(
+        subjects[1],
+        json!({ "subject": "group:docs-team", "type": "group", "id": "docs-team",
+                "name": "docs-team",
+                "operations": ["space:read", "page:create", "comment:create"] })
+    );
+    assert_eq!(subjects[2]["name"], "Alice Ng");
+    assert_eq!(subjects[2]["id"], "ff80a1");
+
+    // A user is asked for by username, and both narrow together.
+    let alice =
+        result(&["admin", "perms", "list", "DOCS:", "--subject", "user:alice.ng", "--compact"]);
+    assert_eq!(alice["subjects"].as_array().unwrap().len(), 1);
+    assert_eq!(alice["subjects"][0]["operations"], json!(["space:administer"]));
+    let nobody = result(&["admin", "perms", "list", "DOCS:", "--subject", "group:docs-readers"]);
+    assert_eq!(nobody["permissions"], json!([]));
+
+    // …and --select reads the rest out of it.
+    let out = run(
+        root.path(),
+        &[
+            "admin",
+            "perms",
+            "list",
+            "DOCS:",
+            "--select",
+            "permissions[subject.name=docs-team].operation",
+        ],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let selected: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(selected, json!(["space:read", "page:create", "comment:create"]));
+
+    let out = run(root.path(), &["admin", "perms", "list", "DOCS:"]);
+    let human = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(human.contains("user:alice.ng (Alice Ng)"), "{human}");
+    assert!(human.contains("space:read page:create comment:create"), "{human}");
+
+    // Groups by a part of their name, in any letter case.
+    let groups = result(&["admin", "group", "list", "--match", "DOCS"]);
+    assert_eq!(
+        groups["groups"],
+        json!([{ "name": "docs-readers", "id": null }, { "name": "docs-team", "id": null }])
+    );
+    let groups = result(&["admin", "group", "list", "--match", "docs", "--limit", "1"]);
+    assert_eq!(groups["groups"].as_array().unwrap().len(), 1);
+}

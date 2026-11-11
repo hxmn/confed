@@ -1908,6 +1908,8 @@ async fn space_permissions_name_groups_users_and_anonymous() {
     assert_eq!(perms[0].principal.kind, confed_api::PrincipalKind::Group);
     assert_eq!(perms[0].principal.name.as_deref(), Some("writers"));
     assert_eq!(perms[1].principal.name.as_deref(), Some("Alice Ng"));
+    assert_eq!(perms[1].principal.username.as_deref(), Some("alice.ng"));
+    assert_eq!(perms[1].principal.id.as_deref(), Some("ff80a1"));
     assert_eq!(perms[1].operation.to_string(), "page:create");
     assert_eq!(perms[2].principal.kind, confed_api::PrincipalKind::Anonymous);
 }

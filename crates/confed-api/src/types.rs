@@ -518,18 +518,21 @@ impl PrincipalKind {
 }
 
 /// Who a permission or role is for, as the server reports it: an id (the
-/// userkey or account id, or a Cloud group id; a Data Center group's name) and
-/// a name to show when one is known.
+/// userkey or account id, or a Cloud group id; a Data Center group's name), a
+/// name to show when one is known, and for a Data Center user the username,
+/// which is how a [`Subject`] names them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
     pub kind: PrincipalKind,
     pub id: Option<String>,
     pub name: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
 }
 
 impl Principal {
     pub fn anonymous() -> Self {
-        Self { kind: PrincipalKind::Anonymous, id: None, name: None }
+        Self { kind: PrincipalKind::Anonymous, id: None, name: None, username: None }
     }
 
     /// The name when known, else the id.

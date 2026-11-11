@@ -55,6 +55,24 @@
         }
       }
     },
+    "subjects": {
+      "type": "array",
+      "description": "`perms.list --compact`, in place of `permissions` and `assignments`: one entry per subject, with everything it holds.",
+      "items": {
+        "type": "object",
+        "required": ["subject", "type", "operations"],
+        "properties": {
+          "subject": { "type": "string", "description": "The subject as a command takes it: `group:NAME`, `user:NAME` (username on Data Center, account id on Cloud) or `anonymous`. `other:ID` for what Cloud lists and no command can name." },
+          "type": { "type": "string", "enum": ["user", "group", "anonymous", "other"] },
+          "id": { "type": ["string", "null"] },
+          "name": { "type": ["string", "null"] },
+          "username": { "type": "string", "description": "A Data Center user's." },
+          "operations": { "type": "array", "items": { "type": "string" } },
+          "role_id": { "type": "string", "description": "On a site that assigns roles: the subject's." },
+          "role": { "type": ["string", "null"] }
+        }
+      }
+    },
     "assignments": {
       "type": "array",
       "items": {
@@ -80,7 +98,7 @@
         }
       }
     },
-    "subject": { "type": "string", "description": "`perms.grant`, `perms.revoke`: `group:NAME`, `user:NAME` or `anonymous`, as given." },
+    "subject": { "type": "string", "description": "`perms.grant`, `perms.revoke`, and `perms.list --subject`: `group:NAME`, `user:NAME` or `anonymous`, as given." },
     "operations": { "type": "array", "items": { "type": "string" } },
     "role": { "type": ["string", "null"], "description": "`perms.grant --role`: the role given; `perms.revoke --role`: null." },
     "role_id": { "type": "string" }
@@ -111,7 +129,8 @@
       "properties": {
         "type": { "type": "string", "enum": ["user", "group", "anonymous", "other"] },
         "id": { "type": ["string", "null"], "description": "The userkey or account id; the group's name on Data Center, its id on Cloud." },
-        "name": { "type": ["string", "null"], "description": "Who it is, when the server could say." }
+        "name": { "type": ["string", "null"], "description": "Who it is, when the server could say." },
+        "username": { "type": "string", "description": "A Data Center user's username, which is how `user:NAME` names them." }
       }
     }
   }
