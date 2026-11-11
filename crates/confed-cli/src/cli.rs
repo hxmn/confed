@@ -743,6 +743,7 @@ impl AdminCommand {
                 AdminPermsCommand::Roles { .. } => "perms.roles",
                 AdminPermsCommand::Grant { .. } => "perms.grant",
                 AdminPermsCommand::Revoke { .. } => "perms.revoke",
+                AdminPermsCommand::Copy { .. } => "perms.copy",
             },
         }
     }
@@ -923,6 +924,28 @@ pub enum AdminPermsCommand {
         #[arg(long)]
         role: bool,
         /// Say what would be done, and send nothing that changes the server.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Grant in one space what subjects hold in another: every subject's
+    /// permissions (and role, on a Cloud site with roles), or one subject's
+    /// with --subject, to itself or to the subject --as names. Nothing is
+    /// revoked: what the destination grants already stays.
+    Copy {
+        /// The space to read: a key, `KEY:` or a space URL.
+        #[arg(long, value_name = "KEY")]
+        from: String,
+        /// The space to grant in.
+        #[arg(long, value_name = "KEY")]
+        to: String,
+        /// Copy only what this subject holds: `group:NAME`, `user:NAME` or
+        /// `anonymous` [default: every subject].
+        #[arg(long = "subject", value_name = "SUBJECT")]
+        only: Option<String>,
+        /// Grant it to this subject instead of the one it was read from.
+        #[arg(long = "as", value_name = "SUBJECT", requires = "only")]
+        grantee: Option<String>,
+        /// Say what would be granted, and send nothing that changes the server.
         #[arg(long)]
         dry_run: bool,
     },
@@ -1618,6 +1641,21 @@ mod tests {
         assert!(parse(&["add", "writers", "alice.ng", "--members-from", "editors"]).is_ok());
         assert!(parse(&["add", "writers"]).is_err(), "somebody to add");
         assert!(parse(&["remove", "writers"]).is_err());
+    }
+
+    #[test]
+    fn perms_copy_names_two_spaces_and_optionally_one_subject() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from([&["confed", "admin", "perms", "copy"], args].concat())
+        };
+        assert!(parse(&["--from", "DOCS", "--to", "ENG"]).is_ok());
+        let renamed = ["--from", "DOCS", "--to", "ENG", "--subject", "group:a", "--as", "group:b"];
+        assert!(parse(&renamed).is_ok());
+        assert!(parse(&["--from", "DOCS"]).is_err(), "a destination");
+        assert!(
+            parse(&["--from", "DOCS", "--to", "ENG", "--as", "group:b"]).is_err(),
+            "--as whom?"
+        );
     }
 
     #[test]

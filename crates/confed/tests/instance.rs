@@ -2235,3 +2235,161 @@ async fn a_group_is_created_with_the_members_of_another() {
     assert_eq!(again["users"], json!([]));
     assert_eq!(again["already_members"], json!(["alice.ng", "bob.lee"]));
 }
+
+#[tokio::test]
+async fn one_subjects_permissions_are_copied_to_another_space_and_read_back() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let copy =
+        |args: &[&str]| run(root.path(), &[&["admin", "perms", "copy", "--json"], args].concat());
+    let team = ["space:read", "page:create", "comment:create"];
+    let renamed = [
+        "--from",
+        "DOCS",
+        "--to",
+        "ENG",
+        "--subject",
+        "group:docs-team",
+        "--as",
+        "group:notes-team",
+    ];
+
+    // Whoever --as names has to be there: nothing is granted to nobody.
+    let out = copy(&renamed);
+    assert_eq!(code(&out), 6, "{}", stderr(&out));
+    let env = envelope(&out, "admin");
+    assert_eq!(kinds(&env), ["unknown_group"]);
+    assert!(env["errors"][0]["hint"].as_str().unwrap().contains("group create notes-team"));
+    assert!(confluence.world().writes.is_empty());
+
+    let out = run(
+        root.path(),
+        &["admin", "group", "create", "notes-team", "--members-from", "docs-team", "--json"],
+    );
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let writes = confluence.world().writes.len();
+
+    // A dry run reads both spaces and says what it would grant.
+    let out = copy(&[&renamed[..], &["--dry-run"]].concat());
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let plan = envelope(&out, "admin")["result"].clone();
+    assert_eq!(
+        (plan["dry_run"].clone(), plan["action"].clone()),
+        (json!(true), json!("perms.copy"))
+    );
+    assert_eq!(plan["copied"][0]["granted"], json!(team));
+    assert!(plan["copied"][0].get("held").is_none(), "nothing changed, nothing to read back");
+    assert_eq!(plan["planned"].as_array().unwrap().len(), 1, "{plan}");
+    assert_eq!(confluence.world().writes.len(), writes);
+
+    let out = copy(&renamed);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let done = envelope(&out, "admin")["result"].clone();
+    assert_eq!((done["from"].clone(), done["to"].clone()), (json!("DOCS"), json!("ENG")));
+    assert_eq!(
+        (done["subject"].clone(), done["as"].clone()),
+        (json!("group:docs-team"), json!("group:notes-team"))
+    );
+    assert_eq!(
+        done["copied"],
+        json!([{ "from": "group:docs-team", "subject": "group:notes-team", "ok": true,
+                 "granted": team, "already_granted": [], "held": team }])
+    );
+    assert_eq!(done["skipped"], json!([]));
+
+    // Again: all of it is there already, and nothing is sent.
+    let writes = confluence.world().writes.len();
+    let out = copy(&renamed);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let again = envelope(&out, "admin")["result"]["copied"][0].clone();
+    assert_eq!(
+        (again["granted"].clone(), again["already_granted"].clone()),
+        (json!([]), json!(team))
+    );
+    assert_eq!(again["held"], json!(team));
+    assert_eq!(confluence.world().writes.len(), writes);
+
+    // What cannot be copied says why, each with its kind.
+    for (args, exit, kind) in [
+        (
+            &["--from", "DOCS", "--to", "ENG", "--subject", "group:docs-readers"][..],
+            6,
+            "nothing_to_copy",
+        ),
+        (
+            &["--from", "DOCS", "--to", "ENG", "--subject", "user:alice.ng", "--as", "user:nobody"],
+            6,
+            "unknown_user",
+        ),
+    ] {
+        let out = copy(args);
+        assert_eq!(code(&out), exit, "{args:?}: {}", stderr(&out));
+        assert_eq!(kinds(&envelope(&out, "admin")), [kind], "{args:?}");
+    }
+    assert_eq!(code(&copy(&["--from", "DOCS", "--to", "DOCS"])), 2);
+    assert_eq!(code(&copy(&["--from", "NOSUCH", "--to", "ENG"])), 6);
+    assert_eq!(confluence.world().writes.len(), writes);
+}
+
+#[tokio::test]
+async fn every_grant_of_a_space_is_copied_and_one_that_fails_stops_no_other() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let copy =
+        |args: &[&str]| run(root.path(), &[&["admin", "perms", "copy", "--json"], args].concat());
+
+    let out = copy(&["--from", "DOCS", "--to", "OPS"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let done = envelope(&out, "admin")["result"].clone();
+    let entries: Vec<(&str, usize, usize)> = done["copied"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            assert_eq!(e["from"], e["subject"], "each to itself");
+            let count = |key: &str| e[key].as_array().unwrap().len();
+            (e["subject"].as_str().unwrap(), count("granted"), count("already_granted"))
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            ("group:confluence-users", 0, 1),
+            ("group:docs-team", 3, 0),
+            ("user:alice.ng", 1, 0),
+            ("anonymous", 1, 0)
+        ]
+    );
+    assert_eq!(done["copied"][2]["held"], json!(["space:administer"]));
+    let ops = confluence.world().grants["OPS"].clone();
+    assert!(ops.contains(&("user/ff80a1".into(), "space".into(), "administer".into())), "{ops:?}");
+    assert!(ops.contains(&("anonymous".into(), "space".into(), "read".into())), "{ops:?}");
+    assert_eq!(ops.len(), 6, "what OPS granted already stays, once: {ops:?}");
+
+    // A group that was deleted and a user nobody knows any more still hold
+    // permissions in the source. The first fails, the second is skipped, and
+    // everybody else is copied.
+    {
+        let mut world = confluence.world();
+        let grants = world.grants.get_mut("DOCS").unwrap();
+        grants.insert(0, ("group/gone-team".into(), "page".into(), "delete".into()));
+        grants.push(("user/ff80zz".into(), "space".into(), "read".into()));
+    }
+    let out = copy(&["--from", "DOCS", "--to", "ENG"]);
+    assert_eq!(code(&out), 8, "{}", stderr(&out));
+    let env = envelope(&out, "admin");
+    assert_eq!(kinds(&env), ["unknown_group"]);
+    let copied = env["result"]["copied"].as_array().unwrap();
+    assert_eq!(copied.len(), 5);
+    assert_eq!(
+        (copied[0]["subject"].clone(), copied[0]["ok"].clone()),
+        (json!("group:gone-team"), json!(false))
+    );
+    assert_eq!((copied[0]["granted"].clone(), copied[0]["held"].clone()), (json!([]), json!([])));
+    assert!(copied[1..].iter().all(|e| e["ok"] == true), "{copied:?}");
+    assert_eq!(
+        env["result"]["skipped"],
+        json!([{ "subject": "user:ff80zz", "reason": "the server no longer knows this user" }])
+    );
+    assert_eq!(confluence.world().grants["ENG"].len(), 6);
+}

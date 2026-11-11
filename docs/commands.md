@@ -723,6 +723,8 @@ workspace's own.
 confed admin group create tech-writers
 confed admin group add tech-writers alice.ng bob.lee
 confed admin group create notes-team --members-from tech-writers   # a copy of a group
+confed admin perms copy --from DOCS --to NOTES \
+  --subject group:tech-writers --as group:notes-team             # what one holds, to another
 confed admin perms grant group:tech-writers --op space:read,page:create,comment:create
 confed admin perms list --space DOCS
 confed admin perms list DOCS:                       # the same
@@ -744,6 +746,7 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
 | `perms grant <SUBJECT> [KEY:] --op T:K…` | Grant operations, leaving the subject's others alone. |
 | `perms grant <SUBJECT> [KEY:] --role R` | Assign a role, by name or id (Cloud sites with roles). |
 | `perms revoke <SUBJECT> [KEY:] --op T:K…` / `--role` | Revoke operations, or take the subject's role away. Asks first. |
+| `perms copy --from KEY --to KEY [--subject S [--as S2]]` | Grant in one space what subjects hold in another: every subject's, or one's, to itself or to another subject. |
 
 - **People and groups.** A user is a username on Data Center and an account id on Cloud
   — `confed user search` prints both. A `perms` subject is `group:NAME`, `user:NAME` or
@@ -762,6 +765,19 @@ confed admin user create carol --full-name "Carol Diaz" --email carol@example.co
   NEW that exists already is exit 4, `kind` `group_exists`: `group add NEW
   --members-from OLD` adds to it, and is safe to run again. `--dry-run` reads OLD and
   lists who would be added.
+- **Copying permissions.** `perms copy --from SRC --to DST` grants in DST what each
+  subject holds in SRC — every permission, and on a Cloud site with roles its role.
+  `--subject S` copies one subject's, and `--as S2` grants them to S2 instead (S2 has to
+  exist: exit 6, `kind` `unknown_group` or `unknown_user`, before anything is sent;
+  within one space, `--as` copies from one subject to another). Nothing is revoked: what
+  DST grants already stays. `copied` has one entry per subject — `from`, `subject` (who
+  got them), `granted`, `already_granted`, and `held`, everything the subject holds in
+  DST afterwards — so running it again grants nothing and says so. A subject that fails
+  has `"ok": false` and an entry in `errors`, the others are still copied, and the exit
+  is 8. What nothing can be granted to (a user the server no longer knows, Cloud's
+  access classes) is listed in `skipped` with the reason. A `--subject` that holds
+  nothing in SRC is exit 6, `kind` `nothing_to_copy`. `--dry-run` reads both spaces and
+  reports the same entries, `granted` being what it would grant.
 - **Reading a listing.** `perms list --json` has one entry per permission in
   `permissions`, each with its `subject` (`type`, `id`, `name`, and a Data Center
   user's `username`). `--compact` gives `subjects` instead: one entry per subject with

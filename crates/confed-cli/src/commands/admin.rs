@@ -353,6 +353,16 @@ fn user_arg(member: &User) -> Option<String> {
     member.username.clone().or_else(|| member.account_id.clone())
 }
 
+/// Ask the server whether it knows `user`, named as the command line names
+/// one: a username on Data Center, an account id on Cloud.
+async fn user_known(client: &Arc<dyn ConfluenceClient>, user: &str) -> confed_api::ApiResult<()> {
+    let reference = match client.flavor() {
+        confed_api::Flavor::Cloud => confed_api::UserReference::AccountId(user.to_string()),
+        confed_api::Flavor::DataCenter => confed_api::UserReference::Username(user.to_string()),
+    };
+    client.lookup_user(&reference).await.map(drop)
+}
+
 fn unknown_user(user: &str) -> ConfedError {
     ConfedError::refused(
         "unknown_user",
@@ -414,16 +424,9 @@ async fn change_members(
             (true, true) | (false, false) => {
                 // Nothing to send. Somebody who is not in the group may be
                 // nobody at all, which only the server can say.
-                let known = match (member, client.flavor()) {
-                    (true, _) => Ok(()),
-                    (false, confed_api::Flavor::Cloud) => client
-                        .lookup_user(&confed_api::UserReference::AccountId(user.clone()))
-                        .await
-                        .map(drop),
-                    (false, confed_api::Flavor::DataCenter) => client
-                        .lookup_user(&confed_api::UserReference::Username(user.clone()))
-                        .await
-                        .map(drop),
+                let known = match member {
+                    true => Ok(()),
+                    false => user_known(client, user).await,
                 };
                 match known {
                     Ok(()) => {
@@ -524,6 +527,12 @@ async fn membership(
 
 async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> Result<Output> {
     let (subject, target) = match command {
+        AdminPermsCommand::Copy { from, to, only, grantee, dry_run } => {
+            let only = only.as_deref().map(parse_subject).transpose()?;
+            let grantee = grantee.as_deref().map(parse_subject).transpose()?;
+            let (from, to) = (space_target(from)?, space_target(to)?);
+            return copy(ctx, action, &from, &to, only, grantee, *dry_run).await;
+        }
         AdminPermsCommand::List { target, .. } | AdminPermsCommand::Roles { target } => {
             ("", target.as_deref())
         }
@@ -538,18 +547,11 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
     match command {
         AdminPermsCommand::List { only, compact, .. } => {
             let only = only.as_deref().map(parse_subject).transpose()?;
-            let mut permissions = if mode.grants_permissions() {
-                admin(&client)?.space_permissions(&space).await?
-            } else {
-                Vec::new()
-            };
-            let (mut assignments, roles) = if mode.assigns_roles() {
-                (
-                    admin(&client)?.space_role_assignments(&space).await?,
-                    admin(&client)?.space_roles(&space).await?,
-                )
-            } else {
-                (Vec::new(), Vec::new())
+            let (mut permissions, mut assignments) =
+                space_grants(admin(&client)?, mode, &space).await?;
+            let roles = match mode.assigns_roles() {
+                true => admin(&client)?.space_roles(&space).await?,
+                false => Vec::new(),
             };
             if let Some(subject) = &only {
                 permissions.retain(|p| is_subject(&p.principal, subject));
@@ -722,7 +724,340 @@ async fn perms(ctx: &mut Context, action: &str, command: &AdminPermsCommand) -> 
                 ),
             ))
         }
+        AdminPermsCommand::Copy { .. } => unreachable!("handled before a space is resolved"),
     }
+}
+
+/// `perms copy`.
+async fn copy(
+    ctx: &mut Context,
+    action: &str,
+    from: &str,
+    to: &str,
+    only: Option<Subject>,
+    grantee: Option<Subject>,
+    dry_run: bool,
+) -> Result<Output> {
+    if from.eq_ignore_ascii_case(to) && grantee.is_none() {
+        return Err(ConfedError::usage_with_hint(
+            format!("--from and --to both name {from}: every subject holds there what it holds"),
+            "name another space, or one subject with --subject and another with --as",
+        ));
+    }
+    let client = ctx.build_client()?;
+    // Whoever --as names has to be there before anything is granted.
+    if let Some(subject) = &grantee {
+        subject_exists(&client, subject).await?;
+    }
+    let renames: Vec<(Subject, Subject)> = only.clone().zip(grantee.clone()).into_iter().collect();
+    let request = CopyRequest {
+        from,
+        to,
+        only: only.as_ref(),
+        renames: &renames,
+        dry_run,
+        read_destination: true,
+    };
+    let mut copied = copy_permissions(&client, &request).await?;
+    // One subject, and it failed: that is the command's own failure.
+    if only.is_some() && !copied.failed.is_empty() {
+        return Err(copied.failed.remove(0));
+    }
+
+    let mut result = json!({ "action": action, "dry_run": dry_run });
+    if let Some(subject) = &only {
+        result["subject"] = json!(subject_arg_of(subject));
+    }
+    if let Some(subject) = &grantee {
+        result["as"] = json!(subject_arg_of(subject));
+    }
+    copied.report(&mut result);
+    let mut human = std::mem::take(&mut copied.human);
+    if dry_run {
+        result["planned"] = json!(copied.planned);
+        human.push_str("Nothing was sent (--dry-run).\n");
+    }
+    Ok(copied.finish(Output::new(result, human)))
+}
+
+/// What to copy, from where to where.
+pub(crate) struct CopyRequest<'a> {
+    pub from: &'a str,
+    pub to: &'a str,
+    /// One subject's, or with `None` every subject's.
+    pub only: Option<&'a Subject>,
+    /// Subjects whose permissions go to another subject: who holds them in
+    /// the source, and who gets them.
+    pub renames: &'a [(Subject, Subject)],
+    pub dry_run: bool,
+    /// False when the destination is not there yet (a space about to be
+    /// created): then nothing is read from it, and nothing is "already there".
+    pub read_destination: bool,
+}
+
+/// What a copy of permissions did, or under `--dry-run` would do.
+pub(crate) struct PermsCopy {
+    from: String,
+    to: String,
+    mode: RoleMode,
+    /// One entry per subject copied.
+    copied: Vec<Value>,
+    /// Subjects no command can grant to, each with why.
+    skipped: Vec<Value>,
+    /// One sentence per change, for a dry run.
+    pub planned: Vec<String>,
+    pub human: String,
+    /// The subjects that could not be granted to.
+    pub failed: Vec<ConfedError>,
+}
+
+impl PermsCopy {
+    /// The fields a copy reports, beside the command's own.
+    pub(crate) fn report(&self, result: &mut Value) {
+        result["from"] = json!(self.from);
+        result["to"] = json!(self.to);
+        result["mode"] = json!(self.mode.as_str());
+        result["copied"] = json!(self.copied);
+        result["skipped"] = json!(self.skipped);
+    }
+
+    /// The exit code and the errors of a copy some of which failed: a partial
+    /// success when any subject went through, else the first failure's code.
+    pub(crate) fn finish(self, mut output: Output) -> Output {
+        let Some(first) = self.failed.first().map(ConfedError::exit_code) else { return output };
+        let none = self.copied.iter().all(|entry| entry["ok"] == json!(false));
+        output.exit = if none { first } else { ExitCode::Partial };
+        output.with_errors(self.failed.iter().map(ErrorEntry::from_error).collect())
+    }
+}
+
+/// Everything a space grants: its permissions, and on a site that assigns
+/// them its roles. Each is asked for only where the site's mode has it.
+async fn space_grants(
+    api: &dyn AdminClient,
+    mode: RoleMode,
+    space: &str,
+) -> Result<(Vec<SpacePermission>, Vec<RoleAssignment>)> {
+    let permissions = match mode.grants_permissions() {
+        true => api.space_permissions(space).await?,
+        false => Vec::new(),
+    };
+    let assignments = match mode.assigns_roles() {
+        true => api.space_role_assignments(space).await?,
+        false => Vec::new(),
+    };
+    Ok((permissions, assignments))
+}
+
+/// Grant in `request.to` what subjects hold in `request.from`, leaving alone
+/// what is there already, and read the destination back.
+pub(crate) async fn copy_permissions(
+    client: &Arc<dyn ConfluenceClient>,
+    request: &CopyRequest<'_>,
+) -> Result<PermsCopy> {
+    /// One subject of the copy.
+    struct Item {
+        from: String,
+        to: Subject,
+        already: Vec<SpaceOperation>,
+        missing: Vec<SpaceOperation>,
+        /// The role held in the source, and whether the destination lacks it.
+        role: Option<(String, bool)>,
+        error: Option<ConfedError>,
+    }
+
+    let api = admin(client)?;
+    let (from, to) = (request.from, request.to);
+    let mode = api.space_role_mode().await?;
+    let (permissions, assignments) = space_grants(api, mode, from).await?;
+    let mut source = holdings(&permissions, &assignments);
+    if let Some(only) = request.only {
+        source.retain(|h| is_subject(&h.principal, only));
+        if source.is_empty() {
+            return Err(ConfedError::refused(
+                "nothing_to_copy",
+                ExitCode::NotFound,
+                format!("{only} holds nothing in {from}"),
+                Some(format!("`confed admin perms list {from}: --compact` lists who does")),
+            ));
+        }
+    }
+    let before = match request.read_destination {
+        true => space_grants(api, mode, to).await?,
+        false => (Vec::new(), Vec::new()),
+    };
+
+    let mut items = Vec::new();
+    let mut skipped = Vec::new();
+    for holding in &source {
+        let Some(subject) = subject_of(&holding.principal, client.flavor()) else {
+            let reason = match holding.principal.kind {
+                PrincipalKind::User => "the server no longer knows this user",
+                PrincipalKind::Group => "the server gives this group no name",
+                _ => "nothing can be granted to this kind of subject through the API",
+            };
+            skipped.push(json!({ "subject": subject_arg(&holding.principal), "reason": reason }));
+            continue;
+        };
+        let renamed = request.renames.iter().find(|(old, _)| is_subject(&holding.principal, old));
+        let to_subject = renamed.map(|(_, new)| new.clone()).unwrap_or(subject);
+        let held = operations_of(&before.0, &to_subject);
+        let (already, missing) =
+            holding.operations.iter().cloned().partition(|op| held.contains(op));
+        let role = holding.role.clone().map(|id| {
+            let there =
+                before.1.iter().any(|a| is_subject(&a.principal, &to_subject) && a.role_id == id);
+            (id, !there)
+        });
+        items.push(Item {
+            from: subject_arg(&holding.principal),
+            to: to_subject,
+            already,
+            missing,
+            role,
+            error: None,
+        });
+    }
+
+    let mut planned = Vec::new();
+    for item in &mut items {
+        if !item.missing.is_empty() {
+            planned.push(format!("grant {} {} in {to}", item.to, list_operations(&item.missing)));
+            if !request.dry_run {
+                if let Err(e) = api.grant_space_permissions(to, &item.to, &item.missing).await {
+                    item.error = Some(no_such_subject(&item.to, e));
+                    continue;
+                }
+            }
+        }
+        if let Some((role, true)) = &item.role {
+            planned.push(format!("give {} the role {role} in {to}", item.to));
+            if !request.dry_run {
+                if let Err(e) = api.set_space_role(to, &item.to, Some(role)).await {
+                    item.error = Some(no_such_subject(&item.to, e));
+                }
+            }
+        }
+    }
+    // What it came to, read back: a dry run changed nothing to read.
+    let after = match request.dry_run {
+        true => None,
+        false => Some(space_grants(api, mode, to).await?),
+    };
+
+    let mut human = String::new();
+    let mut copied = Vec::new();
+    let mut failed = Vec::new();
+    let _ = writeln!(human, "{from} → {to}");
+    for item in items {
+        let to_arg = subject_arg_of(&item.to);
+        let ok = item.error.is_none();
+        let granted = if ok { item.missing.clone() } else { Vec::new() };
+        let mut entry = json!({
+            "from": item.from,
+            "subject": to_arg,
+            "ok": ok,
+            "granted": operations_json(&granted),
+            "already_granted": operations_json(&item.already),
+        });
+        let _ = match item.from == to_arg {
+            true => writeln!(human, "{to_arg}"),
+            false => writeln!(human, "{} → {to_arg}", item.from),
+        };
+        let verb = if request.dry_run { "would grant" } else { "granted" };
+        if !granted.is_empty() {
+            let _ = writeln!(human, "  {verb}: {}", list_operations(&granted));
+        }
+        if !item.already.is_empty() {
+            let _ = writeln!(human, "  already there: {}", list_operations(&item.already));
+        }
+        if let Some((role, missing)) = &item.role {
+            entry["role_id"] = json!(role);
+            entry["role_assigned"] = json!(*missing && ok);
+            let what = match (*missing, request.dry_run) {
+                (false, _) => "already there",
+                (true, true) => "would assign",
+                (true, false) => "assigned",
+            };
+            let _ = writeln!(human, "  role {role}: {what}");
+        }
+        if let Some((permissions, _)) = &after {
+            let held = operations_of(permissions, &item.to);
+            entry["held"] = json!(operations_json(&held));
+            let _ = writeln!(human, "  now holds: {}", list_operations(&held));
+        }
+        if let Some(e) = item.error {
+            let _ = writeln!(human, "  failed: {e}");
+            failed.push(e);
+        }
+        copied.push(entry);
+    }
+    if copied.is_empty() {
+        let _ = writeln!(human, "{from} grants nothing that can be copied.");
+    }
+    for entry in &skipped {
+        let text = |key: &str| entry[key].as_str().unwrap_or_default().to_string();
+        let _ = writeln!(human, "skipped {} ({})", text("subject"), text("reason"));
+    }
+    Ok(PermsCopy {
+        from: from.to_string(),
+        to: to.to_string(),
+        mode,
+        copied,
+        skipped,
+        planned,
+        human,
+        failed,
+    })
+}
+
+/// How a listed principal is named to a client: a group by name, a user by
+/// username on Data Center and by account id on Cloud. `None` for one no
+/// permission can be granted to.
+fn subject_of(principal: &Principal, flavor: confed_api::Flavor) -> Option<Subject> {
+    match (principal.kind, flavor) {
+        (PrincipalKind::Anonymous, _) => Some(Subject::Anonymous),
+        (PrincipalKind::Group, _) => {
+            principal.name.clone().or_else(|| principal.id.clone()).map(Subject::Group)
+        }
+        (PrincipalKind::User, confed_api::Flavor::DataCenter) => {
+            principal.username.clone().map(Subject::User)
+        }
+        (PrincipalKind::User, confed_api::Flavor::Cloud) => principal.id.clone().map(Subject::User),
+        (PrincipalKind::Other, _) => None,
+    }
+}
+
+/// A grant the server answered "not found" to, in a space that is there: it
+/// is the subject that is missing.
+fn no_such_subject(subject: &Subject, error: confed_api::ApiError) -> ConfedError {
+    match (subject, &error) {
+        (Subject::User(user), confed_api::ApiError::NotFound(_)) => unknown_user(user),
+        (Subject::Group(group), confed_api::ApiError::NotFound(_)) => unknown_group(group),
+        _ => error.into(),
+    }
+}
+
+fn unknown_group(group: &str) -> ConfedError {
+    ConfedError::refused(
+        "unknown_group",
+        ExitCode::NotFound,
+        format!("no group {group}"),
+        Some(format!(
+            "`confed admin group create {group}` makes it (`--members-from GROUP` with another's \
+             members); `confed admin group list --match TEXT` finds one by part of its name"
+        )),
+    )
+}
+
+/// Refuse a subject the server does not know, before anything is granted to it.
+async fn subject_exists(client: &Arc<dyn ConfluenceClient>, subject: &Subject) -> Result<()> {
+    let found = match subject {
+        Subject::Anonymous => return Ok(()),
+        Subject::Group(group) => admin(client)?.group_members(group, Some(1)).await.map(drop),
+        Subject::User(user) => user_known(client, user).await,
+    };
+    found.map_err(|e| no_such_subject(subject, e))
 }
 
 /// The space a `perms` command is about: its `KEY:` target, else `--space`

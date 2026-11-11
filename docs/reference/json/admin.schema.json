@@ -11,7 +11,7 @@
       "enum": [
         "user.create", "user.update", "user.disable", "user.enable", "user.delete", "user.groups",
         "group.list", "group.create", "group.delete", "group.members", "group.add", "group.remove",
-        "perms.list", "perms.roles", "perms.grant", "perms.revoke"
+        "perms.list", "perms.roles", "perms.grant", "perms.revoke", "perms.copy"
       ]
     },
     "dry_run": { "type": "boolean", "description": "Present on writes. True: nothing was sent that changes the server." },
@@ -121,7 +121,24 @@
         }
       }
     },
-    "subject": { "type": "string", "description": "`perms.grant`, `perms.revoke`, and `perms.list --subject`: `group:NAME`, `user:NAME` or `anonymous`, as given." },
+    "subject": { "type": "string", "description": "`perms.grant`, `perms.revoke`, and `perms.list` and `perms.copy` with `--subject`: `group:NAME`, `user:NAME` or `anonymous`, as given." },
+    "as": { "type": "string", "description": "`perms.copy --as`: who the permissions were granted to instead." },
+    "from": { "type": "string", "description": "`perms.copy`: the space that was read." },
+    "to": { "type": "string", "description": "`perms.copy`: the space that was granted in." },
+    "copied": {
+      "type": "array",
+      "description": "`perms.copy`: one entry per subject, in the order the source lists them.",
+      "items": { "$ref": "#/$defs/copied" }
+    },
+    "skipped": {
+      "type": "array",
+      "description": "`perms.copy`: subjects of the source that nothing can be granted to, each with why.",
+      "items": {
+        "type": "object",
+        "required": ["subject", "reason"],
+        "properties": { "subject": { "type": "string" }, "reason": { "type": "string" } }
+      }
+    },
     "operations": { "type": "array", "items": { "type": "string" }, "description": "`perms.grant`, `perms.revoke`: the operations asked for." },
     "held": {
       "type": "array",
@@ -132,6 +149,20 @@
     "role_id": { "type": "string" }
   },
   "$defs": {
+    "copied": {
+      "type": "object",
+      "required": ["from", "subject", "ok", "granted", "already_granted"],
+      "properties": {
+        "from": { "type": "string", "description": "Who holds the permissions in the source, as a command takes it." },
+        "subject": { "type": "string", "description": "Who they were granted to: the same subject, or the one `--as` (or `--map`) names." },
+        "ok": { "type": "boolean", "description": "False when granting to this subject failed; why is in the envelope's `errors`." },
+        "granted": { "type": "array", "items": { "type": "string" }, "description": "The operations granted now — under `--dry-run`, those that would be." },
+        "already_granted": { "type": "array", "items": { "type": "string" }, "description": "The operations the subject held in the destination already. Nothing was sent for them." },
+        "held": { "type": "array", "items": { "type": "string" }, "description": "Every operation the subject holds in the destination after the copy, read back from the server. Absent under `--dry-run`." },
+        "role_id": { "type": "string", "description": "On a site that assigns roles: the role the subject has in the source." },
+        "role_assigned": { "type": "boolean", "description": "Whether that role was assigned now; false when the subject had it already, or it failed." }
+      }
+    },
     "user": {
       "type": "object",
       "required": ["display_name"],
