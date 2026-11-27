@@ -284,6 +284,22 @@ impl SyncEngine {
             if !status.state.has_local_work() {
                 continue;
             }
+            // Whatever the recorded state, a body that still holds a conflict
+            // hunk is not uploaded: a hand edit after `confed resolve` that
+            // left the markers behind would otherwise publish them.
+            if files
+                .iter()
+                .find(|f| f.path == status.path)
+                .is_some_and(|f| crate::merge::has_conflict_hunk(&f.file.body))
+            {
+                plan.skipped.push(BlockedPage {
+                    page_id: status.page_id.clone().unwrap_or_default(),
+                    path: status.path.clone(),
+                    reason: "the file still has conflict markers; resolve them first".into(),
+                    kind: Blocked::Conflicted,
+                });
+                continue;
+            }
             if !status.tampering.is_empty() {
                 let fields: Vec<&str> = status.tampering.iter().map(|t| t.field).collect();
                 plan.skipped.push(BlockedPage {

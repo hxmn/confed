@@ -216,6 +216,35 @@ both_flavors!(edits_on_both_sides_merge_when_they_do_not_overlap, |mut h: Harnes
     assert!(file.contains("Second, again."), "{file}");
 });
 
+both_flavors!(markers_in_a_clean_page_are_not_pushed, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
+    h.pull().await;
+    let before = h.mock.page_body("1001").unwrap();
+
+    // Recorded clean, but a hand edit left a whole conflict hunk in the body.
+    let file = h.read("Doc.md").replace(
+        "Shared sentence.",
+        "<<<<<<< local\nOurs.\n||||||| base\nShared sentence.\n=======\nTheirs.\n>>>>>>> remote (v2)",
+    );
+    h.write("Doc.md", &file);
+    assert_eq!(h.status("1001"), PageState::Modified);
+
+    let dry = h
+        .engine
+        .push(&mut h.ws, &PushOptions { dry_run: true, ..Default::default() })
+        .await
+        .expect("dry run");
+    assert!(dry.pushed.is_empty());
+    assert_eq!(dry.skipped.len(), 1);
+    assert!(dry.skipped[0].reason.contains("conflict"), "{}", dry.skipped[0].reason);
+
+    let push = h.push().await;
+    assert!(push.pushed.is_empty(), "markers are never uploaded");
+    assert_eq!(push.skipped.len(), 1);
+    assert!(push.skipped[0].reason.contains("conflict"));
+    assert_eq!(h.mock.page_body("1001").unwrap(), before, "nothing was sent");
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

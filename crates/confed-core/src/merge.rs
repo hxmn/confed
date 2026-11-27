@@ -113,6 +113,24 @@ pub fn has_conflict_markers(text: &str) -> bool {
         .any(|l| l.starts_with("<<<<<<<") || l.starts_with(">>>>>>>") || l.starts_with("|||||||"))
 }
 
+/// Does this text hold a whole conflict hunk as `merge_bodies` writes one —
+/// a `<<<<<<< local` line, then `=======`, then `>>>>>>> remote`?
+///
+/// Stricter than [`has_conflict_markers`]: a stray `<<<<<<<` in prose is not
+/// enough, so a page that only quotes a marker is not refused.
+pub fn has_conflict_hunk(text: &str) -> bool {
+    let mut stage = 0;
+    for line in text.lines() {
+        stage = match stage {
+            0 if line.starts_with("<<<<<<< local") => 1,
+            1 if line == "=======" => 2,
+            2 if line.starts_with(">>>>>>> remote") => return true,
+            _ => stage,
+        };
+    }
+    false
+}
+
 /// Lines that still carry conflict markers, for error messages.
 pub fn conflict_marker_lines(text: &str) -> Vec<usize> {
     text.lines()
@@ -217,6 +235,11 @@ mod tests {
     #[test]
     fn clean_text_has_no_markers() {
         assert!(!has_conflict_markers("normal text\nwith lines\n"));
+        assert!(has_conflict_hunk(
+            "<<<<<<< local\na\n||||||| base\nb\n=======\nc\n>>>>>>> remote (v2)\n"
+        ));
+        assert!(!has_conflict_hunk("<<<<<<< local\nonly the start\n"));
+        assert!(!has_conflict_hunk(">>>>>>> remote\n=======\n<<<<<<< local\n"));
         assert!(conflict_marker_lines("normal\n").is_empty());
         // A line that merely mentions arrows is not a marker.
         assert!(!has_conflict_markers("a --> b\n"));
