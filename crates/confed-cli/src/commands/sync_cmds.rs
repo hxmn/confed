@@ -107,13 +107,18 @@ pub mod pull {
         scope.extend(ctx.workspace_paths(&args.pages));
 
         // Label and CQL filters resolve to page ids on the server.
+        let mut truncated = Vec::new();
         if let Some(label) = &args.label {
             let space = ctx.workspace()?.space_key()?;
             let cql = format!("space = \"{space}\" and label = \"{label}\"");
-            scope.extend(search_ids(&client, &cql).await?);
+            let (ids, cut) = search_ids(&client, &cql).await?;
+            scope.extend(ids);
+            truncated.extend(cut.then(|| format!("--label {label}")));
         }
         if let Some(cql) = &args.cql {
-            scope.extend(search_ids(&client, cql).await?);
+            let (ids, cut) = search_ids(&client, cql).await?;
+            scope.extend(ids);
+            truncated.extend(cut.then(|| "--cql".to_string()));
         }
         // An empty scope means every page, so a filter that matched nothing
         // must stop here: `--label typo --reset` would otherwise discard the
@@ -209,7 +214,13 @@ pub mod pull {
             outcome.skipped_dirty.iter().map(|b| format!("{}: {}", b.path, b.reason)).collect();
         let mut output = Output::from_data(&outcome, human)
             .warn_all(skipped)
-            .warn_all(outcome.warnings.iter().cloned());
+            .warn_all(outcome.warnings.iter().cloned())
+            .warn_all(truncated.iter().map(|filter| {
+                format!(
+                    "{filter} matched more than {SEARCH_LIMIT} pages; only the first \
+                     {SEARCH_LIMIT} were pulled — narrow the filter, or pull without one"
+                )
+            }));
         if !args.dry_run {
             output = output.warn_all(agent_docs::sync_rules_after(ctx.workspace()?));
         }
@@ -219,11 +230,24 @@ pub mod pull {
         Ok(output)
     }
 
+    /// How many matches a `--label` or `--cql` filter pulls at most.
+    const SEARCH_LIMIT: usize = 10_000;
+
+    /// The ids a filter matches, and whether there were more than the limit:
+    /// one more is asked for, so a cut is known rather than silent.
     async fn search_ids(
         client: &std::sync::Arc<dyn confed_api::ConfluenceClient>,
         cql: &str,
-    ) -> Result<Vec<String>> {
-        Ok(client.search_cql(cql, 500).await?.into_iter().map(|r| r.page_id.0).collect())
+    ) -> Result<(Vec<String>, bool)> {
+        let mut ids: Vec<String> = client
+            .search_cql(cql, SEARCH_LIMIT + 1)
+            .await?
+            .into_iter()
+            .map(|r| r.page_id.0)
+            .collect();
+        let cut = ids.len() > SEARCH_LIMIT;
+        ids.truncate(SEARCH_LIMIT);
+        Ok((ids, cut))
     }
 }
 
