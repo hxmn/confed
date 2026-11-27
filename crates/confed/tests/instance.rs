@@ -1368,14 +1368,12 @@ async fn a_space_cloned_into_a_root_without_a_shared_credential_gets_its_own() {
 async fn doctor_says_unreachable_the_way_other_commands_do() {
     let (server, _) = server().await;
     let root = instance_root(&server);
-    // Nothing listens on the discard port.
-    let out =
-        run(&root.path().join("DOCS"), &["doctor", "--base-url", "http://127.0.0.1:9", "--json"]);
+    // Nothing listens on the discard port. Another server than the session's
+    // is only used with a token of its own.
+    let elsewhere = ["--base-url", "http://127.0.0.1:9", "--token", "t", "--json"];
+    let out = run(&root.path().join("DOCS"), &[&["doctor"][..], &elsewhere].concat());
     assert_eq!(code(&out), 5, "{}", stderr(&out));
-    let out = run(
-        &root.path().join("DOCS"),
-        &["status", "--fetch", "--base-url", "http://127.0.0.1:9", "--json"],
-    );
+    let out = run(&root.path().join("DOCS"), &[&["status", "--fetch"][..], &elsewhere].concat());
     assert_eq!(code(&out), 5, "{}", stderr(&out));
 }
 

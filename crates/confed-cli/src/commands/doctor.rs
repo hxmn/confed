@@ -100,6 +100,18 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
                 "credentials",
                 format!("{} auth for {}", session.auth_method.as_str(), session.base_url),
             ));
+            if let Some(ws_url) = ctx.workspace().ok().and_then(|ws| ws.base_url().ok().flatten()) {
+                if !crate::context::same_origin(&ws_url, &session.base_url) {
+                    checks.push(Check::fail(
+                        "session server",
+                        format!(
+                            "the session is for {}, but the workspace was set up for {ws_url}; \
+                             the stored token is not sent to either until `confed init` is run again",
+                            session.base_url
+                        ),
+                    ));
+                }
+            }
             if session.secret_backend == SecretBackend::Sqlite && keyring_available() {
                 // A keyring is here now, so the file store was a choice (or the
                 // keyring appeared later) — not something to warn about.

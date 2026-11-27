@@ -269,6 +269,26 @@ impl Context {
             })?,
         };
 
+        // A stored secret goes only to the origin it was stored for. A base URL
+        // from the flag, the environment or the config that points elsewhere —
+        // a staging URL left in the shell — would otherwise get this
+        // workspace's credential, and its pages taken for this space's.
+        if let Some(session) = &session {
+            let token_given =
+                self.resolver.lookup(&config::TOKEN, self.global.token.as_deref()).is_some();
+            if !token_given && !same_origin(&base_url, &session.base_url) {
+                return Err(ConfedError::usage_with_hint(
+                    format!(
+                        "the base URL {base_url} is not the server this workspace was set up for \
+                         ({})",
+                        session.base_url
+                    ),
+                    "unset CONFED_BASE_URL or drop --base-url (and `confed config --unset base_url`); \
+                     to use another server, give its token with --token or CONFED_TOKEN",
+                ));
+            }
+        }
+
         let flavor = self.resolve_flavor(&base_url, session.as_ref())?;
         let auth_method = session
             .as_ref()
@@ -728,9 +748,27 @@ fn edit_distance(a: &str, b: &str) -> usize {
     d[a.len()][b.len()]
 }
 
+/// Do two base URLs name the same server — scheme, host and port? A URL that
+/// does not parse is compared as text.
+pub(crate) fn same_origin(a: &str, b: &str) -> bool {
+    match (url::Url::parse(a.trim()), url::Url::parse(b.trim())) {
+        (Ok(a), Ok(b)) => a.origin() == b.origin(),
+        _ => a.trim().trim_end_matches('/') == b.trim().trim_end_matches('/'),
+    }
+}
+
 #[cfg(test)]
 mod path_tests {
     use super::*;
+
+    #[test]
+    fn origins_compare_scheme_host_and_port() {
+        assert!(same_origin("https://wiki.example.test/", "https://wiki.example.test/confluence"));
+        assert!(same_origin("https://WIKI.example.test", "https://wiki.example.test:443"));
+        assert!(!same_origin("https://wiki.example.test", "https://staging.example.test"));
+        assert!(!same_origin("http://wiki.example.test", "https://wiki.example.test"));
+        assert!(!same_origin("https://wiki.example.test:8443", "https://wiki.example.test"));
+    }
 
     #[test]
     fn relative_paths_normalize() {

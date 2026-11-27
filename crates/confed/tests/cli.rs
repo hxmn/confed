@@ -345,6 +345,28 @@ async fn the_session_database_is_private_to_its_owner() {
 }
 
 #[tokio::test]
+async fn the_stored_token_is_never_sent_to_another_server() {
+    let server = dc_server().await;
+    let other = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    // The token comes from `.session.db`, the base URL from the environment.
+    let mut cmd = confed(dir.path(), &["pull", "--json"]);
+    cmd.env("CONFED_BASE_URL", other.uri());
+    let output = run(cmd);
+    assert_eq!(exit_code(&output), 2, "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("not the server this workspace"), "{}", stdout(&output));
+    let seen = other.received_requests().await.unwrap_or_default();
+    assert!(seen.is_empty(), "the other server was contacted: {seen:?}");
+
+    // With a token of its own, another server may be used on purpose.
+    let mut cmd = confed_authed(dir.path(), &["whoami", "--json"]);
+    cmd.env("CONFED_BASE_URL", other.uri());
+    assert_eq!(exit_code(&run(cmd)), 0);
+}
+
+#[tokio::test]
 async fn pull_materializes_the_hierarchy_and_status_is_then_clean() {
     let server = dc_server().await;
     let dir = tempfile::tempdir().unwrap();
