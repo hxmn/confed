@@ -1277,6 +1277,22 @@ pub async fn abort(
                 format!("finish the move with `confed instance resume {journal_id}`"),
             ));
         }
+        // Asked for, and not there yet: the server took the request and may
+        // still be at it. Aborting now would leave the pages to land in the
+        // destination with no journal entry left to finish the move.
+        if plan.was_requested(&id) {
+            return Err(ConfedError::state_with_hint(
+                format!(
+                    "the server accepted the move of page {id} to space {} and has not \
+                     finished it",
+                    plan.dest.key
+                ),
+                format!(
+                    "wait for it, then `confed instance resume {journal_id}`; to undo the move, \
+                     move the pages back afterwards with `confed instance mv`"
+                ),
+            ));
+        }
     }
     let renamed = std::mem::take(&mut plan.renamed);
     for id in &renamed {

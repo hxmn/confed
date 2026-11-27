@@ -497,6 +497,43 @@ async fn a_parent_id_in_another_space_is_refused_by_push() {
 }
 
 #[tokio::test]
+async fn abort_is_refused_while_a_requested_move_is_still_running() {
+    let mut h = Harness::new().await;
+    h.mock.lag_moves(1_000);
+    let mut request = h.request("1002", "2002");
+    request.wait_secs = 0;
+    let mut plan = h.plan(&request).await.unwrap();
+    let id =
+        h.instance.journal_begin(crossmove::OP, &serde_json::to_value(&plan).unwrap()).unwrap();
+    let client = h.client();
+    crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, Step::Planned, 2)
+        .await
+        .unwrap_err();
+    let entry = h.instance.journal_entry(&id).unwrap().unwrap();
+    assert_eq!(entry.state, Step::Planned);
+    let mut plan: MovePlan = serde_json::from_value(entry.plan).unwrap();
+    assert!(!plan.requested.is_empty(), "the server took the request");
+
+    let err =
+        crossmove::abort(&h.instance, &id, &client, &mut plan, Step::Planned).await.unwrap_err();
+    assert!(err.hint().unwrap().contains("confed instance resume"), "{err:?}");
+    assert_eq!(h.instance.journal_entry(&id).unwrap().unwrap().state, Step::Planned);
+
+    // The server finishes; resume then completes the move.
+    h.mock.lag_moves(0);
+    for _ in 0..1_001 {
+        let _ = client.get_page(&"1002".into(), confed_api::BodyFormat::Storage).await;
+    }
+    let entry = h.instance.journal_entry(&id).unwrap().unwrap();
+    let mut plan: MovePlan = serde_json::from_value(entry.plan).unwrap();
+    crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, entry.state, 2)
+        .await
+        .unwrap();
+    assert!(h.ws("ENG").absolute("Engineering Home/Runbooks/Onboarding.md").exists());
+    assert!(h.instance.journal_unfinished().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn abort_asks_the_server_and_refuses_a_move_the_journal_missed() {
     let h = Harness::new().await;
     let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();
