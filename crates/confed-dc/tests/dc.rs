@@ -293,6 +293,36 @@ async fn create_page_posts_the_v1_shape_and_applies_labels() {
     assert_eq!(page.summary.labels.unwrap_or_default(), vec!["draft"]);
 }
 
+/// A label the server refuses once the page exists does not undo the create:
+/// the page comes back, with the labels it has.
+#[tokio::test]
+async fn a_refused_label_does_not_turn_a_created_page_into_an_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/api/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "2002", "type": "page", "status": "current", "title": "New Page",
+            "space": { "key": "DOCS" }, "version": { "number": 1 }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/confluence/rest/api/content/2002/label"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("no"))
+        .mount(&server)
+        .await;
+    let new = NewPage {
+        space: SpaceId::from_key("DOCS"),
+        title: "New Page".into(),
+        parent_id: None,
+        body_storage: "<p>Body</p>".into(),
+        labels: vec!["draft".into()],
+    };
+    let page = client(&server).create_page(&new).await.expect("the page was created");
+    assert_eq!(page.summary.id, PageId::new("2002"));
+    assert_eq!(page.summary.labels, Some(vec![]), "the label did not go on");
+}
+
 #[tokio::test]
 async fn moving_a_page_re_parents_it_with_a_version_bump() {
     let server = MockServer::start().await;

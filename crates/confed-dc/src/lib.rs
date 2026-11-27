@@ -652,11 +652,27 @@ impl ConfluenceClient for DcClient {
         if page.summary.parent_id.is_none() {
             page.summary.parent_id = new.parent_id.clone();
         }
+        // The page exists from here on: a label the server refuses must not
+        // turn its creation into an error, or the caller would never learn
+        // the page's id and create it again. The page comes back with the
+        // labels it has, and the next push adds the rest.
+        let mut added = Vec::new();
         for label in &new.labels {
-            self.add_label(&page.summary.id, label).await?;
+            match self.add_label(&page.summary.id, label).await {
+                Ok(()) => added.push(label.clone()),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "confed::http",
+                        page = %page.summary.id, %label, error = %e,
+                        "page created, but a label could not be added"
+                    );
+                    break;
+                }
+            }
         }
-        if page.summary.labels.as_ref().is_none_or(Vec::is_empty) {
-            page.summary.labels = Some(new.labels.clone());
+        if page.summary.labels.as_ref().is_none_or(Vec::is_empty) || added.len() < new.labels.len()
+        {
+            page.summary.labels = Some(added);
         }
         Ok(page)
     }
