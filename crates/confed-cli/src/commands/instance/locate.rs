@@ -6,7 +6,7 @@
 use super::Connection;
 use crate::cli::{InstanceLocateArgs, InstanceTreeArgs};
 use crate::commands::tree;
-use crate::context::{split_space_ref, Context};
+use crate::context::{split_space_ref_with, Context};
 use crate::output::{ErrorEntry, Output};
 use crate::pageref::{self, UrlRef};
 use confed_api::{ApiError, BodyFormat, ConfluenceClient, PageId, SpaceId};
@@ -88,7 +88,9 @@ pub async fn locate(
                 return Ok(Found::Page { member, page_id });
             }
         }
-    } else if let Some((key, path)) = split_space_ref(reference) {
+    } else if let Some((key, path)) =
+        split_space_ref_with(reference, |key| instance.member(key).ok().flatten().is_some())
+    {
         let member = instance.member(key)?.ok_or_else(|| unregistered(key, &members))?;
         (member, path.trim_start_matches('/').to_string())
     } else if !reference.is_empty() && reference.chars().all(|c| c.is_ascii_digit()) {

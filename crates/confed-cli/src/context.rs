@@ -575,7 +575,8 @@ impl Context {
         if crate::pageref::is_url(reference) {
             return self.resolve_url(ws, &own, reference);
         }
-        let reference = match split_space_ref(reference) {
+        let is_key = |key: &str| key.eq_ignore_ascii_case(&own) || self.is_member(key);
+        let reference = match split_space_ref_with(reference, is_key) {
             Some((key, path)) if key.eq_ignore_ascii_case(&own) => path,
             Some((key, _)) if self.is_member(key) => {
                 return Err(ConfedError::usage_with_hint(
@@ -707,6 +708,23 @@ pub fn split_space_ref(reference: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((key, path))
+}
+
+/// [`split_space_ref`], also taking a key that is not all capitals — Confluence
+/// allows `docs` — but only when `is_key` knows it for a space: `Notes:draft.md`
+/// stays a file name unless a space is called `Notes`.
+pub fn split_space_ref_with<'a>(
+    reference: &'a str,
+    is_key: impl Fn(&str) -> bool,
+) -> Option<(&'a str, &'a str)> {
+    if let Some(found) = split_space_ref(reference) {
+        return Some(found);
+    }
+    let (key, path) = reference.split_once(':')?;
+    let shaped = key.len() > 1
+        && key.starts_with(|c: char| c.is_ascii_alphabetic())
+        && key.chars().all(|c| c.is_ascii_alphanumeric());
+    (shaped && !path.starts_with("//") && is_key(key)).then_some((key, path))
 }
 
 fn not_an_instance() -> ConfedError {
@@ -846,6 +864,11 @@ mod path_tests {
         assert_eq!(split_space_ref("https://wiki.example.test/x"), None);
         assert_eq!(split_space_ref("Plan: draft.md"), None);
         assert_eq!(split_space_ref("Docs:a.md"), None, "keys are capitals");
+        // …unless a space of that key, in any case, is known.
+        let known = |k: &str| k.eq_ignore_ascii_case("docs");
+        assert_eq!(split_space_ref_with("docs:a.md", known), Some(("docs", "a.md")));
+        assert_eq!(split_space_ref_with("Notes:a.md", known), None);
+        assert_eq!(split_space_ref_with("DOCS:a.md", |_| false), Some(("DOCS", "a.md")));
     }
 
     #[test]
