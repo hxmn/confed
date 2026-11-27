@@ -201,7 +201,16 @@ impl Renderer<'_> {
                 if text.is_empty() {
                     String::new()
                 } else {
-                    format!("{} {}", "#".repeat(level), heading_line(text))
+                    let mut line = heading_line(text);
+                    // A trailing ` #` is a heading's optional closing sequence
+                    // to CommonMark, and would vanish on the way back: the
+                    // last `#` is escaped so it stays text.
+                    let hashes = line.len() - line.trim_end_matches('#').len();
+                    let before = line[..line.len() - hashes].chars().last();
+                    if hashes > 0 && before.is_none_or(char::is_whitespace) {
+                        line.insert(line.len() - 1, '\\');
+                    }
+                    format!("{} {}", "#".repeat(level), line)
                 }
             }
             "ul" => self.render_list(el, '-', '.'),
@@ -1619,6 +1628,19 @@ mod user_mention_tests {
         .unwrap();
         assert!(out.starts_with(r#"<ac:structured-macro ac:name="code">"#), "{out}");
         assert!(out.contains("<![CDATA[<p>hi there</p><script>x</script>]]>"), "{out}");
+    }
+
+    #[test]
+    fn a_heading_that_ends_in_a_hash_keeps_it() {
+        let opts = ConvertOptions::default();
+        for storage in ["<h2>Use C #</h2>", "<h2>Count ##</h2>", "<h3>#</h3>"] {
+            let md = crate::storage_to_markdown(storage, &opts).unwrap().markdown;
+            let back = crate::markdown_to_storage(&md, &opts).unwrap();
+            assert_eq!(back, storage, "{md}");
+        }
+        // A hash inside a word is plain text already.
+        let md = crate::storage_to_markdown("<h2>Use C#</h2>", &opts).unwrap().markdown;
+        assert_eq!(md.trim(), "## Use C#");
     }
 
     #[test]
