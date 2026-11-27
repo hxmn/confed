@@ -371,6 +371,44 @@ async fn new_titles_are_checked_in_the_source_and_against_each_other() {
     assert!(err.to_string().contains("both be titled \"Same\""), "{err}");
 }
 
+/// A link fix whose update fails is tried again by the resume, even when the
+/// page also holds a link that reaches nothing.
+#[tokio::test]
+async fn a_failed_link_fix_is_retried_though_the_page_has_a_dead_link() {
+    let mut h = Harness::new().await;
+    // A moved page: its link to a page left behind needs the space key, and
+    // its other link reaches nothing.
+    h.mock.remote_edit(
+        "1002",
+        r#"<p>Start with <ac:link><ri:page ri:content-title="Team Handbook" /></ac:link>, not <ac:link><ri:page ri:content-title="Nowhere" /></ac:link>.</p>"#,
+    );
+    h.pull("DOCS").await;
+    let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();
+    let id =
+        h.instance.journal_begin(crossmove::OP, &serde_json::to_value(&plan).unwrap()).unwrap();
+    let client = h.client();
+    h.mock.break_update("1002", true);
+    crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, Step::Planned, 2)
+        .await
+        .unwrap_err();
+    assert!(!h.mock.page_body("1002").unwrap().contains(r#"ri:space-key="DOCS""#));
+
+    h.mock.break_update("1002", false);
+    let entry = h.instance.journal_entry(&id).unwrap().unwrap();
+    let mut plan: MovePlan = serde_json::from_value(entry.plan).unwrap();
+    crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, entry.state, 2)
+        .await
+        .expect("the resume finishes");
+    let body = h.mock.page_body("1002").unwrap();
+    assert!(body.contains(r#"ri:space-key="DOCS" ri:content-title="Team Handbook""#), "{body}");
+    assert_eq!(
+        plan.links_broken.len(),
+        1,
+        "the dead link is reported once: {:?}",
+        plan.links_broken
+    );
+}
+
 #[tokio::test]
 async fn a_home_page_below_a_moved_root_is_refused() {
     let h = Harness::new().await;

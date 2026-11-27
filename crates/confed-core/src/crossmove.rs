@@ -2005,9 +2005,11 @@ async fn fix_links(
     let mut known = PageIndex::of(spaces, plan)?;
     let fixes = plan.links.clone();
     for fix in fixes {
+        // Done once rewritten, or left to the server. A dead link in the page
+        // is no reason to skip it: recorded before the update, it would keep a
+        // page whose update failed from ever being retried.
         if plan.links_rewritten.iter().any(|r| r.page_id == fix.page_id)
             || plan.links_by_server.contains(&fix.page_id)
-            || plan.links_broken.iter().any(|b| b.page_id == fix.page_id)
         {
             continue;
         }
@@ -2041,12 +2043,15 @@ async fn fix_links(
             let ends_at =
                 if exists(&link.meant.0, &link.meant.1) { &link.meant } else { &link.reaches };
             if concerns_the_move && !exists(&ends_at.0, &ends_at.1) {
-                plan.links_broken.push(BrokenLink {
+                let broken = BrokenLink {
                     page_id: fix.page_id.clone(),
                     space: own.clone(),
                     title: link.reaches.1.clone(),
                     reaches: link.reaches.0.clone(),
-                });
+                };
+                if !plan.links_broken.contains(&broken) {
+                    plan.links_broken.push(broken);
+                }
             }
         }
 
