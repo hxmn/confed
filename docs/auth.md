@@ -210,7 +210,9 @@ Two habits worth keeping:
 ## Security properties
 
 **`.session.db` is created `0600` and confed refuses to open it if it is looser.** The
-permissions are set when the file is created and reasserted on every save. If the mode is
+file is created with them — it never exists readable by others, not even for the instant
+before the database is written — and they are reasserted on every save. Windows has no such
+mode: there the file takes the directory's access control list. If the mode is
 widened afterwards, the next command fails with exit 7 and tells you to run
 `chmod 600 .session.db`. (That error's hint also offers `confed doctor --fix`; it does not
 actually work, because `doctor` opens the session file itself and hits the same error

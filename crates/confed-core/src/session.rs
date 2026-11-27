@@ -135,6 +135,8 @@ impl SessionStore {
         let existed = path.exists();
         if existed {
             check_permissions(&path)?;
+        } else {
+            create_private(&path)?;
         }
         let conn = Connection::open(&path)
             .map_err(|e| ConfedError::Other(format!("could not open {}: {e}", path.display())))?;
@@ -400,6 +402,28 @@ pub fn keyring_available() -> bool {
     )
 }
 
+/// Create the credential file empty and private from its first instant:
+/// left to SQLite, it would exist with the umask's mode (typically 0644)
+/// until restricted, and a process that opened it then could read the token
+/// written afterwards. SQLite takes an empty file for a new database, and
+/// gives its journal the database's mode. Windows has no such mode; the file
+/// inherits the directory's ACL there.
+fn create_private(path: &Path) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        // Created meanwhile by another confed: it made it private too.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => check_permissions(path),
+        Err(e) => Err(ConfedError::io(format!("creating {}", path.display()), e)),
+    }
+}
+
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -438,6 +462,21 @@ fn check_permissions(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn the_credential_file_is_private_from_the_moment_it_exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_DB_FILENAME);
+        // What SQLite would leave behind first, under the usual umask 022.
+        super::create_private(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+        let store = SessionStore::open_file(&path).unwrap();
+        let mode = std::fs::metadata(store.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+    }
+
     use super::*;
 
     fn sample(backend: SecretBackend) -> Session {
