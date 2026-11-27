@@ -24,7 +24,7 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
     let mut r = Renderer {
         opts,
         last_bullet: None,
-        unresolved_user: false,
+        keep_verbatim: false,
         mark_mode: false,
         sentinels: Vec::new(),
         previewed: HashSet::new(),
@@ -38,7 +38,7 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
     let mut rendered: Vec<(BlockKind, (usize, usize), String, String)> = Vec::new();
     for block in &doc.blocks {
         let raw = &storage[block.span.0..block.span.1];
-        r.unresolved_user = false;
+        r.keep_verbatim = false;
         let bullet_before = r.last_bullet;
         let mut text = match by_start.get(&block.span.0) {
             Some(node) => r.render_top(node, block.kind, raw),
@@ -47,7 +47,7 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
         // A mention confed could not resolve would render as a link to the
         // wrong profile. Keeping the block verbatim is both honest and lossless,
         // and it heals itself on the next pull that can resolve the person.
-        let kind = if r.unresolved_user && block.kind != BlockKind::Preserved {
+        let kind = if r.keep_verbatim && block.kind != BlockKind::Preserved {
             text = preserved_fence(raw);
             BlockKind::Preserved
         } else {
@@ -71,7 +71,7 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
         let marked = match by_start.get(&block.span.0) {
             Some(node) if has_marks => {
                 r.last_bullet = bullet_before;
-                r.unresolved_user = false;
+                r.keep_verbatim = false;
                 r.mark_mode = true;
                 r.sentinels.clear();
                 let with = r.render_top(node, block.kind, raw);
@@ -111,8 +111,10 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
 
 struct Renderer<'a> {
     opts: &'a ConvertOptions,
-    /// Set while rendering a block that mentions somebody confed cannot resolve.
-    unresolved_user: bool,
+    /// Set while rendering a block that has something no Markdown spelling
+    /// carries back — a mention or a page link confed cannot resolve, a status
+    /// lozenge — so the block is kept as a `confluence` fence instead.
+    keep_verbatim: bool,
     /// True during the second render of a commented block, when inline comment
     /// markers emit sentinel characters instead of nothing.
     mark_mode: bool,
@@ -436,7 +438,7 @@ impl Renderer<'_> {
             // `classify` preserves any block holding one, so this is never
             // reached; should it be, the block falls back to verbatim rather
             // than dropping what it could not read.
-            Node::Deep(_) => self.unresolved_user = true,
+            Node::Deep(_) => self.keep_verbatim = true,
             Node::Element(el) => self.inline_element(el, out),
         }
     }
@@ -627,6 +629,19 @@ impl Renderer<'_> {
                 let space =
                     t.attr_local("space-key").unwrap_or(self.opts.space_key.as_str()).to_string();
                 let id = t.attr_local("content-id").unwrap_or("").to_string();
+                // A link by id alone to a page confed has no file or title for
+                // has nowhere to point: rendered, it would lead to the space,
+                // and go back up as that.
+                let title = match self.opts.page_titles.get(&id) {
+                    Some(known) if title.is_empty() => known.clone(),
+                    _ => title,
+                };
+                if title.is_empty()
+                    && !id.is_empty()
+                    && !self.opts.page_links.by_id.contains_key(&id)
+                {
+                    self.keep_verbatim = true;
+                }
                 if !label_from_body {
                     label = escape_md(&title);
                 }
@@ -649,7 +664,7 @@ impl Renderer<'_> {
                     None => {
                         // Nothing sensible can be written; the caller keeps the
                         // block as it was.
-                        self.unresolved_user = true;
+                        self.keep_verbatim = true;
                         String::new()
                     }
                 }
@@ -1449,6 +1464,23 @@ mod user_mention_tests {
         let md = crate::storage_to_markdown(MENTION, &opts_with_user()).unwrap().markdown;
         assert_eq!(md.trim(), "Ask [@Alice Ng](https://wiki.corp/display/~alice.ng) about it.");
         assert!(!md.contains("6cb6d404"), "the opaque key is not shown to the reader");
+    }
+
+    #[test]
+    fn a_link_to_a_page_confed_does_not_know_keeps_its_block() {
+        let storage = "<p>See <ac:link><ri:page ri:content-id=\"2002\"/>\
+            <ac:plain-text-link-body><![CDATA[elsewhere]]></ac:plain-text-link-body></ac:link> now.</p>";
+        let opts = ConvertOptions {
+            base_url: "https://wiki.example.test".into(),
+            space_key: "DOCS".into(),
+            ..Default::default()
+        };
+        let md = crate::storage_to_markdown(storage, &opts).unwrap().markdown;
+        assert!(md.contains("```confluence"), "got: {md}");
+        assert!(!md.contains("display/DOCS/)"), "no link to the space: {md}");
+        let back = crate::markdown_to_storage(&md, &opts).unwrap();
+        assert!(back.contains(r#"ri:content-id="2002""#), "{back}");
+        assert!(back.contains("elsewhere"), "{back}");
     }
 
     #[test]

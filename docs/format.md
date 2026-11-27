@@ -294,7 +294,8 @@ link.
 Somebody confed cannot resolve — a deleted account, or one it lacks permission to see —
 is never linked to a guessed URL. That block keeps its original markup in a
 ```` ```confluence ```` fence instead, and the next pull that can resolve the person
-renders it properly.
+renders it properly. The same goes for a link to a page by id alone that the workspace
+has no title or file for: it is kept as it is rather than pointed at the space.
 
 ## Comments
 
