@@ -242,7 +242,7 @@ pub fn compute_status(
 
     // BTreeMap keeps the output ordered by path without a later sort.
     let mut out: BTreeMap<String, PageStatus> = BTreeMap::new();
-    let mut seen_ids: Vec<String> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for local in files {
         let Some(page_id) = local.file.frontmatter.page_id() else {
@@ -265,7 +265,7 @@ pub fn compute_status(
             );
             continue;
         };
-        seen_ids.push(page_id.to_string());
+        seen_ids.insert(page_id.to_string());
 
         let base_record = base_by_id.get(page_id).copied();
         let remote_record = remote_by_id.get(page_id).copied();
@@ -366,7 +366,7 @@ pub fn compute_status(
 
     // Base records with no working file: deleted locally.
     for record in base {
-        if seen_ids.iter().any(|id| id == &record.page_id) {
+        if seen_ids.contains(&record.page_id) {
             continue;
         }
         let remote_record = remote_by_id.get(record.page_id.as_str()).copied();
@@ -427,7 +427,9 @@ pub fn compute_status(
 /// Scan the workspace and compute status for everything in it.
 pub fn scan(ws: &Workspace) -> Result<Scan> {
     let (files, mut scan) = read_working_files(ws)?;
-    scan.pages = compute_status(&files, &ws.state().all_pages()?, &ws.state().all_remote()?);
+    // Hashes and versions are all a status compares: the bodies stay unread.
+    scan.pages =
+        compute_status(&files, &ws.state().all_pages_meta()?, &ws.state().all_remote_meta()?);
     Ok(scan)
 }
 

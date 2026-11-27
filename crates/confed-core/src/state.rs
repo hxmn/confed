@@ -541,6 +541,34 @@ impl StateDb {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// [`Self::all_pages`] without the bodies and block maps, which are left
+    /// empty: for what compares hashes and versions only, such as `status`.
+    /// Decompressing every body of a large space costs most of a scan.
+    pub fn all_pages_meta(&self) -> Result<Vec<PageRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT page_id, title, slug, local_path, parent_id, position, version, status,
+                    labels, author, created_at, updated_at, X'', storage_hash,
+                    markdown_hash, NULL, sync_state, synced_at, render_key
+             FROM pages ORDER BY local_path",
+        )?;
+        let rows = stmt.query_map([], page_from_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// [`Self::all_remote`] the same way: a stored body reads as `Some("")`,
+    /// one still owed as `None`.
+    pub fn all_remote_meta(&self) -> Result<Vec<RemotePage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT page_id, title, parent_id, position, version, status, labels, author,
+                    created_at, updated_at,
+                    CASE WHEN storage_body IS NULL THEN NULL ELSE X'' END,
+                    storage_hash, fetched_at, deleted
+             FROM remote_pages ORDER BY page_id",
+        )?;
+        let rows = stmt.query_map([], remote_from_row)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Every page's identity and place, without its body: for what needs the
     /// whole space but none of its content (links, titles, paths).
     pub fn page_index(&self) -> Result<Vec<PageEntry>> {
@@ -1121,6 +1149,10 @@ fn compress(text: &str) -> Result<Vec<u8>> {
 }
 
 fn decompress(bytes: &[u8]) -> Result<String> {
+    // What the `*_meta` queries select in a body's place.
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
     let raw = zstd::decode_all(bytes).map_err(|e| ConfedError::io("decompressing page body", e))?;
     String::from_utf8(raw).map_err(|e| ConfedError::Other(format!("stored body is not UTF-8: {e}")))
 }

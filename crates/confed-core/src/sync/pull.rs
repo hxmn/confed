@@ -149,20 +149,17 @@ pub(super) fn deleted_page_message(path: &str) -> String {
     )
 }
 
-pub(super) fn status_of<'a>(statuses: &'a [PageStatus], page_id: &str) -> Option<&'a PageStatus> {
-    statuses.iter().find(|s| s.page_id.as_deref() == Some(page_id))
-}
-
 /// What a pull reads once and every pass of it consults: the server's
 /// pages, the base, each page's status and placement, and how to render.
 pub(super) struct PullView<'a> {
     pub(super) remote: &'a [RemotePage],
     pub(super) base: &'a [PageRecord],
-    pub(super) statuses: &'a [PageStatus],
     pub(super) placements: &'a HashMap<String, Placement>,
     pub(super) render: &'a Rendering,
     pub(super) files_by_id: HashMap<&'a str, &'a LocalFile>,
     pub(super) base_by_id: HashMap<&'a str, &'a PageRecord>,
+    /// The statuses by page id: looked up once per page, so not by a scan.
+    pub(super) status_by_id: HashMap<&'a str, &'a PageStatus>,
     pub(super) claimed: Vec<&'a str>,
     pub(super) claimed_sidecars: Vec<&'a str>,
     /// Whether attachments and comments are read for every page in scope,
@@ -355,7 +352,6 @@ impl SyncEngine {
         let view = PullView {
             remote: &remote,
             base: &base,
-            statuses: &statuses,
             placements: &placements,
             render: &render,
             files_by_id: files
@@ -363,6 +359,13 @@ impl SyncEngine {
                 .filter_map(|f| f.file.frontmatter.page_id().map(|id| (id, f)))
                 .collect(),
             base_by_id: base.iter().map(|p| (p.page_id.as_str(), p)).collect(),
+            // The first status for an id wins, as a scan of the list found it:
+            // one file can claim a page another file already has.
+            status_by_id: statuses
+                .iter()
+                .rev()
+                .filter_map(|s| Some((s.page_id.as_deref()?, s)))
+                .collect(),
             // What every page in the space lays claim to. A rename leaves a
             // file and a sidecar behind, and they are removed — but never one
             // that another page is taking over: when two pages swap titles,
@@ -487,8 +490,7 @@ impl SyncEngine {
                 }
                 continue;
             }
-            let status =
-                view.statuses.iter().find(|s| s.page_id.as_deref() == Some(&remote_page.page_id));
+            let status = view.status_by_id.get(remote_page.page_id.as_str()).copied();
             let base_record = view.base_by_id.get(remote_page.page_id.as_str()).copied();
             // Was this file rendered from the same inputs confed would use now?
             let stale_rendering = match (base_record, &remote_page.storage_body) {
@@ -605,7 +607,7 @@ impl SyncEngine {
             let path = base_record.map(|b| b.local_path.clone()).unwrap_or_default();
             // Say what --force threw away with it.
             let dirty =
-                status_of(view.statuses, &remote_page.page_id).is_some_and(|s| s.local_dirty);
+                view.status_by_id.get(remote_page.page_id.as_str()).is_some_and(|s| s.local_dirty);
             if (opts.force || opts.reset) && (dirty || pending_comment_work(ws, &path) > 0) {
                 outcome.discarded.push(PageChange {
                     page_id: remote_page.page_id.clone(),
@@ -760,7 +762,7 @@ impl SyncEngine {
         // Say what was thrown away. A destructive flag is not a licence to
         // be quiet about it.
         if (opts.reset || opts.force)
-            && status_of(view.statuses, &remote_page.page_id).is_some_and(|s| s.local_dirty)
+            && view.status_by_id.get(remote_page.page_id.as_str()).is_some_and(|s| s.local_dirty)
         {
             outcome.discarded.push(PageChange {
                 page_id: remote_page.page_id.clone(),
