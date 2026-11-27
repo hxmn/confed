@@ -4,7 +4,7 @@
 //! that already contains the opaque cursor. Data Center v1 (and the v1 endpoints
 //! Cloud still exposes) is offset based: the caller advances `start` itself.
 
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::http::Http;
 use crate::wire::resolve_under_base;
 use serde::de::DeserializeOwned;
@@ -55,14 +55,28 @@ pub async fn collect_cursor<T: DeserializeOwned>(
     query: &[(&str, String)],
     limit: Option<usize>,
 ) -> ApiResult<Vec<T>> {
+    collect_cursor_within(http, path, query, limit, MAX_REQUESTS).await
+}
+
+async fn collect_cursor_within<T: DeserializeOwned>(
+    http: &Http,
+    path: &str,
+    query: &[(&str, String)],
+    limit: Option<usize>,
+    max_requests: usize,
+) -> ApiResult<Vec<T>> {
     let mut out: Vec<T> = Vec::new();
     let mut page: CursorPage<T> = http.get_json(path, query).await?;
-    for _ in 0..MAX_REQUESTS {
+    let mut followed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for _ in 0..max_requests {
         out.append(&mut page.results);
         if limit.is_some_and(|l| out.len() >= l) {
-            break;
+            if let Some(l) = limit {
+                out.truncate(l);
+            }
+            return Ok(out);
         }
-        let Some(next) = page.links.next.take() else { break };
+        let Some(next) = page.links.next.take() else { return Ok(out) };
         let mut url = resolve_under_base(http.base_url(), &next)?;
         // A next link on another host — a proxy's own name, a misconfigured
         // base URL — is followed on this one: the request carries the
@@ -75,12 +89,27 @@ pub async fn collect_cursor<T: DeserializeOwned>(
             };
             url = resolve_under_base(http.base_url(), &tail)?;
         }
+        // The same page again would loop for ever; a list read that far is
+        // not complete, and must not be taken for it.
+        if !followed.insert(url.to_string()) {
+            return Err(ApiError::Server {
+                status: 200,
+                body: format!("{path}: the server handed out the same next page twice ({url})"),
+            });
+        }
         page = http.get_json(url.as_str(), &[]).await?;
     }
-    if let Some(l) = limit {
-        out.truncate(l);
+    Err(cut_short(path, max_requests))
+}
+
+/// A listing that would not end: an error, since returning what was read
+/// would pass a partial list for the whole — for a page listing, the rest of
+/// the space taken for deleted.
+fn cut_short(path: &str, max_requests: usize) -> ApiError {
+    ApiError::Server {
+        status: 200,
+        body: format!("{path}: still more after {max_requests} requests; the list is not complete"),
     }
-    Ok(out)
 }
 
 /// Walk `start`/`limit` until the server returns a short page (or stops offering
@@ -92,10 +121,22 @@ pub async fn collect_offset<T: DeserializeOwned>(
     page_size: usize,
     limit: Option<usize>,
 ) -> ApiResult<Vec<T>> {
+    collect_offset_within(http, path, query, page_size, limit, MAX_REQUESTS).await
+}
+
+async fn collect_offset_within<T: DeserializeOwned>(
+    http: &Http,
+    path: &str,
+    query: &[(&str, String)],
+    page_size: usize,
+    limit: Option<usize>,
+    max_requests: usize,
+) -> ApiResult<Vec<T>> {
     let page_size = page_size.max(1);
     let mut out: Vec<T> = Vec::new();
     let mut start = 0usize;
-    for _ in 0..MAX_REQUESTS {
+    let mut complete = false;
+    for _ in 0..max_requests {
         let want = limit.map(|l| (l - out.len()).min(page_size)).unwrap_or(page_size);
         let mut q: Vec<(&str, String)> = query.to_vec();
         q.push(("start", start.to_string()));
@@ -107,13 +148,18 @@ pub async fn collect_offset<T: DeserializeOwned>(
         start += got;
 
         if limit.is_some_and(|l| out.len() >= l) {
+            complete = true;
             break;
         }
         // A short page is the end of the collection on every Confluence version we
         // support; `_links.next` is only a corroborating hint.
         if got == 0 || (got < want && page.links.next.is_none()) {
+            complete = true;
             break;
         }
+    }
+    if !complete {
+        return Err(cut_short(path, max_requests));
     }
     if let Some(l) = limit {
         out.truncate(l);
@@ -124,6 +170,61 @@ pub async fn collect_offset<T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::http::Auth;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    #[tokio::test]
+    async fn a_listing_that_never_ends_is_an_error_not_a_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(|req: &Request| {
+                let n: u64 = req
+                    .url
+                    .query_pairs()
+                    .find(|(k, _)| k == "cursor")
+                    .and_then(|(_, v)| v.parse().ok())
+                    .unwrap_or(0);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [n],
+                    "_links": { "next": format!("/pages?cursor={}", n + 1) }
+                }))
+            })
+            .mount(&server)
+            .await;
+        let http = Http::new(&server.uri(), Auth::None, 1).unwrap();
+        let err = collect_cursor_within::<u64>(&http, "pages", &[], None, 5).await.unwrap_err();
+        assert!(err.to_string().contains("not complete"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_repeated_cursor_is_named_for_what_it_is() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [1], "_links": { "next": "/pages?cursor=same" }
+            })))
+            .mount(&server)
+            .await;
+        let http = Http::new(&server.uri(), Auth::None, 1).unwrap();
+        let err = collect_cursor::<u64>(&http, "pages", &[], None).await.unwrap_err();
+        assert!(err.to_string().contains("same next page twice"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_offset_listing_that_never_ends_is_an_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [1, 2], "_links": { "next": "/more" }
+            })))
+            .mount(&server)
+            .await;
+        let http = Http::new(&server.uri(), Auth::None, 1).unwrap();
+        let err = collect_offset_within::<u64>(&http, "items", &[], 2, None, 4).await.unwrap_err();
+        assert!(err.to_string().contains("not complete"), "{err}");
+    }
 
     #[test]
     fn a_missing_results_array_decodes_as_empty() {
