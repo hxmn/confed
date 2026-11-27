@@ -199,6 +199,21 @@ both_flavors!(edits_on_both_sides_merge_when_they_do_not_overlap, |mut h: Harnes
     assert!(merged.contains("Third, edited locally."), "our edit survives");
     assert!(merged.contains("First, edited on the server."), "their edit is taken");
     assert!(!merged.contains("<<<<<<<"), "no conflict markers: {merged}");
+
+    // The local half of the merge is still a local edit: it must be pushed,
+    // not recorded as the base and left on disk.
+    assert_eq!(h.status("1001"), PageState::Modified);
+    assert_eq!(h.push().await.pushed.len(), 1, "the merge is pushed");
+    let body = h.mock.page_body("1001").expect("page");
+    assert!(body.contains("Third, edited locally."), "{body}");
+    assert!(body.contains("First, edited on the server."), "{body}");
+
+    // A later remote change must not overwrite it.
+    h.mock.remote_edit("1001", &body.replace("Second.", "Second, again."));
+    h.pull().await;
+    let file = h.read("Doc.md");
+    assert!(file.contains("Third, edited locally."), "{file}");
+    assert!(file.contains("Second, again."), "{file}");
 });
 
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {

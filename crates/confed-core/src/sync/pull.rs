@@ -1069,6 +1069,14 @@ impl SyncEngine {
         };
         let rendered = file.render()?;
 
+        // The base is the remote rendering, not the merged file: the local half
+        // of the merge is an edit on top of it, so the page is `Modified` and
+        // the next push sends it. Recording the merged text would mark the page
+        // unchanged and leave that half on disk only, for a later pull to
+        // overwrite.
+        let base_file =
+            self.build_file(ws, remote, placement, Some(local), remote_md.markdown.clone())?;
+
         if !opts.dry_run {
             write_atomic(&ws.absolute(&placement.path), &rendered)?;
             let state = if conflicted { SyncState::Conflicted } else { SyncState::Clean };
@@ -1076,7 +1084,7 @@ impl SyncEngine {
                 ws,
                 remote,
                 placement,
-                &file,
+                &base_file,
                 &remote_storage,
                 &remote_md.block_map,
                 state,
