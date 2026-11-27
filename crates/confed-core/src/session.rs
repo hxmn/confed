@@ -141,6 +141,14 @@ impl SessionStore {
         let conn = Connection::open(&path)
             .map_err(|e| ConfedError::Other(format!("could not open {}: {e}", path.display())))?;
         conn.execute_batch(SCHEMA)?;
+        // Where in the keyring the secret is, when it is not the default for
+        // its server and user (a token with no user: see `account_for_new`).
+        let has_account = conn
+            .prepare("SELECT 1 FROM pragma_table_info('session') WHERE name = 'keyring_account'")?
+            .exists([])?;
+        if !has_account {
+            conn.execute_batch("ALTER TABLE session ADD COLUMN keyring_account TEXT")?;
+        }
         if !existed {
             restrict_permissions(&path)?;
         }
@@ -204,7 +212,7 @@ impl SessionStore {
         secret: &Secret,
         force_backend: Option<SecretBackend>,
     ) -> Result<SecretBackend> {
-        let account = keyring_account(&session.base_url, session.username.as_deref());
+        let account = account_for_new(session, secret);
         let backend = match force_backend {
             Some(SecretBackend::Sqlite) => SecretBackend::Sqlite,
             Some(SecretBackend::Keyring) => {
@@ -232,13 +240,14 @@ impl SessionStore {
         self.conn.execute(
             "INSERT INTO session
                 (id, base_url, flavor, auth_method, username, secret_backend, secret_value,
-                 created_at, last_verified_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 created_at, last_verified_at, keyring_account)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 base_url = excluded.base_url, flavor = excluded.flavor,
                 auth_method = excluded.auth_method, username = excluded.username,
                 secret_backend = excluded.secret_backend, secret_value = excluded.secret_value,
-                last_verified_at = excluded.last_verified_at",
+                last_verified_at = excluded.last_verified_at,
+                keyring_account = excluded.keyring_account",
             params![
                 session.base_url,
                 session.flavor.as_str(),
@@ -248,6 +257,7 @@ impl SessionStore {
                 stored_secret,
                 session.created_at,
                 session.last_verified_at,
+                (backend == SecretBackend::Keyring).then_some(account.as_str()),
             ],
         )?;
         restrict_permissions(&self.path)?;
@@ -290,7 +300,7 @@ impl SessionStore {
         // Leave nothing behind in the backend we moved away from.
         match (session.secret_backend, actual) {
             (SecretBackend::Keyring, SecretBackend::Sqlite) => {
-                let account = keyring_account(&session.base_url, session.username.as_deref());
+                let account = self.account_of(session)?;
                 let _ = keyring_delete(&account);
             }
             (SecretBackend::Sqlite, SecretBackend::Keyring) => {
@@ -313,7 +323,7 @@ impl SessionStore {
                 .flatten()
                 .map(Secret::new)),
             SecretBackend::Keyring => {
-                let account = keyring_account(&session.base_url, session.username.as_deref());
+                let account = self.account_of(session)?;
                 match keyring_get(&account) {
                     Ok(secret) => Ok(Some(secret)),
                     Err(e) => Err(ConfedError::Auth(format!(
@@ -333,10 +343,23 @@ impl SessionStore {
         Ok(())
     }
 
+    /// The keyring entry this store's secret is under: the one recorded when
+    /// it was saved, or — for a store saved before that was recorded — the
+    /// default for its server and user.
+    fn account_of(&self, session: &Session) -> Result<String> {
+        let recorded: Option<String> = self
+            .conn
+            .query_row("SELECT keyring_account FROM session WHERE id = 1", [], |r| r.get(0))
+            .optional()?
+            .flatten();
+        Ok(recorded
+            .unwrap_or_else(|| keyring_account(&session.base_url, session.username.as_deref())))
+    }
+
     /// Forget stored credentials (both backends).
     pub fn clear(&self, session: &Session) -> Result<()> {
         if session.secret_backend == SecretBackend::Keyring {
-            let account = keyring_account(&session.base_url, session.username.as_deref());
+            let account = self.account_of(session)?;
             let _ = keyring_delete(&account);
         }
         self.conn.execute("DELETE FROM session WHERE id = 1", [])?;
@@ -351,6 +374,24 @@ pub fn same_keyring_entry(a: &Session, b: &Session) -> bool {
         && b.secret_backend == SecretBackend::Keyring
         && keyring_account(&a.base_url, a.username.as_deref())
             == keyring_account(&b.base_url, b.username.as_deref())
+}
+
+/// The keyring entry a secret being saved goes under. With a user, one per
+/// server and user, as always. A token with no user — a Data Center personal
+/// access token — is told apart by a fingerprint of itself: two workspaces on
+/// one server with different tokens would otherwise share one entry, and the
+/// second `init` would replace the first's token. The same token, shared by an
+/// instance root and its members, is still one entry.
+fn account_for_new(session: &Session, secret: &Secret) -> String {
+    match &session.username {
+        Some(_) => keyring_account(&session.base_url, session.username.as_deref()),
+        None => {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(secret.expose().as_bytes());
+            let print: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
+            format!("{}|token:{print}", session.base_url)
+        }
+    }
 }
 
 fn keyring_account(base_url: &str, username: Option<&str>) -> String {
@@ -465,6 +506,39 @@ fn check_permissions(_path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn two_tokens_on_one_server_keep_two_keyring_entries() {
+        let mut session = sample(SecretBackend::Keyring);
+        session.username = None;
+        let a = account_for_new(&session, &Secret::new("token-a"));
+        let b = account_for_new(&session, &Secret::new("token-b"));
+        assert_ne!(a, b, "a second init must not replace the first's token");
+        assert_eq!(a, account_for_new(&session, &Secret::new("token-a")), "one token, one entry");
+        assert!(!a.contains("token-a"), "the entry's name does not give the token away: {a}");
+        session.username = Some("alice.ng".into());
+        assert_eq!(
+            account_for_new(&session, &Secret::new("x")),
+            format!("{}|alice.ng", session.base_url)
+        );
+    }
+
+    #[test]
+    fn a_store_from_before_the_entry_was_recorded_still_opens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SESSION_DB_FILENAME);
+        super::create_private(&path).unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        drop(conn);
+        let store = SessionStore::open_file(&path).unwrap();
+        let session = sample(SecretBackend::Keyring);
+        // No recorded entry: the default for the server and user, as before.
+        assert_eq!(
+            store.account_of(&session).unwrap(),
+            keyring_account(&session.base_url, session.username.as_deref())
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_credential_file_is_private_from_the_moment_it_exists() {
