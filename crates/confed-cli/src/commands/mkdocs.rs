@@ -355,7 +355,20 @@ help:
 /// needs `confed mkdocs --force` again.
 fn link_docs_dir(root: &Path) -> Result<Vec<String>> {
     let docs = root.join("docs");
-    // Rebuilt from scratch, so pages deleted since last time do not linger.
+    // Rebuilt from scratch, so pages deleted since last time do not linger —
+    // but only a `docs/` of symlinks, which is what this command makes. One
+    // that holds anything else is a page folder (a top-level page titled
+    // "docs") or the user's own, and removing it would lose their files.
+    if let Some(foreign) = foreign_entry(&docs) {
+        return Err(ConfedError::state_with_hint(
+            format!(
+                "docs/ holds {foreign}, which `confed mkdocs` did not make; it builds docs/ as \
+                 symlinks and would remove what is there"
+            ),
+            "rename or move that docs/ (a page titled \"docs\" can be renamed on the server), \
+             then run `confed mkdocs` again",
+        ));
+    }
     if docs.exists() {
         std::fs::remove_dir_all(&docs)
             .map_err(|e| ConfedError::io(format!("clearing {}", docs.display()), e))?;
@@ -385,6 +398,20 @@ fn link_docs_dir(root: &Path) -> Result<Vec<String>> {
     }
     linked.sort();
     Ok(linked)
+}
+
+/// The first entry of `docs` that is not a symlink, if any — or `docs`
+/// itself when it is a file. `None` when there is nothing there to lose.
+fn foreign_entry(docs: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(docs).ok()?;
+    if !meta.is_dir() {
+        return Some("a file".to_string());
+    }
+    let entries = std::fs::read_dir(docs).ok()?;
+    entries.filter_map(std::result::Result::ok).find_map(|entry| {
+        let is_link = entry.file_type().is_ok_and(|t| t.is_symlink());
+        (!is_link).then(|| entry.file_name().to_string_lossy().into_owned())
+    })
 }
 
 /// Everything that belongs in the site: pages, their child directories, and

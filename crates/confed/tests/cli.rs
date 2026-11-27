@@ -1223,6 +1223,32 @@ async fn mkdocs_scaffolds_a_site_over_the_workspace() {
     }
 }
 
+/// A `docs/` that confed did not make — a page folder, or the user's own —
+/// is never removed to make room for the site's symlinks.
+#[tokio::test]
+async fn mkdocs_refuses_to_replace_a_docs_folder_it_did_not_make() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+    std::fs::create_dir_all(dir.path().join("docs/.Style guide")).unwrap();
+    std::fs::write(dir.path().join("docs/Style guide.md"), "# Unpushed edit\n").unwrap();
+    std::fs::write(dir.path().join("docs/.Style guide/notes.txt"), "kept\n").unwrap();
+
+    for args in [&["mkdocs", "--json"][..], &["mkdocs", "--force", "--json"]] {
+        let output = run(confed(dir.path(), args));
+        assert_ne!(exit_code(&output), 0, "{}", stdout(&output));
+        assert!(stdout(&output).contains("docs/"), "{}", stdout(&output));
+    }
+    assert_eq!(read(dir.path(), "docs/Style guide.md"), "# Unpushed edit\n");
+    assert_eq!(read(dir.path(), "docs/.Style guide/notes.txt"), "kept\n");
+
+    // A docs/ of symlinks, as mkdocs makes it, is rebuilt as before.
+    std::fs::remove_dir_all(dir.path().join("docs")).unwrap();
+    assert_eq!(exit_code(&run(confed(dir.path(), &["mkdocs", "--json"]))), 0);
+    assert_eq!(exit_code(&run(confed(dir.path(), &["mkdocs", "--force", "--json"]))), 0);
+}
+
 /// Generated files are not clobbered unless asked, and --force refreshes them.
 #[tokio::test]
 async fn mkdocs_leaves_edited_config_alone_without_force() {
