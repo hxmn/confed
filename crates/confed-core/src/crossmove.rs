@@ -1576,6 +1576,11 @@ pub async fn transfer(
     // that nothing is written unless all of it can be.
     let mut base_rows: Vec<(PageRecord, bool)> = Vec::new();
     let mut remote_rows: Vec<RemotePage> = Vec::new();
+    // Pages neither workspace tracks any more — a pull of the source after
+    // the server moved them dropped them as deleted there. The server has
+    // them: they are listed in the destination, and its closing pull writes
+    // them as new pages.
+    let mut unheld: Vec<RemotePage> = Vec::new();
     for page in &plan.pages {
         // A row an interrupted run already copied stands; one from the
         // source is carried over.
@@ -1584,10 +1589,24 @@ pub async fn transfer(
             None => match src.state().get_page(&page.page_id)? {
                 Some(record) => (record, true),
                 None => {
-                    return Err(ConfedError::state(format!(
-                        "page {} is in neither workspace; run `confed instance doctor`",
-                        page.page_id
-                    )))
+                    let summary = &listed[&page.page_id];
+                    unheld.push(RemotePage {
+                        page_id: page.page_id.clone(),
+                        title: summary.title.clone(),
+                        parent_id: summary.parent_id.as_ref().map(|p| p.0.clone()),
+                        position: summary.position,
+                        version: summary.version,
+                        status: "current".to_string(),
+                        labels: summary.labels.clone().unwrap_or_default(),
+                        author: summary.author.clone(),
+                        created_at: summary.created_at.clone(),
+                        updated_at: summary.updated_at.clone(),
+                        storage_body: None,
+                        storage_hash: None,
+                        fetched_at: now(),
+                        deleted: false,
+                    });
+                    continue;
                 }
             },
         };
@@ -1646,6 +1665,7 @@ pub async fn transfer(
         let mut remote: Vec<RemotePage> =
             dst.state().all_remote()?.into_iter().filter(|r| !ids.contains(&r.page_id)).collect();
         remote.extend(remote_rows.iter().cloned());
+        remote.extend(unheld.iter().cloned());
         let mut base: Vec<PageRecord> =
             dst.state().all_pages()?.into_iter().filter(|b| !ids.contains(&b.page_id)).collect();
         base.extend(base_rows.iter().map(|(b, _)| b.clone()));
@@ -1671,6 +1691,9 @@ pub async fn transfer(
             if dst_state.get_user(&user.id)?.is_none() {
                 dst_state.upsert_user(&user)?;
             }
+        }
+        for remote in &unheld {
+            dst_state.upsert_remote(remote)?;
         }
         for ((record, from_source), remote) in base_rows.iter().zip(&remote_rows) {
             dst_state.upsert_page(record)?;
@@ -1706,8 +1729,19 @@ pub async fn transfer(
     let mut moved = Vec::new();
     for page in &mut plan.pages {
         let placement = &placements[&page.page_id];
-        move_page_files(src, dst, &page.from_path, &placement.path)?;
         page.to_path = placement.path.clone();
+        if unheld.iter().any(|r| r.page_id == page.page_id) {
+            // No file to carry: the closing pull writes it.
+            moved.push(MovedPage {
+                page_id: page.page_id.clone(),
+                title: page.final_title().to_string(),
+                from: Location { space: plan.source.key.clone(), path: page.from_path.clone() },
+                to: Location { space: plan.dest.key.clone(), path: placement.path.clone() },
+                version: listed.get(&page.page_id).map(|s| s.version).unwrap_or_default(),
+            });
+            continue;
+        }
+        move_page_files(src, dst, &page.from_path, &placement.path)?;
 
         // The tool-managed fields the move changed; nothing else.
         let path = dst.absolute(&placement.path);

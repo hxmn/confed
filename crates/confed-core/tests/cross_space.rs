@@ -615,6 +615,36 @@ async fn a_fetch_of_the_source_between_the_move_and_the_resume_strands_nothing()
 }
 
 #[tokio::test]
+async fn a_pull_of_the_source_between_the_move_and_the_resume_strands_nothing() {
+    let mut h = Harness::new().await;
+    let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();
+    let id =
+        h.instance.journal_begin(crossmove::OP, &serde_json::to_value(&plan).unwrap()).unwrap();
+    let client = h.client();
+    let eng = h.spaces.remove("ENG").unwrap();
+    let _ =
+        crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, Step::Planned, 2)
+            .await
+            .unwrap_err();
+    h.spaces.insert("ENG".into(), eng);
+
+    // An ordinary pull of the source drops the pages the server moved away.
+    h.pull("DOCS").await;
+    assert!(h.ws("DOCS").state().get_page("1002").unwrap().is_none());
+    assert!(!h.ws("DOCS").absolute("Team Handbook/Onboarding.md").exists());
+
+    let entry = h.instance.journal_entry(&id).unwrap().unwrap();
+    let mut plan: MovePlan = serde_json::from_value(entry.plan).unwrap();
+    crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, entry.state, 2)
+        .await
+        .expect("resume finishes");
+    assert!(h.ws("ENG").absolute("Engineering Home/Runbooks/Onboarding.md").exists());
+    assert!(h.ws("ENG").absolute("Engineering Home/Runbooks/Onboarding/Week One.md").exists());
+    assert!(h.instance.journal_unfinished().unwrap().is_empty());
+    assert!(h.clean("DOCS") && h.clean("ENG"));
+}
+
+#[tokio::test]
 async fn there_and_back_every_link_still_reaches_its_page() {
     let mut h = Harness::new().await;
     // As Data Center 9.5.4 does: the move finishes late, and fixes the links
