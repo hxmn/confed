@@ -508,7 +508,11 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(reanchor(&gone, &body).is_orphaned());
         let took = started.elapsed();
-        assert!(took < std::time::Duration::from_millis(250), "took {took:?}");
+        // The regression this guards against took about 500 ms; an unoptimized
+        // build on a busy machine (the rest of the suite running beside it)
+        // can take 300, so its budget is wider.
+        let budget = if cfg!(debug_assertions) { 450 } else { 250 };
+        assert!(took < std::time::Duration::from_millis(budget), "took {took:?}");
     }
 
     #[test]
