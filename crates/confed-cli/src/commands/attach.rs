@@ -219,17 +219,22 @@ async fn remove(
     }
 
     if !push {
+        // Said in the JSON too: a plain `confed push` holds the deletion back,
+        // and a reader of only the result would take "staged" for queued.
+        let needs = "the server delete needs `confed push --allow-delete`, or `attach --rm --push`";
         return Ok(Output::new(
             json!({
                 "page_id": page_id, "file": filename,
                 "removed_locally": local, "removed_on_server": false, "staged": true,
+                "needs": "--allow-delete",
             }),
             format!(
                 "Removed {filename} locally; it is still on the server.\n{}\n",
                 ctx.style
                     .dim("Run `confed push --allow-delete` to delete it, or re-run with --push.")
             ),
-        ));
+        )
+        .warn(format!("{filename} is still an attachment on page {page_id}: {needs}")));
     }
 
     let client = ctx.build_client()?;

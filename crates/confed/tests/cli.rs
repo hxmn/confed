@@ -795,10 +795,17 @@ async fn attach_rm_deletes_on_the_server_or_says_it_did_not() {
     assert_eq!(value["result"]["removed_locally"], json!(true));
     assert_eq!(value["result"]["removed_on_server"], json!(false));
     assert_eq!(value["result"]["staged"], json!(true));
+    assert_eq!(value["result"]["needs"], json!("--allow-delete"));
+    assert!(value["warnings"].to_string().contains("--allow-delete"), "{value}");
     assert!(
         !mutations(&server).await.contains(&"DELETE /rest/api/content/att-9".to_string()),
         "nothing was deleted yet"
     );
+
+    // The dry run names the file the deletion is waiting on.
+    let dry = envelope(&run(confed_authed(dir.path(), &["push", "--dry-run", "--json"])), "push");
+    let held = dry["result"]["skipped"].to_string();
+    assert!(held.contains("diagram.png") && held.contains("--allow-delete"), "{dry}");
 
     // A plain push reports the refusal rather than exiting clean.
     let value = envelope(&run(confed_authed(dir.path(), &["push", "--json"])), "push");
