@@ -539,6 +539,26 @@ impl<'a> Generator<'a> {
     fn link(&self, url: &str, label: &str) -> String {
         let url = unwrap_destination(url);
 
+        // `Page.md#Section` and `#Section`: the anchor is not part of what the
+        // link points at. Split off, it goes back as `ac:anchor` on the page
+        // link — or on a link within this page.
+        if let Some((target, fragment)) = url.split_once('#') {
+            let anchor = fragment.replace("%20", " ").replace("%25", "%");
+            if !anchor.is_empty() {
+                if target.is_empty() {
+                    return format!(
+                        r#"<ac:link ac:anchor="{}">{}</ac:link>"#,
+                        dom::escape_attr(&anchor),
+                        link_body(label)
+                    );
+                }
+                let linked = self.link(target, label);
+                if let Some(rest) = linked.strip_prefix("<ac:link>") {
+                    return format!(r#"<ac:link ac:anchor="{}">{rest}"#, dom::escape_attr(&anchor));
+                }
+            }
+        }
+
         // `[@Name](user:<key>)` names somebody directly — the way to write a
         // mention of someone confed has not resolved yet (`confed user search`
         // gives the key). `user:account-id=…` and `user:username=…` say which
@@ -1278,6 +1298,41 @@ mod page_link_tests {
         o.page_titles.insert("900000098561".into(), "CH-200.5. Подготовить план (v.1.1)".into());
         o.page_titles.insert("42".into(), "Разделы (с учетом всех примечаний)".into());
         o
+    }
+
+    #[test]
+    fn an_anchored_page_link_survives_an_edit_beside_it() {
+        let mut opts = ConvertOptions {
+            base_url: "https://wiki.corp".into(),
+            space_key: "DOCS".into(),
+            ..Default::default()
+        };
+        opts.page_links.by_id.insert("1001".into(), "Runbook.md".into());
+        opts.link_targets.insert("Runbook.md".into(), crate::PageTarget::Id("1001".into()));
+        let storage = r#"<p>See <ac:link ac:anchor="Section One"><ri:page ri:content-id="1001"/><ac:plain-text-link-body><![CDATA[the section]]></ac:plain-text-link-body></ac:link> now.</p>"#;
+        let base = crate::storage_to_markdown(storage, &opts).unwrap();
+        assert!(base.markdown.contains("(Runbook.md#Section%20One)"), "{}", base.markdown);
+        let edited = base.markdown.replace(" now.", " today.");
+        let out = crate::markdown_to_storage_patched(
+            storage,
+            &base.block_map,
+            &base.markdown,
+            &edited,
+            &opts,
+        )
+        .unwrap();
+        assert!(
+            out.contains(r#"<ac:link ac:anchor="Section One"><ri:page ri:content-id="1001" />"#),
+            "{out}"
+        );
+        assert!(!out.contains("href="), "{out}");
+
+        // A link within the page is an anchor link too.
+        let out = crate::markdown_to_storage("[setup](#Setup)\n", &opts).unwrap();
+        assert!(out.contains(r#"<ac:link ac:anchor="Setup">"#), "{out}");
+        // An outside URL keeps its fragment as it is.
+        let out = crate::markdown_to_storage("[x](https://example.com/a#b)\n", &opts).unwrap();
+        assert!(out.contains(r#"href="https://example.com/a#b""#), "{out}");
     }
 
     #[test]

@@ -691,8 +691,10 @@ impl Renderer<'_> {
             _ => String::new(),
         };
         if !anchor.is_empty() {
+            // Spaces are encoded rather than turned into `-`, so the anchor
+            // goes back as the name it is, not as one with hyphens.
             href.push('#');
-            href.push_str(&anchor.replace(' ', "-"));
+            href.push_str(&anchor.replace('%', "%25").replace(' ', "%20"));
         }
         if label.trim().is_empty() {
             label = escape_md(&href);
