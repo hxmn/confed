@@ -233,6 +233,13 @@ impl Renderer<'_> {
             "code" | "noformat" => {
                 let params = macros::macro_params(el);
                 let lang = macros::macro_param(&params, "language").unwrap_or("").trim();
+                // A ```confluence fence is a preserved block, whose text goes
+                // up as markup: a code sample in that language is kept whole,
+                // so its fence holds the macro and not the sample.
+                if lang.eq_ignore_ascii_case("confluence") {
+                    self.keep_verbatim = true;
+                    return preserved_fence(raw);
+                }
                 let body = macros::plain_text_body(el).unwrap_or_default();
                 let body = body.trim_matches('\n');
                 let fence = "`".repeat(fence_len(body));
@@ -1592,6 +1599,26 @@ mod user_mention_tests {
         .unwrap()
         .markdown;
         assert_eq!(md.trim(), "![](.Page/own.png)");
+    }
+
+    #[test]
+    fn a_code_sample_in_the_language_confluence_stays_a_code_sample() {
+        let storage = r#"<ac:structured-macro ac:name="code"><ac:parameter ac:name="language">confluence</ac:parameter><ac:plain-text-body><![CDATA[<p>hi</p><script>x</script>]]></ac:plain-text-body></ac:structured-macro>"#;
+        let opts = ConvertOptions::default();
+        let base = crate::storage_to_markdown(storage, &opts).unwrap();
+        assert!(base.markdown.contains("ac:name=\"code\""), "{}", base.markdown);
+        let edited = base.markdown.replace("<p>hi</p>", "<p>hi there</p>");
+        assert_ne!(edited, base.markdown);
+        let out = crate::markdown_to_storage_patched(
+            storage,
+            &base.block_map,
+            &base.markdown,
+            &edited,
+            &opts,
+        )
+        .unwrap();
+        assert!(out.starts_with(r#"<ac:structured-macro ac:name="code">"#), "{out}");
+        assert!(out.contains("<![CDATA[<p>hi there</p><script>x</script>]]>"), "{out}");
     }
 
     #[test]
