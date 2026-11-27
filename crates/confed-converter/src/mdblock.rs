@@ -17,7 +17,10 @@ pub fn options() -> Options<'static> {
     o.extension.table = true;
     o.extension.strikethrough = true;
     o.extension.tasklist = true;
-    o.extension.autolink = true;
+    // Off: a bare `www.example.com` or `bob@example.com` is text, as
+    // Confluence stores it. Only `<…>` autolinks and `[…](…)` are links, and
+    // links come down from Confluence written as those.
+    o.extension.autolink = false;
     o.extension.alerts = true;
     o
 }

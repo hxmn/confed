@@ -1094,8 +1094,6 @@ fn md_image(alt: &str, src: &str) -> String {
     format!("![{}]({})", escape_md(alt), wrap_destination(src))
 }
 
-/// Markdown link destinations cannot contain spaces or parentheses unless they
-/// are wrapped in angle brackets.
 /// The first character a node renders as, near enough to tell a letter from
 /// punctuation or space.
 fn first_char(node: &Node) -> Option<char> {
@@ -1107,6 +1105,8 @@ fn first_char(node: &Node) -> Option<char> {
     }
 }
 
+/// Markdown link destinations cannot contain spaces or parentheses unless they
+/// are wrapped in angle brackets.
 fn wrap_destination(href: &str) -> String {
     if href.contains(char::is_whitespace) || href.contains('(') || href.contains(')') {
         format!("<{}>", href.replace('<', "%3C").replace('>', "%3E"))
@@ -1628,6 +1628,26 @@ mod user_mention_tests {
         .unwrap();
         assert!(out.starts_with(r#"<ac:structured-macro ac:name="code">"#), "{out}");
         assert!(out.contains("<![CDATA[<p>hi there</p><script>x</script>]]>"), "{out}");
+    }
+
+    #[test]
+    fn plain_addresses_stay_text_through_an_edit() {
+        let storage = "<p>Mail bob@example.com or see www.example.com today</p>";
+        let opts = ConvertOptions::default();
+        let base = crate::storage_to_markdown(storage, &opts).unwrap();
+        let edited = base.markdown.replace("today", "soon");
+        let out = crate::markdown_to_storage_patched(
+            storage,
+            &base.block_map,
+            &base.markdown,
+            &edited,
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(out.trim_end(), "<p>Mail bob@example.com or see www.example.com soon</p>");
+        // A link written as one is still a link.
+        let out = crate::markdown_to_storage("<https://example.com>\n", &opts).unwrap();
+        assert!(out.contains("<a href=\"https://example.com\">"), "{out}");
     }
 
     #[test]

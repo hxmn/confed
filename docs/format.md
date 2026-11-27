@@ -165,7 +165,8 @@ the move (`moved_from`) and everything keeps working.
 ## The body
 
 Everything after the frontmatter is CommonMark with GFM tables, task lists and GitHub
-alerts. The full mapping in both directions is tabulated in
+alerts. A bare `www.example.com` or `bob@example.com` is text, as Confluence stores it;
+write a link as `<https://…>` or `[label](https://…)`. The full mapping in both directions is tabulated in
 [`crates/confed-converter/README.md`](../crates/confed-converter/README.md); the short version:
 
 | Confluence | Markdown |
