@@ -158,6 +158,9 @@ async fn reply(ctx: &mut Context, ids: &[String], body: &str, push: bool) -> Res
             queued.iter().filter_map(|q| q["page_id"].as_str().map(str::to_string)).collect();
         let outcome = push_now(ctx, pages).await?;
         failed = outcome.failed.clone();
+        // `push`, as `add --push` names it; `result` is the old name, kept
+        // for scripts that read it.
+        result["push"] = comment_results(&outcome);
         result["result"] = comment_results(&outcome);
         result["draft"] = json!(!outcome.failed.is_empty());
         // What was posted, under the parent the server keeps: an inline thread
@@ -527,6 +530,7 @@ fn list(
 
     let mut result = json!({
         "page_id": page_id,
+        "source": "local",
         "comments": entries,
         "orphan_markers": orphan_markers,
         "checked_at": checked_at,
@@ -726,7 +730,10 @@ async fn resolve(
     }
 
     let ids: Vec<&String> = targets.iter().map(|(_, id)| id).collect();
-    let mut result = json!({ "queued": ids, "skipped": skipped, "draft": !push });
+    // A draft is what waits in the sidecar: nothing when nothing was queued,
+    // and after a push only what it could not resolve.
+    let mut result =
+        json!({ "queued": ids, "skipped": skipped, "draft": !push && !targets.is_empty() });
     let mut human = String::new();
     for s in &skipped {
         let _ = writeln!(
@@ -741,7 +748,11 @@ async fn resolve(
         let pages: Vec<String> = targets.iter().map(|(page, _)| page.clone()).collect();
         let outcome = push_now(ctx, pages).await?;
         failed = outcome.failed.clone();
+        // `push`, as `add --push` names it; `result` is the old name, kept
+        // for scripts that read it.
+        result["push"] = comment_results(&outcome);
         result["result"] = comment_results(&outcome);
+        result["draft"] = json!(!outcome.failed.is_empty());
         for id in &outcome.comments_resolved {
             let _ = writeln!(human, "  resolved {id}");
         }

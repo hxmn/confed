@@ -29,8 +29,8 @@
     },
     {
       "description": "`--push` declined at the prompt: nothing was removed.",
-      "required": ["removed", "cancelled"],
-      "properties": { "cancelled": { "const": true } }
+      "required": ["removed", "dry_run", "cancelled"],
+      "properties": { "dry_run": { "const": false }, "cancelled": { "const": true } }
     }
   ],
   "properties": {

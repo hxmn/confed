@@ -85,8 +85,8 @@
     },
     "cancelled": {
       "type": "object",
-      "required": ["cancelled"],
-      "properties": { "cancelled": { "const": true } }
+      "required": ["key", "cancelled"],
+      "properties": { "key": { "type": "string" }, "cancelled": { "const": true } }
     },
     "credential_store": {
       "type": "object",

@@ -156,7 +156,7 @@ fn set_rules_page(ctx: &Context, reference: Option<&str>, pick_page: PagePicker)
                 Some(page_id) => page_id,
                 None => {
                     return Ok(Output::new(
-                        json!({ "cancelled": true }),
+                        json!({ "key": key, "cancelled": true }),
                         format!("Cancelled; {key} is unchanged.\n"),
                     ))
                 }

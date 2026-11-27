@@ -21,6 +21,7 @@
       "required": ["page_id", "comments", "orphan_markers", "checked_at", "refreshed"],
       "properties": {
         "page_id": { "type": "string" },
+        "source": { "const": "local", "description": "Read from the workspace's copy; `server` in the other shape." },
         "comments": { "type": "array", "items": { "$ref": "#/$defs/comment" } },
         "orphan_markers": {
           "type": "array",
@@ -53,8 +54,8 @@
         "kind": { "type": "string", "enum": ["footer", "inline"] },
         "author": { "type": ["string", "null"], "description": "The author's display name." },
         "created": { "type": ["string", "null"], "description": "When it was posted, as the server gives it." },
-        "resolved": { "type": "boolean", "description": "Its thread is resolved: a reply is as resolved as its thread." },
-        "thread_resolved": { "type": "boolean", "description": "The same as `resolved`." },
+        "resolved": { "type": "boolean", "description": "Its thread is resolved: a reply has no status of its own, and is as resolved as its thread." },
+        "thread_resolved": { "type": "boolean", "description": "The same as `resolved`, by design: named for what it says of a reply." },
         "reply_to": { "type": ["string", "null"], "description": "The comment it replies to; null for a thread's root." },
         "anchor": {
           "type": ["object", "null"],
@@ -148,7 +149,8 @@
           }
         },
         "draft": { "type": "boolean", "description": "Still a draft: no --push, or the push failed." },
-        "result": { "$ref": "#/$defs/push_counts" },
+        "push": { "$ref": "#/$defs/push_counts", "description": "--push: what was posted." },
+        "result": { "$ref": "#/$defs/push_counts", "description": "The same as `push`, under its old name; read `push`." },
         "posted": {
           "type": "array",
           "description": "--push: the ids of the replies posted.",
@@ -185,8 +187,9 @@
             "properties": { "id": { "type": "string" }, "reason": { "type": "string" } }
           }
         },
-        "draft": { "type": "boolean", "description": "No --push was given." },
-        "result": { "$ref": "#/$defs/push_counts" }
+        "draft": { "type": "boolean", "description": "Resolves wait in the sidecar: some were queued and no --push was given, or the push failed." },
+        "push": { "$ref": "#/$defs/push_counts", "description": "--push: what was resolved." },
+        "result": { "$ref": "#/$defs/push_counts", "description": "The same as `push`, under its old name; read `push`." }
       }
     },
     "edit": {

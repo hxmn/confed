@@ -90,7 +90,7 @@ pub async fn run_and_push(ctx: &mut Context, args: &RmArgs) -> Result<Output> {
         }
         if !crate::prompt::confirm(&format!("Delete {pages} on the server?"), false)? {
             return Ok(Output::new(
-                json!({ "removed": [], "cancelled": true }),
+                json!({ "removed": [], "dry_run": false, "cancelled": true }),
                 "Cancelled: nothing was removed.\n".to_string(),
             ));
         }
