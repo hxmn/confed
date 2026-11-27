@@ -202,6 +202,10 @@ pub struct PushOutcome {
     pub cross_space: Vec<BlockedPage>,
     pub failed: Vec<FailedPage>,
     pub dry_run: bool,
+    /// What the caller should know, such as a page whose body went up — or
+    /// would — regenerated whole rather than patched block by block.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// The storage a push would send for one page body or comment.
@@ -575,6 +579,27 @@ impl SyncEngine {
         };
 
         if opts.dry_run {
+            // A body that would go up regenerated whole is said in the dry run
+            // too: it is what loses formatting in blocks nobody touched.
+            for op in plan
+                .ops
+                .iter()
+                .filter(|o| o.kind == PushKind::Update && o.ops.iter().any(|x| x == "body"))
+            {
+                let (Some(page_id), Ok(text)) =
+                    (&op.page_id, std::fs::read_to_string(ws.absolute(&op.path)))
+                else {
+                    continue;
+                };
+                let (Ok(file), Some(base)) =
+                    (crate::frontmatter::parse(&text, &op.path), ws.state().get_page(page_id)?)
+                else {
+                    continue;
+                };
+                let convert_opts = page_convert_options(ws, &op.path)?;
+                let _ = self.build_storage(&base, &file.marked_body(), &convert_opts);
+            }
+            outcome.warnings.extend(self.take_notes());
             for op in &plan.ops {
                 let change = PageChange {
                     page_id: op.page_id.clone().unwrap_or_default(),
@@ -670,6 +695,7 @@ impl SyncEngine {
             outcome.comments_resolved = work.resolved;
             outcome.failed.extend(work.failed);
         }
+        outcome.warnings.extend(self.take_notes());
 
         self.progress.finish();
         Ok(outcome)
@@ -1171,27 +1197,57 @@ impl SyncEngine {
             .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_else(|| base_md.block_map.clone());
 
-        match confed_converter::markdown_to_storage_patched(
-            &base.storage_body,
-            &block_map,
-            &base_md.markdown,
-            new_body,
-            opts,
-        ) {
+        let patch = |map: &BlockMap| {
+            confed_converter::markdown_to_storage_patched(
+                &base.storage_body,
+                map,
+                &base_md.markdown,
+                new_body,
+                opts,
+            )
+        };
+        let stale = |reason: String| -> Result<String> {
+            // Falling back means the whole document is regenerated, so blocks
+            // the user never touched may be rewritten. Say so rather than
+            // silently reformatting the page.
+            tracing::warn!(
+                target: "confed::sync",
+                page = %base.page_id, %reason,
+                "block map unusable; regenerating the whole body"
+            );
+            self.note(format!(
+                "{}: the whole body was regenerated, not only the blocks that changed \
+                 ({reason}); formatting Markdown cannot carry may be lost in the others — \
+                 `confed pull` first to avoid it",
+                base.local_path
+            ));
+            Ok(confed_converter::markdown_to_storage(new_body, opts)?)
+        };
+        match patch(&block_map) {
             Ok(storage) => Ok(storage),
+            // The map stored at pull no longer fits today's rendering of the
+            // base — a linked page renamed, a mention now resolved, a newer
+            // converter. The map of that rendering does, so patching is tried
+            // with it before giving up on it.
             Err(confed_converter::ConvertError::StaleBlockMap(reason)) => {
-                // Falling back means the whole document is regenerated, so blocks
-                // the user never touched may be rewritten. Say so rather than
-                // silently reformatting the page.
-                tracing::warn!(
-                    target: "confed::sync",
-                    page = %base.page_id, %reason,
-                    "block map unusable; regenerating the whole body"
-                );
-                Ok(confed_converter::markdown_to_storage(new_body, opts)?)
+                match patch(&base_md.block_map) {
+                    Ok(storage) => Ok(storage),
+                    Err(confed_converter::ConvertError::StaleBlockMap(_)) => stale(reason),
+                    Err(e) => Err(e.into()),
+                }
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn note(&self, note: String) {
+        if let Ok(mut notes) = self.notes.lock() {
+            notes.push(note);
+        }
+    }
+
+    fn take_notes(&self) -> Vec<String> {
+        self.notes.lock().map(|mut n| std::mem::take(&mut *n)).unwrap_or_default()
     }
 
     pub(super) fn resolve_parent(

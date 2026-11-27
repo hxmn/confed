@@ -96,6 +96,11 @@
           }
         },
         "dry_run": { "type": "boolean" },
+        "warnings": {
+          "type": "array",
+          "description": "What the push wants you to know, such as a page whose body went up (or, in a dry run, would) regenerated whole instead of patched block by block. Also in the envelope's `warnings`. Absent when empty.",
+          "items": { "type": "string" }
+        },
         "interrupted": { "type": "boolean", "description": "Stopped by Ctrl-C (exit 130): the lists say what was done before it stopped, and running the command again finishes the rest. Present only when true." }
       }
     },

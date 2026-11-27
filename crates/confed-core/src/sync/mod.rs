@@ -55,6 +55,9 @@ pub struct SyncEngine {
     space: SpaceId,
     concurrency: usize,
     progress: ProgressRef,
+    /// What a run has to tell its caller from deep inside, such as a body
+    /// regenerated whole; drained into the outcome's warnings.
+    notes: std::sync::Mutex<Vec<String>>,
 }
 
 /// Group a scan's pages by state, for reporting.
@@ -73,7 +76,7 @@ impl SyncEngine {
         } else {
             concurrency
         };
-        Self { client, space, concurrency, progress: progress::none() }
+        Self { client, space, concurrency, progress: progress::none(), notes: Default::default() }
     }
 
     /// Report what the engine is doing. Without this, progress is discarded.

@@ -486,6 +486,34 @@ both_flavors!(a_label_that_only_changes_case_is_no_change, |mut h: Harness| asyn
     assert_eq!(h.mock.mutating_calls().len(), calls, "nothing was sent");
 });
 
+both_flavors!(a_stale_block_map_still_patches_only_the_edited_block, |mut h: Harness| async move {
+    let body = "<p>First <span style=\"color: red\">styled</span> paragraph.</p><p>Second.</p><p>Third.</p>";
+    h.mock.seed_page("1001", "Doc", None, body);
+    h.pull().await;
+    // A map that no longer fits the base: every hash wrong.
+    let mut record = h.ws.state().get_page("1001").unwrap().unwrap();
+    let mut map: confed_converter::BlockMap =
+        serde_json::from_str(record.block_map.as_deref().unwrap()).unwrap();
+    for block in &mut map.blocks {
+        block.hash = "stale".into();
+    }
+    record.block_map = Some(serde_json::to_string(&map).unwrap());
+    h.ws.state().upsert_page(&record).unwrap();
+
+    h.write("Doc.md", &h.read("Doc.md").replace("Third.", "Third, edited."));
+    let push = h.push().await;
+    assert_eq!(push.pushed.len(), 1, "{push:?}");
+    let after = h.mock.page_body("1001").unwrap();
+    assert!(
+        after.starts_with(
+            r#"<p>First <span style="color: red">styled</span> paragraph.</p><p>Second.</p>"#
+        ),
+        "{after}"
+    );
+    assert!(after.contains("Third, edited."));
+    assert!(push.warnings.is_empty(), "patched, so nothing to warn about: {:?}", push.warnings);
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

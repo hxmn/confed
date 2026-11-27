@@ -352,7 +352,7 @@ pub mod push {
             let _ = writeln!(human, "\n{} pushed{}.", plural(total, "page", "pages"), attachments);
         }
 
-        let mut output = Output::from_data(&outcome, human);
+        let mut output = Output::from_data(&outcome, human).warn_all(outcome.warnings.clone());
         if !args.dry_run {
             output = output.warn_all(agent_docs::sync_rules_after(ctx.workspace()?));
         }
