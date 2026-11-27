@@ -372,7 +372,12 @@ pub mod push {
             + outcome.replies_added.len()
             + outcome.comments_resolved.len()
             + outcome.comments_pending.len();
-        if total == 0 && files == 0 && comment_work == 0 && outcome.skipped.is_empty() {
+        if total == 0
+            && files == 0
+            && comment_work == 0
+            && outcome.skipped.is_empty()
+            && outcome.failed.is_empty()
+        {
             let _ = writeln!(human, "{}", style.green("Nothing to push."));
         } else if !args.dry_run {
             let attachments = if files > 0 {
