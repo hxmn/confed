@@ -143,7 +143,7 @@ impl Workspace {
                 "space_key" => {
                     out.insert("space".to_string(), value);
                 }
-                "base_url" | "flavor" | "concurrency" | "editor" | "comments.marks"
+                "base_url" | "flavor" | "concurrency" | "rate" | "editor" | "comments.marks"
                 | "rules_page_id" => {
                     out.insert(key, value);
                 }
