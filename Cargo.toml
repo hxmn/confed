@@ -87,7 +87,7 @@ serde_json = "1"
 # byte for byte, so no page file is rewritten by the switch.
 serde_norway = "0.9"
 sha2 = "0.10"
-similar = { version = "2", features = ["text", "inline"] }
+similar = { version = "3", features = ["text", "inline"] }
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time", "signal"] }
