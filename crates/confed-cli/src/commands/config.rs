@@ -68,6 +68,7 @@ pub fn run(ctx: &mut Context, args: &ConfigArgs, pick_page: PagePicker) -> Resul
                 "use `full` (id and preview), `ids` (id only) or `off` (no marks in page bodies)",
             ));
         }
+        validate(ctx, meta, value, args.force)?;
         ctx.workspace()?.state().set_meta(meta, value)?;
         return Ok(Output::new(
             json!({ "key": key, "value": value }),
@@ -282,4 +283,54 @@ fn unknown_key(key: &str) -> ConfedError {
         format!("unknown setting `{key}`"),
         format!("settable keys: {}", known.join(", ")),
     )
+}
+
+/// A value is checked the way its flag is, before it is stored: one that
+/// cannot work fails here (exit 2), not in every command that reads it later.
+fn validate(ctx: &Context, meta: &str, value: &str, force: bool) -> Result<()> {
+    match meta {
+        "flavor" => {
+            value.parse::<confed_api::Flavor>().map_err(|_| {
+                ConfedError::usage_with_hint(
+                    format!("`{value}` is not a flavor"),
+                    "use `cloud` or `dc` (also `datacenter`)",
+                )
+            })?;
+        }
+        "concurrency" => {
+            if !value.parse::<usize>().is_ok_and(|n| n > 0) {
+                return Err(ConfedError::usage_with_hint(
+                    format!("`{value}` is not a concurrency"),
+                    "use a positive whole number of requests at once, such as 4",
+                ));
+            }
+        }
+        "base_url" => {
+            let parsed = url::Url::parse(value)
+                .ok()
+                .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some());
+            if parsed.is_none() {
+                return Err(ConfedError::usage_with_hint(
+                    format!("`{value}` is not a Confluence base URL"),
+                    "give the address the site is read at, such as https://wiki.example.test",
+                ));
+            }
+            // Another server than the one this workspace's session is for is a
+            // different instance: its pages are not this workspace's pages.
+            if let Some(session) = ctx.session()? {
+                if !force && !crate::context::same_origin(value, &session.base_url) {
+                    return Err(ConfedError::usage_with_hint(
+                        format!(
+                            "{value} is not the server this workspace was set up for ({})",
+                            session.base_url
+                        ),
+                        "pass --force to store it anyway; for another instance, `confed init` a \
+                         workspace of its own",
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }

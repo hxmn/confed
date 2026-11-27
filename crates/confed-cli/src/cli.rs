@@ -1008,6 +1008,10 @@ pub struct ConfigArgs {
     #[arg(long)]
     pub list: bool,
 
+    /// With `--set base_url`: store a server other than the session's.
+    #[arg(long)]
+    pub force: bool,
+
     /// Read one value.
     #[arg(long, value_name = "KEY")]
     pub get: Option<String>,

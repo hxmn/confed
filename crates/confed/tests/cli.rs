@@ -457,6 +457,33 @@ async fn diff_counts_new_and_deleted_pages_as_status_does() {
 }
 
 #[tokio::test]
+async fn config_refuses_values_that_cannot_work() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+
+    for (key, value) in [
+        ("flavor", "bogus"),
+        ("concurrency", "lots"),
+        ("concurrency", "0"),
+        ("base_url", "not a url"),
+        ("base_url", "https://staging.example.test"),
+    ] {
+        let output = run(confed(dir.path(), &["config", "--set", key, value, "--json"]));
+        assert_eq!(exit_code(&output), 2, "{key}={value}: {}", stdout(&output));
+    }
+    for (key, value) in [("flavor", "dc"), ("concurrency", "4")] {
+        let output = run(confed(dir.path(), &["config", "--set", key, value, "--json"]));
+        assert_eq!(exit_code(&output), 0, "{key}={value}: {}", stdout(&output));
+    }
+    let output = run(confed(
+        dir.path(),
+        &["config", "--set", "base_url", "https://staging.example.test", "--force", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 0, "{}", stdout(&output));
+}
+
+#[tokio::test]
 async fn pull_materializes_the_hierarchy_and_status_is_then_clean() {
     let server = dc_server().await;
     let dir = tempfile::tempdir().unwrap();
