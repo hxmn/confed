@@ -94,6 +94,16 @@ fn generate_at(
                 "line {line}: the storage written for this block is not well-formed ({detail})"
             )));
         }
+        // XML 1.0 has no place for most control characters: the server would
+        // refuse the whole body, naming no line. Said here, with the line.
+        if let Some(c) = out[start..].chars().find(|c| forbidden_in_xml(*c)) {
+            let line = block.data.borrow().sourcepos.start.line + line_offset;
+            return Err(ConvertError::Generate(format!(
+                "line {line}: the character U+{:04X} cannot be stored in a Confluence page; \
+                 remove it",
+                c as u32
+            )));
+        }
     }
     Ok(out)
 }
@@ -1029,6 +1039,11 @@ fn patch_inside(
     Some(out)
 }
 
+/// A character XML 1.0 does not allow anywhere in a document.
+fn forbidden_in_xml(c: char) -> bool {
+    matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}' | '\u{FFFE}' | '\u{FFFF}')
+}
+
 fn self_generate(
     new_texts: &[String],
     new_ranges: &[(usize, usize)],
@@ -1580,6 +1595,16 @@ mod page_link_tests {
         assert_ne!(edited, base.markdown, "the edit applies: {}", base.markdown);
         crate::markdown_to_storage_patched(storage, &base.block_map, &base.markdown, &edited, &opts)
             .unwrap()
+    }
+
+    #[test]
+    fn a_character_xml_forbids_is_refused_with_its_line() {
+        let err =
+            crate::markdown_to_storage("Fine.\n\nNot \u{1} fine.\n", &ConvertOptions::default())
+                .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("line 3") && text.contains("U+0001"), "{text}");
+        assert!(crate::markdown_to_storage("Tab\there.\n", &ConvertOptions::default()).is_ok());
     }
 
     #[test]
