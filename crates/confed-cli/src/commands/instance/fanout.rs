@@ -158,8 +158,25 @@ pub async fn push(
         return Ok(output);
     }
 
+    // A space whose plan was refused is not pushed, but it is not left out
+    // either: it stays in the report with its errors, and the exit follows it.
+    let (refused, planned): (Vec<_>, Vec<_>) = planned.into_iter().partition(|run| {
+        let pushed = with_work.iter().any(|m| m.space_key == run.member.space_key);
+        !pushed
+            && run
+                .outcome
+                .as_ref()
+                .map_or(true, |o| !matches!(o.exit, ExitCode::Ok | ExitCode::Differences))
+    });
+
     // Show it all, then ask — or be told.
-    let preview = report(ctx, planned, json!({ "dry_run": true }));
+    let mut preview = report(ctx, planned, json!({ "dry_run": true }));
+    for run in &refused {
+        preview.human.push_str(&format!(
+            "{}\n",
+            ctx.style.red(&format!("{}: refused, not pushed", run.member.space_key))
+        ));
+    }
     if !ctx.global.yes {
         if !ctx.is_interactive() {
             return Err(ConfedError::usage_with_hint(
@@ -183,10 +200,12 @@ pub async fn push(
 
     let real = single(false);
     let real = &real;
-    let runs = each_space(ctx, &instance, &with_work, Some(&clients), |mut child| async move {
+    let mut runs = each_space(ctx, &instance, &with_work, Some(&clients), |mut child| async move {
         push_cmd::run(&mut child, real).await
     })
     .await;
+    runs.extend(refused);
+    runs.sort_by(|a, b| a.member.space_key.cmp(&b.member.space_key));
     Ok(report(ctx, runs, json!({ "dry_run": false })))
 }
 

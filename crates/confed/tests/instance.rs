@@ -894,6 +894,37 @@ async fn status_reports_every_space_and_one_failing_space_is_exit_8() {
 }
 
 #[tokio::test]
+async fn instance_push_reports_a_space_whose_plan_was_refused() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let docs = root.path().join("DOCS/Team Handbook.md");
+    let text = std::fs::read_to_string(&docs).unwrap();
+    std::fs::write(&docs, format!("{text}\nAn ordinary edit.\n")).unwrap();
+    let eng = root.path().join("ENG/Engineering Home/Runbooks.md");
+    let text = std::fs::read_to_string(&eng).unwrap();
+    std::fs::write(&eng, format!("{text}\nA local edit.\n")).unwrap();
+    {
+        let mut world = confluence.world();
+        let page = world.pages.get_mut("2002").unwrap();
+        page.version += 1;
+        page.body.push_str("<p>Edited on the server.</p>");
+    }
+    assert_eq!(code(&run(root.path(), &["instance", "fetch", "--json"])), 0);
+
+    let out = run(root.path(), &["instance", "push", "-m", "x", "--yes", "--json"]);
+    assert_ne!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    let keys: Vec<&str> = env["result"]["spaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["space_key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["DOCS", "ENG"], "{env}");
+    assert!(!env["errors"].as_array().unwrap().is_empty(), "{env}");
+}
+
+#[tokio::test]
 async fn a_dry_run_move_of_an_unpushed_file_moves_nothing() {
     let (server, _) = server().await;
     let root = instance_root(&server);
