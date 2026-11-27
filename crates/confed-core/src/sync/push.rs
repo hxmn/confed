@@ -407,7 +407,19 @@ impl SyncEngine {
 
         if opts.with_attachments {
             for status in &statuses {
-                let Some(page_id) = &status.page_id else { continue };
+                // A page this push creates has no id yet: its files are planned
+                // under an empty one, which `push` fills in once the page
+                // exists, so they go up with the push that creates it.
+                let created = status.page_id.is_none()
+                    && plan
+                        .ops
+                        .iter()
+                        .any(|op| op.kind == PushKind::Create && op.path == status.path);
+                let page_id = match &status.page_id {
+                    Some(page_id) => page_id,
+                    None if created => &String::new(),
+                    None => continue,
+                };
                 // A page fetched but never written has no sidecar to scan.
                 if status.path.is_empty() {
                     continue;
@@ -419,8 +431,14 @@ impl SyncEngine {
                 }
                 let sidecar_rel = paths::sidecar_for(&status.path);
                 let sidecar = ws.absolute(&sidecar_rel);
-                let recorded = ws.state().page_attachments(page_id)?;
-                let removed = ws.state().removed_attachments(page_id)?;
+                let (recorded, removed) = if created {
+                    (Vec::new(), Vec::new())
+                } else {
+                    (
+                        ws.state().page_attachments(page_id)?,
+                        ws.state().removed_attachments(page_id)?,
+                    )
+                };
                 for action in attachments::diff_attachments(&sidecar, &recorded)? {
                     let (kind, attachment_id) = match &action {
                         attachments::AttachmentAction::Unchanged { .. } => continue,
@@ -621,9 +639,21 @@ impl SyncEngine {
         // Attachments after page bodies: a body that references a new file is
         // uploaded first, so the reference is never dangling for long.
         if opts.with_attachments {
-            let uploaded =
-                self.push_attachments(ws, opts, &plan.attachment_ops, &mut outcome).await?;
-            self.relist_attachments(ws, &plan, &outcome, &uploaded).await?;
+            // The files of a page created above take its new id; those of a
+            // page whose create failed wait for the push that creates it.
+            let ops: Vec<AttachmentOp> = plan
+                .attachment_ops
+                .iter()
+                .filter_map(|op| {
+                    if !op.page_id.is_empty() {
+                        return Some(op.clone());
+                    }
+                    let page_id = created_ids.get(&op.path)?.clone();
+                    Some(AttachmentOp { page_id, ..op.clone() })
+                })
+                .collect();
+            let uploaded = self.push_attachments(ws, opts, &ops, &mut outcome).await?;
+            self.relist_attachments(ws, &ops, &outcome, &uploaded).await?;
         }
         if opts.with_comments {
             let work = self.push_comments(ws, opts).await?;
@@ -783,14 +813,13 @@ impl SyncEngine {
     pub(super) async fn relist_attachments(
         &self,
         ws: &mut Workspace,
-        plan: &PushPlan,
+        attachment_ops: &[AttachmentOp],
         outcome: &PushOutcome,
         uploaded: &[confed_api::Attachment],
     ) -> Result<()> {
         let mut pages: Vec<(&str, &str)> = Vec::new();
         let written = outcome.pushed.iter().chain(&outcome.created);
-        let attached = plan
-            .attachment_ops
+        let attached = attachment_ops
             .iter()
             .filter(|op| {
                 outcome.attachments_uploaded.contains(&op.file)

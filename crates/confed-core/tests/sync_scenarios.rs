@@ -736,6 +736,57 @@ async fn attachments_are_uploaded_from_the_sidecar() {
     assert!(remote[0].version > first_version, "it gained a version");
 }
 
+// Files put into the sidecar of a page that does not exist yet go up with
+// the push that creates it, and the dry run before says so.
+both_flavors!(a_new_page_takes_its_sidecar_files_with_it, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Parent", None, "<p>Parent page.</p>");
+    h.pull().await;
+
+    std::fs::create_dir_all(h.path("Parent/.Child")).unwrap();
+    h.write(
+        "Parent/Child.md",
+        "---\ntitle: Child\nlabels: []\n---\n\n![](.Child/a.png)\n\n![](.Child/b.png)\n",
+    );
+    let a = vec![7u8; 150_000];
+    let b = vec![9u8; 107_000];
+    std::fs::write(h.path("Parent/.Child/a.png"), &a).unwrap();
+    std::fs::write(h.path("Parent/.Child/b.png"), &b).unwrap();
+
+    let opts = PushOptions { with_attachments: true, ..Default::default() };
+    let dry = h
+        .engine
+        .push(&mut h.ws, &PushOptions { dry_run: true, ..opts.clone() })
+        .await
+        .expect("dry run");
+    let mut listed = dry.attachments_uploaded.clone();
+    listed.sort();
+    assert_eq!(listed, ["Parent/.Child/a.png", "Parent/.Child/b.png"], "{dry:?}");
+
+    let outcome = h.engine.push(&mut h.ws, &opts).await.expect("push");
+    assert_eq!(outcome.created.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.attachments_uploaded.len(), 2, "{outcome:?}");
+    let page_id = &outcome.created[0].page_id;
+    let mut remote: Vec<(String, Option<u64>)> = h
+        .engine
+        .client()
+        .list_attachments(&confed_api::PageId::new(page_id))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|a| (a.filename, a.file_size))
+        .collect();
+    remote.sort();
+    assert_eq!(
+        remote,
+        [("a.png".to_string(), Some(150_000)), ("b.png".to_string(), Some(107_000))]
+    );
+    assert_eq!(std::fs::read(h.path("Parent/.Child/a.png")).unwrap(), a);
+    assert_eq!(std::fs::read(h.path("Parent/.Child/b.png")).unwrap(), b);
+
+    let again = h.engine.push(&mut h.ws, &opts).await.expect("push");
+    assert!(again.attachments_uploaded.is_empty(), "{again:?}");
+});
+
 /// Removing an attachment locally needs the same explicit opt-in as deleting a
 /// page: it destroys content on the server.
 #[tokio::test]
