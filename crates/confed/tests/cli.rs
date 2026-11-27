@@ -1156,6 +1156,36 @@ async fn version_reports_the_compatibility_contract_and_the_release_notes() {
 }
 
 #[tokio::test]
+async fn a_hand_written_claude_md_keeps_its_text_through_init_and_doctor_fix() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let own = "# House rules\n\nAlways run the linter.\n";
+    std::fs::write(dir.path().join("CLAUDE.md"), own).unwrap();
+
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    let after_init = read(dir.path(), "CLAUDE.md");
+    assert!(after_init.starts_with(own), "{after_init}");
+    assert!(after_init.contains("# confed workspace"), "the contract is added: {after_init}");
+
+    // The contract is current, so no command warns about it.
+    let output = run(confed(dir.path(), &["status", "--json"]));
+    let value = envelope(&output, "status");
+    assert!(!value["warnings"].to_string().contains("CLAUDE.md"), "{value}");
+
+    // Put back as it was: doctor --fix adds the contract again, and keeps the text.
+    std::fs::write(dir.path().join("CLAUDE.md"), own).unwrap();
+    let output = run(confed_authed(dir.path(), &["doctor", "--fix", "--json"]));
+    envelope(&output, "doctor");
+    let fixed = read(dir.path(), "CLAUDE.md");
+    assert!(fixed.starts_with(own), "{fixed}");
+    assert_eq!(fixed.matches("# confed workspace").count(), 1, "{fixed}");
+
+    // And a second fix replaces the block, not adds another.
+    run(confed_authed(dir.path(), &["doctor", "--fix", "--json"]));
+    assert_eq!(read(dir.path(), "CLAUDE.md"), fixed);
+}
+
+#[tokio::test]
 async fn doctor_reports_an_agent_contract_written_by_another_confed_and_fixes_it() {
     let server = dc_server().await;
     let dir = tempfile::tempdir().unwrap();
