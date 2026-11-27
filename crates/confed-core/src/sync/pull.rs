@@ -1095,8 +1095,24 @@ impl SyncEngine {
 
         let mut file =
             self.build_file(ws, remote, placement, Some(local), merged.text().to_string())?;
+        // The parent too: a page re-parented on one side keeps that move.
+        let parent_id = match merge::merge_scalar(
+            &base_record.parent_id,
+            &local.file.frontmatter.parent_id,
+            &remote.parent_id,
+        ) {
+            ScalarMerge::Value(v) => v,
+            ScalarMerge::Conflict { ours, theirs } => {
+                tracing::warn!(
+                    target: "confed::sync",
+                    page = %remote.page_id, ?ours, ?theirs, "parent changed on both sides"
+                );
+                ours
+            }
+        };
         file.frontmatter.title = title;
         file.frontmatter.labels = labels;
+        file.frontmatter.parent_id = parent_id;
         // The layer is re-placed after the merge. A conflicted file keeps only
         // the user's drafts: with two candidate texts for a span, placing a
         // comment would be a guess.

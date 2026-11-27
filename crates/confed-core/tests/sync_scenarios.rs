@@ -322,6 +322,25 @@ both_flavors!(removing_parent_id_makes_the_page_top_level, |mut h: Harness| asyn
     assert_eq!(h.mock.page_parent("1002"), None);
 });
 
+both_flavors!(a_local_parent_change_survives_a_merge, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "A", None, "<p>A.</p>");
+    h.mock.seed_page("1002", "B", None, "<p>B.</p>");
+    h.mock.seed_page("1003", "Child", Some("1001"), "<p>First.</p><p>Second.</p>");
+    h.pull().await;
+
+    let file = h.read("A/Child.md").replace("parent_id: '1001'", "parent_id: '1002'");
+    assert!(file.contains("parent_id: '1002'"), "{file}");
+    h.write("A/Child.md", &file);
+    h.mock.remote_edit("1003", "<p>First, edited on the server.</p><p>Second.</p>");
+
+    let outcome = h.pull().await;
+    assert_eq!(outcome.merged.len(), 1, "{outcome:?}");
+    let merged = h.read("A/Child.md");
+    assert!(merged.contains("parent_id: '1002'"), "the local parent is kept: {merged}");
+    assert!(merged.contains("First, edited on the server."), "{merged}");
+    assert_eq!(h.status("1003"), PageState::Modified);
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;
