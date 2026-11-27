@@ -820,7 +820,13 @@ mod tests {
         mock: Arc<MockClient>,
         runtime: tokio::runtime::Runtime,
         _dir: tempfile::TempDir,
+        // Last, so it is released after everything above.
+        _serial: std::sync::MutexGuard<'static, ()>,
     }
+
+    /// Held by every harness: a cancel sets the process-wide stop request, and
+    /// a pull in a test running beside it would take it for its own.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -828,6 +834,7 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
+            let serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let dir = tempfile::tempdir().expect("temp dir");
             let mut ws = Workspace::create(dir.path()).expect("workspace");
             ws.state().set_meta("space_key", "DOCS").unwrap();
@@ -853,7 +860,7 @@ mod tests {
 
             let app = App::new(ws, Some(engine), Some(client), Some(runtime.handle().clone()))
                 .expect("app");
-            Self { app, mock, runtime, _dir: dir }
+            Self { app, mock, runtime, _dir: dir, _serial: serial }
         }
 
         fn press(&mut self, code: KeyCode) {
