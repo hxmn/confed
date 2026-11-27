@@ -302,6 +302,8 @@ fn needs_credentials(command: &Command) -> bool {
             *push
         }
         Command::Comment(C::List { refresh, .. }) => *refresh,
+        // Formats a URL; nothing is asked of the server.
+        Command::Open(_) => false,
         _ => true,
     }
 }

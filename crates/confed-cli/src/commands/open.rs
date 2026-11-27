@@ -8,8 +8,21 @@ use confed_core::error::{ConfedError, Result};
 use serde_json::json;
 
 pub async fn run(ctx: &mut Context, args: &OpenArgs) -> Result<Output> {
-    let client = ctx.build_client()?;
-    let space_key = ctx.workspace()?.space_key()?;
+    // A URL is only formatted, never fetched: the client that formats it
+    // needs the workspace's server and flavor, not its credential.
+    let ws = ctx.workspace()?;
+    let space_key = ws.space_key()?;
+    let base_url = ws.base_url()?.ok_or_else(|| {
+        ConfedError::state_with_hint(
+            "this workspace records no base URL",
+            "run `confed init` again, or `confed doctor`",
+        )
+    })?;
+    let flavor = match ws.flavor()? {
+        Some(flavor) => flavor,
+        None => confed_api::guess_flavor(&base_url).unwrap_or(confed_api::Flavor::Cloud),
+    };
+    let client = ctx.client_for(flavor, &base_url, confed_api::Auth::None)?;
 
     let url = match &args.page {
         Some(reference) => {
