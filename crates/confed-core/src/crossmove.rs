@@ -2263,17 +2263,34 @@ pub fn rewrite_links(storage: &str, ctx: &LinkContext<'_>) -> (String, usize) {
 
 const PAGE_TAG: &str = "<ri:page";
 
+/// The next `<ri:page` tag in `text` — outside CDATA sections and comments,
+/// where it is text: a code sample showing how a link is stored, which must
+/// stay byte for byte.
 fn find_page_tag(text: &str) -> Option<usize> {
+    const OPAQUE: [(&str, &str); 2] = [("<![CDATA[", "]]>"), ("<!--", "-->")];
     let mut offset = 0;
-    while let Some(at) = text[offset..].find(PAGE_TAG) {
-        let start = offset + at;
-        let next = text[start + PAGE_TAG.len()..].chars().next();
-        if matches!(next, Some(c) if c.is_whitespace() || c == '/' || c == '>') {
-            return Some(start);
+    loop {
+        let at = offset + text[offset..].find(PAGE_TAG)?;
+        // A CDATA section or comment that opens before it, and is not closed
+        // by then, hides it: skip past its end and look again.
+        let hidden = OPAQUE
+            .iter()
+            .filter_map(|(open, close)| {
+                let start = offset + text[offset..at].find(open)?;
+                Some((start, open.len(), close))
+            })
+            .min_by_key(|(start, ..)| *start);
+        if let Some((start, open_len, close)) = hidden {
+            let body = start + open_len;
+            offset = body + text[body..].find(close)? + close.len();
+            continue;
         }
-        offset = start + PAGE_TAG.len();
+        let next = text[at + PAGE_TAG.len()..].chars().next();
+        if matches!(next, Some(c) if c.is_whitespace() || c == '/' || c == '>') {
+            return Some(at);
+        }
+        offset = at + PAGE_TAG.len();
     }
-    None
 }
 
 /// The length of the tag at the start of `text`, through its `>`.
@@ -2515,6 +2532,29 @@ mod tests {
                 exists: None,
             },
         )
+    }
+
+    #[test]
+    fn a_link_shown_in_a_code_sample_or_a_comment_is_left_as_it_is() {
+        let moved = [("DOCS", "Onboarding", "ENG", "Onboarding")];
+        let sample = r#"<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[<ac:link><ri:page ri:content-title="Onboarding" /></ac:link>]]></ac:plain-text-body></ac:structured-macro>"#;
+        assert_eq!(rewrite(sample, "DOCS", "DOCS", &moved), (sample.to_string(), 0));
+        let comment = r#"<!-- <ri:page ri:content-title="Onboarding" /> --><p>x</p>"#;
+        assert_eq!(rewrite(comment, "DOCS", "DOCS", &moved), (comment.to_string(), 0));
+
+        // A real link after them is still fixed.
+        let both = format!(
+            r#"{sample}<p><ac:link><ri:page ri:content-title="Onboarding" /></ac:link></p>"#
+        );
+        let (out, n) = rewrite(&both, "DOCS", "DOCS", &moved);
+        assert_eq!(n, 1);
+        assert!(out.starts_with(sample), "{out}");
+        assert!(
+            out.ends_with(
+                r#"<ri:page ri:space-key="ENG" ri:content-title="Onboarding" /></ac:link></p>"#
+            ),
+            "{out}"
+        );
     }
 
     #[test]
