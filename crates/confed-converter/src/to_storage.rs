@@ -59,7 +59,13 @@ fn generate_at(
     let markdown = marks::normalize_line_starts(markdown);
     let arena = Arena::new();
     let root = mdblock::parse(&arena, &markdown);
-    let g = Generator { opts, line_offset, nesting, open_marks: RefCell::new(Vec::new()) };
+    let g = Generator {
+        opts,
+        line_offset,
+        nesting,
+        open_marks: RefCell::new(Vec::new()),
+        source: markdown.clone(),
+    };
     let mut out = String::new();
     // Checked block by block, so a failure names the Markdown line that
     // caused it rather than a byte offset into storage nobody has seen.
@@ -96,6 +102,9 @@ struct Generator<'a> {
     /// element boundary and reopened after it — the same fragmenting Confluence
     /// does itself.
     open_marks: RefCell<Vec<String>>,
+    /// The Markdown being converted, for what the tree does not keep: whether
+    /// a task item's box was written as a box.
+    source: String,
 }
 
 fn marker_open(r: &str) -> String {
@@ -154,9 +163,7 @@ impl<'a> Generator<'a> {
                 }
             }
             NodeValue::List(l) => {
-                let is_tasks = node
-                    .children()
-                    .any(|c| matches!(c.data.borrow().value, NodeValue::TaskItem(_)));
+                let is_tasks = node.children().any(|c| self.is_task(c));
                 if is_tasks {
                     out.push_str("<ac:task-list>");
                     for item in node.children() {
@@ -201,9 +208,30 @@ impl<'a> Generator<'a> {
 
     fn item(&self, node: &'a AstNode<'a>, out: &mut String) -> ConvertResult<()> {
         out.push_str("<li>");
+        // A box the parser took although it was escaped, `- \[x\] text`, is
+        // the item's text: put back what the parser took away.
+        if let NodeValue::TaskItem(state) = node.data.borrow().value {
+            let mark = state.unwrap_or(' ');
+            out.push_str(&format!("[{}] ", dom::escape_text(&mark.to_string())));
+        }
         self.item_content(node, out)?;
         out.push_str("</li>");
         Ok(())
+    }
+
+    /// Is `item` a task, as its source line says? The parser counts `- \[x\]`
+    /// as a checked box as well as `- [x]`; only an unescaped box makes one.
+    fn is_task(&self, item: &'a AstNode<'a>) -> bool {
+        let data = item.data.borrow();
+        if !matches!(data.value, NodeValue::TaskItem(_)) {
+            return false;
+        }
+        let pos = data.sourcepos.start;
+        let Some(line) = self.source.lines().nth(pos.line.saturating_sub(1)) else { return true };
+        let rest = line.get(pos.column.saturating_sub(1)..).unwrap_or(line);
+        let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        let rest = rest.strip_prefix(['-', '*', '+', '.', ')']).unwrap_or(rest).trim_start();
+        rest.starts_with('[')
     }
 
     /// A list item holding one paragraph is written inline, the way Confluence
@@ -1102,6 +1130,14 @@ mod tests {
                 "</ac:structured-macro>"
             )
         );
+    }
+
+    #[test]
+    fn an_escaped_checkbox_is_text_not_a_task() {
+        let out = gen("- \\[x\\] is not a checkbox here\n- another\n");
+        assert_eq!(out, "<ul><li>[x] is not a checkbox here</li><li>another</li></ul>");
+        let out = gen("- [x] done\n- [ ] open\n");
+        assert!(out.starts_with("<ac:task-list>"), "{out}");
     }
 
     #[test]
