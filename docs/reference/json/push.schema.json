@@ -96,6 +96,11 @@
           }
         },
         "dry_run": { "type": "boolean" },
+        "pages": {
+          "type": "array",
+          "description": "The same, once per page, sorted by path: what happened to it — or, in a dry run, would — its files included. A script that wants one page's story reads this instead of joining the lists above, which stay.",
+          "items": { "$ref": "#/$defs/page_report" }
+        },
         "warnings": {
           "type": "array",
           "description": "What the push wants you to know, such as a page whose body went up (or, in a dry run, would) regenerated whole instead of patched block by block. Also in the envelope's `warnings`. Absent when empty.",
@@ -142,6 +147,31 @@
             "parent_title": { "type": ["string", "null"] }
           }
         }
+      }
+    },
+    "page_report": {
+      "type": "object",
+      "required": ["path", "ops", "from_version", "to_version"],
+      "properties": {
+        "path": { "type": "string" },
+        "page_id": { "type": "string", "description": "Absent for a page a dry run would create." },
+        "ops": {
+          "type": "array",
+          "description": "Empty when only the page's files or comments changed.",
+          "items": { "type": "string", "enum": ["create", "body", "title", "labels", "parent", "delete"] }
+        },
+        "from_version": { "type": ["integer", "null"] },
+        "to_version": { "type": ["integer", "null"] },
+        "attachments": {
+          "type": "object",
+          "description": "The page's files, by name. Absent when none changed.",
+          "properties": {
+            "uploaded": { "type": "array", "items": { "type": "string" } },
+            "deleted": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "skipped": { "type": "array", "description": "Why the page, or one of its files, was held back.", "items": { "type": "string" } },
+        "failed": { "type": "array", "description": "What the server refused.", "items": { "type": "string" } }
       }
     },
     "blocked_page": {

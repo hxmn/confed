@@ -312,6 +312,7 @@ impl SyncEngine {
                     page_id: record.page_id.clone(),
                     title: record.title.clone(),
                     error: e.to_string(),
+                    path: record.local_path.clone(),
                 });
             }
         }
@@ -358,6 +359,7 @@ impl SyncEngine {
                         local.path
                     )
                 },
+                path: String::new(),
             });
         }
 
@@ -468,6 +470,7 @@ impl SyncEngine {
                 page_id: record.page_id.clone(),
                 title: record.title.clone(),
                 error: deleted_page_message(&record.local_path),
+                path: String::new(),
             })),
             Err(e) => Err(e.into()),
         }

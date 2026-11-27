@@ -126,6 +126,9 @@ pub struct FailedPage {
     pub page_id: String,
     pub title: String,
     pub error: String,
+    /// The page's file, where the failure is a push's and the file is known.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
 }
 
 /// A list read from the server, or the error when it could not be read. What
@@ -766,6 +769,7 @@ impl SyncEngine {
                                 "the page was fetched, but its attachments could not be listed \
                                  (the ones already here are kept): {error}"
                             ),
+                            path: String::new(),
                         }),
                     }
                     match &fetched.comments {
@@ -777,6 +781,7 @@ impl SyncEngine {
                                  (the ones already here are kept): {error}"
                             ),
                             page_id: id,
+                            path: String::new(),
                         }),
                     }
                 }
@@ -792,6 +797,7 @@ impl SyncEngine {
                                 page_id: id.clone(),
                                 title: title.clone(),
                                 error,
+                                path: String::new(),
                             });
                         };
                         match attachments {
@@ -837,6 +843,7 @@ impl SyncEngine {
                         page_id: item.page_id,
                         title,
                         error: e.to_string(),
+                        path: String::new(),
                     });
                 }
             }

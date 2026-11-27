@@ -209,6 +209,115 @@ pub struct PushOutcome {
     /// would — regenerated whole rather than patched block by block.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// Everything above, once per page: what happened to it, its files
+    /// included. Filled in last, from the lists above, which stay as they are.
+    pub pages: Vec<PageReport>,
+}
+
+/// What a push did — or, in a dry run, would do — to one page.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PageReport {
+    pub path: String,
+    /// Absent for a page a dry run would create.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub page_id: String,
+    /// `create`, `body`, `title`, `labels`, `parent`, `delete`; empty when only
+    /// its files or comments changed.
+    pub ops: Vec<String>,
+    pub from_version: Option<u32>,
+    pub to_version: Option<u32>,
+    #[serde(skip_serializing_if = "AttachmentReport::is_empty")]
+    pub attachments: AttachmentReport,
+    /// Why the page, or one of its files, was held back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<String>,
+    /// What the server refused.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<String>,
+}
+
+/// A page's files in a push, by file name.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AttachmentReport {
+    pub uploaded: Vec<String>,
+    pub deleted: Vec<String>,
+}
+
+impl AttachmentReport {
+    fn is_empty(&self) -> bool {
+        self.uploaded.is_empty() && self.deleted.is_empty()
+    }
+}
+
+impl PushOutcome {
+    /// Gather the lists into [`Self::pages`]: one entry per page they name.
+    fn by_page(mut self) -> Self {
+        let mut pages: Vec<PageReport> = Vec::new();
+        fn entry<'a>(
+            pages: &'a mut Vec<PageReport>,
+            path: &str,
+            page_id: &str,
+        ) -> &'a mut PageReport {
+            let at = pages
+                .iter()
+                .position(|p| p.path == path || (!page_id.is_empty() && p.page_id == page_id));
+            let at = at.unwrap_or_else(|| {
+                pages.push(PageReport {
+                    path: path.to_string(),
+                    page_id: page_id.to_string(),
+                    ..Default::default()
+                });
+                pages.len() - 1
+            });
+            &mut pages[at]
+        }
+        for (change, create) in self
+            .created
+            .iter()
+            .map(|c| (c, true))
+            .chain(self.pushed.iter().map(|c| (c, false)))
+            .chain(self.deleted.iter().map(|c| (c, false)))
+        {
+            let page = entry(&mut pages, &change.path, &change.page_id);
+            if create {
+                page.ops.push("create".into());
+            }
+            page.ops.extend(change.ops.iter().filter(|o| !(create && *o == "body")).cloned());
+            page.from_version = change.from_version;
+            page.to_version = change.to_version;
+        }
+        let owner = |file: &str| -> Option<(String, String)> {
+            let (dir, name) = file.rsplit_once('/')?;
+            let page = match dir.rsplit_once('/') {
+                Some((parent, sidecar)) => format!("{parent}/{}.md", sidecar.strip_prefix('.')?),
+                None => format!("{}.md", dir.strip_prefix('.')?),
+            };
+            Some((page, name.to_string()))
+        };
+        for file in &self.attachments_uploaded {
+            if let Some((path, name)) = owner(file) {
+                entry(&mut pages, &path, "").attachments.uploaded.push(name);
+            }
+        }
+        for file in &self.attachments_deleted {
+            if let Some((path, name)) = owner(file) {
+                entry(&mut pages, &path, "").attachments.deleted.push(name);
+            }
+        }
+        for blocked in &self.skipped {
+            let path = owner(&blocked.path).map(|(p, _)| p).unwrap_or_else(|| blocked.path.clone());
+            let path = if blocked.path.ends_with(".md") { blocked.path.clone() } else { path };
+            entry(&mut pages, &path, &blocked.page_id).skipped.push(blocked.reason.clone());
+        }
+        for failed in &self.failed {
+            // Comment failures name the page by id and title only.
+            let path = if failed.path.is_empty() { &failed.title } else { &failed.path };
+            entry(&mut pages, path, &failed.page_id).failed.push(failed.error.clone());
+        }
+        pages.sort_by(|a, b| a.path.cmp(&b.path));
+        self.pages = pages;
+        self
+    }
 }
 
 /// The storage a push would send for one page body or comment.
@@ -531,6 +640,7 @@ impl SyncEngine {
                             page_id: page_id.clone(),
                             title: status.title.clone(),
                             error: deleted_page_message(&status.path),
+                            path: String::new(),
                         });
                     }
                     continue;
@@ -660,7 +770,7 @@ impl SyncEngine {
             if opts.show_storage {
                 outcome.storage = self.storage_previews(ws, opts, &plan)?;
             }
-            return Ok(outcome);
+            return Ok(outcome.by_page());
         }
 
         // New pages created during this run, so children can find their parent.
@@ -685,6 +795,7 @@ impl SyncEngine {
                     page_id: op.page_id.clone().unwrap_or_default(),
                     title: op.title.clone(),
                     error: e.to_string(),
+                    path: op.path.clone(),
                 }),
             }
         }
@@ -693,7 +804,7 @@ impl SyncEngine {
             // Pages already pushed are recorded; attachments and comments wait
             // for the next push, which plans them afresh.
             self.progress.finish();
-            return Ok(outcome);
+            return Ok(outcome.by_page());
         }
 
         // Attachments after page bodies: a body that references a new file is
@@ -725,7 +836,7 @@ impl SyncEngine {
         outcome.warnings.extend(self.take_notes());
 
         self.progress.finish();
-        Ok(outcome)
+        Ok(outcome.by_page())
     }
 
     /// Take out of the plan every page whose `parent_id` names a page in
@@ -826,6 +937,7 @@ impl SyncEngine {
                     page_id: op.page_id.clone(),
                     title: op.path.clone(),
                     error: format!("{}: {e}", op.file),
+                    path: op.path.clone(),
                 }),
             }
         }

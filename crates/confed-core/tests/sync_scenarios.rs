@@ -1235,6 +1235,25 @@ both_flavors!(a_new_page_takes_its_sidecar_files_with_it, |mut h: Harness| async
     assert!(again.attachments_uploaded.is_empty(), "{again:?}");
 });
 
+// One entry per page in `pages`, its files included.
+both_flavors!(a_push_reports_each_page_once, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Diagrams", None, "<p>See the diagram.</p>");
+    h.pull().await;
+    h.write("Diagrams.md", &h.read("Diagrams.md").replace("See", "Look at"));
+    std::fs::create_dir_all(h.path(".Diagrams")).unwrap();
+    std::fs::write(h.path(".Diagrams/diagram.png"), b"png").unwrap();
+    h.write("New.md", "---\ntitle: New\n---\n\nNew.\n");
+
+    let push = h.engine.push(&mut h.ws, &push_attachments()).await.unwrap();
+    assert_eq!(push.pages.len(), 2, "{:?}", push.pages);
+    let diagrams = push.pages.iter().find(|p| p.path == "Diagrams.md").unwrap();
+    assert_eq!(diagrams.page_id, "1001");
+    assert_eq!(diagrams.ops, ["body"]);
+    assert_eq!(diagrams.attachments.uploaded, ["diagram.png"]);
+    let new = push.pages.iter().find(|p| p.path == "New.md").unwrap();
+    assert_eq!(new.ops, ["create"]);
+});
+
 // An emptied attachment is not uploaded over one that has content, unless
 // asked: it is what a copy onto itself once produced, and almost never meant.
 both_flavors!(
