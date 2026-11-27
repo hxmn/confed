@@ -801,6 +801,19 @@ impl StateDb {
         Ok(())
     }
 
+    /// The page a comment is on, by the comment's id: one lookup, where
+    /// scanning every page's comments costs the whole space.
+    pub fn comment_page(&self, comment_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT page_id FROM comments WHERE comment_id = ?1",
+                params![comment_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn page_comments(&self, page_id: &str) -> Result<Vec<CommentRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT comment_id, page_id, parent_comment_id, kind, author, created_at,

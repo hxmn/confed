@@ -45,14 +45,13 @@ pub(super) fn find_comment(
     ws: &Workspace,
     comment_id: &str,
 ) -> Result<(PageRecord, CommentRecord)> {
-    for page in ws.state().all_pages()? {
-        if let Some(c) = ws
-            .state()
-            .page_comments(&page.page_id)?
-            .into_iter()
-            .find(|c| c.comment_id == comment_id)
-        {
-            return Ok((page, c));
+    let state = ws.state();
+    if let Some(page_id) = state.comment_page(comment_id)? {
+        let page = state.get_page(&page_id)?;
+        let comment =
+            state.page_comments(&page_id)?.into_iter().find(|c| c.comment_id == comment_id);
+        if let (Some(page), Some(comment)) = (page, comment) {
+            return Ok((page, comment));
         }
     }
     Err(ConfedError::NotFound(format!(
