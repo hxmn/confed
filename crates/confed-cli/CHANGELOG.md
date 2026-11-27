@@ -20,6 +20,34 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-11-27
+
+Fixes from the review's triage list (#85), mostly in what an interruption leaves
+behind.
+
+### Fixed
+
+- A comment draft whose post reached the server but whose answer was lost was posted
+  again by the next push. Posts are journaled now, and a lost one is found on the page
+  and adopted instead.
+- Two workspaces on one Data Center with different personal access tokens and no
+  username shared one keyring entry, and the second `init` replaced the first's token. A
+  token with no user now has an entry of its own (named by a fingerprint, not the
+  token); stores saved before keep theirs.
+- After a move between spaces, a page whose link fix failed was never retried when it
+  also held a link that reaches nothing.
+- `instance abort` missed a rename whose answer was lost, leaving the page under the
+  move's title.
+- A `&nbsp;` between two blocks of a preserved `confluence` fence was dropped from the
+  fence, and from what an edit to it uploaded.
+- The TUI's push plan did not scroll, so a long plan hid the line that confirms it; it
+  scrolls now, with the confirm line always in sight.
+
+### Security
+
+- The copies of a secret confed makes — the one handed to the keyring, a request body
+  carrying a password — are wiped once used.
+
 ## [0.24.0] - 2026-11-27
 
 Old versions can be read, compared and restored; a fresh clone of a workspace no longer
@@ -1711,7 +1739,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.24.1...HEAD
+[0.24.1]: https://github.com/hxmn/confed/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/hxmn/confed/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/hxmn/confed/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/hxmn/confed/compare/v0.21.1...v0.22.0
