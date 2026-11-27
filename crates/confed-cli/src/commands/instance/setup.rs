@@ -1042,7 +1042,7 @@ pub(crate) async fn clone_spaces(
             .await;
     let mut warnings = Vec::new();
     for (space, rel, ws, outcome) in pulled {
-        let key = space.id.key.clone();
+        let key = space.id.key;
         match outcome {
             Ok(pull) => {
                 warnings.extend(pull.warnings.iter().map(|w| format!("{key}: {w}")));

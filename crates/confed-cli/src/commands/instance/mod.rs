@@ -273,11 +273,11 @@ pub fn connection(ctx: &Context, instance: &Instance) -> Result<Connection> {
             })();
             match own {
                 Ok(Some(connection)) => {
-                    members.insert(member.space_key.clone(), Ok(connection));
+                    members.insert(member.space_key, Ok(connection));
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    members.insert(member.space_key.clone(), Err(e.to_string()));
+                    members.insert(member.space_key, Err(e.to_string()));
                 }
             }
         }
@@ -446,7 +446,7 @@ pub fn report(ctx: &Context, runs: Vec<SpaceRun>, extra: Value) -> Output {
                     "dir": run.member.dir,
                     "ok": false,
                     "exit_code": e.exit_code().as_i32(),
-                    "errors": [entry.clone()],
+                    "errors": [entry],
                 }));
                 let _ = writeln!(
                     human,

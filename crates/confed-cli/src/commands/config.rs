@@ -109,7 +109,7 @@ pub fn run(ctx: &mut Context, args: &ConfigArgs, pick_page: PagePicker) -> Resul
             human,
             "{:<14} {:<44} {}",
             spec.key,
-            if value.is_empty() { "—".to_string() } else { value.clone() },
+            if value.is_empty() { "—" } else { value.as_str() },
             ctx.style.dim(&format!("({source})"))
         );
         entries.push(json!({

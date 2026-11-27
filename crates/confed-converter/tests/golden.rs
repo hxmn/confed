@@ -12,7 +12,7 @@ fn corpus_renders_to_markdown() {
         let converted = storage_to_markdown(&fixture.storage, &corpus::options())
             .unwrap_or_else(|e| panic!("{}: {e}", fixture.name));
         insta::with_settings!({
-            snapshot_suffix => fixture.name.clone(),
+            snapshot_suffix => fixture.name,
             omit_expression => true,
             prepend_module_to_snapshot => false,
         }, {
@@ -40,7 +40,7 @@ fn corpus_block_maps_are_snapshotted() {
             })
             .collect();
         insta::with_settings!({
-            snapshot_suffix => fixture.name.clone(),
+            snapshot_suffix => fixture.name,
             omit_expression => true,
             prepend_module_to_snapshot => false,
         }, {
