@@ -1,9 +1,7 @@
 ---
 source: crates/confed-converter/tests/golden.rs
 ---
-> [!WARNING]
-> **Before you deploy**
->
+> [!WARNING] Before you deploy
 > Check all of these:
 >
 > - migrations applied

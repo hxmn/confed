@@ -262,19 +262,11 @@ impl<'a> Generator<'a> {
         explicit_title: Option<String>,
         out: &mut String,
     ) -> ConvertResult<()> {
-        let mut children: Vec<&'a AstNode<'a>> = node.children().collect();
-        // `> [!NOTE]\n> **Title**\n>\n> body` — a first paragraph that is
-        // *entirely* bold is the title the renderer wrote. Requiring the whole
-        // paragraph keeps a body that merely starts bold from being stolen.
-        let mut title = explicit_title;
-        if title.is_none() {
-            if let Some(first) = children.first() {
-                if let Some(t) = sole_strong_text(first) {
-                    title = Some(t);
-                    children.remove(0);
-                }
-            }
-        }
+        let children: Vec<&'a AstNode<'a>> = node.children().collect();
+        // The title is the alert line's, `> [!NOTE] Title`. A first paragraph
+        // that is all bold is body text: taken for the title, a panel whose
+        // body is one bold paragraph would lose its body.
+        let title = explicit_title;
         out.push_str(&format!(
             r#"<ac:structured-macro ac:name="{}" ac:schema-version="1">"#,
             dom::escape_attr(name)
@@ -965,35 +957,6 @@ fn unbalanced_html<'a>(children: &[&'a AstNode<'a>]) -> Vec<bool> {
     as_text
 }
 
-fn sole_strong_text<'a>(node: &'a AstNode<'a>) -> Option<String> {
-    if !matches!(node.data.borrow().value, NodeValue::Paragraph) {
-        return None;
-    }
-    let children: Vec<_> = node.children().collect();
-    if children.len() != 1 {
-        return None;
-    }
-    if !matches!(children[0].data.borrow().value, NodeValue::Strong) {
-        return None;
-    }
-    let mut text = String::new();
-    collect_plain(children[0], &mut text);
-    Some(text)
-}
-
-fn collect_plain<'a>(node: &'a AstNode<'a>, out: &mut String) {
-    match &node.data.borrow().value {
-        NodeValue::Text(t) => out.push_str(t),
-        NodeValue::Code(c) => out.push_str(&c.literal),
-        NodeValue::SoftBreak | NodeValue::LineBreak => out.push(' '),
-        _ => {
-            for c in node.children() {
-                collect_plain(c, out);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1131,7 +1094,7 @@ mod tests {
     #[test]
     fn alerts_become_admonitions() {
         assert_eq!(
-            gen("> [!WARNING]\n> **Careful**\n>\n> Do not.\n"),
+            gen("> [!WARNING] Careful\n> Do not.\n"),
             concat!(
                 r#"<ac:structured-macro ac:name="warning" ac:schema-version="1">"#,
                 r#"<ac:parameter ac:name="title">Careful</ac:parameter>"#,
@@ -1139,6 +1102,13 @@ mod tests {
                 "</ac:structured-macro>"
             )
         );
+    }
+
+    #[test]
+    fn a_body_that_is_one_bold_paragraph_stays_the_body() {
+        let out = gen("> [!NOTE]\n> **Whole bold body**\n");
+        assert!(!out.contains("ac:name=\"title\""), "{out}");
+        assert!(out.contains("<p><strong>Whole bold body</strong></p>"), "{out}");
     }
 
     #[test]

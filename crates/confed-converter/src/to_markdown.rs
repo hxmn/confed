@@ -245,19 +245,19 @@ impl Renderer<'_> {
                 let body = macros::rich_text_body(el)
                     .map(|b| self.render_children_blocks(&b.children))
                     .unwrap_or_default();
-                let mut inner = String::new();
-                if !title.is_empty() {
-                    // Its own paragraph, not merely a bold first line, so the
-                    // inverse mapping can tell a title from body text that
-                    // happens to start bold.
-                    inner.push_str(&format!("**{}**", escape_md(&title)));
-                    if !body.trim().is_empty() {
-                        inner.push_str("\n\n");
-                    }
+                // The title on the alert line, `> [!NOTE] Title`: a bold first
+                // paragraph is body text, never taken for the title.
+                let head = if title.is_empty() {
+                    format!("> [!{alert}]")
+                } else {
+                    format!("> [!{alert}] {}", escape_md(&title))
+                };
+                let body = body.trim();
+                if body.is_empty() {
+                    head
+                } else {
+                    format!("{head}\n{}", prefix_lines(body, "> ", ">"))
                 }
-                inner.push_str(body.trim());
-                let quoted = prefix_lines(inner.trim(), "> ", ">");
-                format!("> [!{alert}]\n{quoted}")
             }
             "expand" => {
                 let params = macros::macro_params(el);
@@ -1231,7 +1231,7 @@ mod tests {
         let out = md(
             r#"<ac:structured-macro ac:name="warning"><ac:parameter ac:name="title">Careful</ac:parameter><ac:rich-text-body><p>Do not.</p></ac:rich-text-body></ac:structured-macro>"#,
         );
-        assert_eq!(out, "> [!WARNING]\n> **Careful**\n>\n> Do not.\n");
+        assert_eq!(out, "> [!WARNING] Careful\n> Do not.\n");
     }
 
     #[test]

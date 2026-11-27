@@ -49,7 +49,7 @@ Both are enforced by tests, not by convention:
 | `tip` | `> [!TIP]` | |
 | `warning` | `> [!WARNING]` | |
 | `panel` | `> [!NOTE]` | a panel is a box, not a severity |
-| …admonition `title` param | bold first paragraph inside the alert | |
+| …admonition `title` param | on the alert line, `> [!NOTE] Title` | a bold first paragraph stays body text |
 | `expand` | `<details><summary>…</summary>…</details>` | |
 | `toc` | `<!-- confed:toc -->` | |
 | `status` | its block as a ` ```confluence ` fence | no Markdown spelling carries the colour back; an edit beside a lozenge must not turn it into bold text |
@@ -76,7 +76,7 @@ The inverse of every row above, plus:
 | ` ```lang ` fence | `code` macro with a `language` parameter; `]]>` inside the body is split across CDATA sections |
 | `> [!NOTE]` / `[!TIP]` / `[!WARNING]` | `info` / `tip` / `warning` macro |
 | `> [!IMPORTANT]` / `[!CAUTION]` | `note` / `warning` (nearest Confluence equivalent) |
-| a bold-only first paragraph in an alert | the macro's `title` parameter |
+| the text after `[!NOTE]` on the alert line | the macro's `title` parameter |
 | `<details><summary>T</summary>…</details>` | `expand` macro |
 | `<!-- confed:toc -->` | `toc` macro |
 | image path under `attachment_dir` | `<ac:image><ri:attachment/></ac:image>` |
