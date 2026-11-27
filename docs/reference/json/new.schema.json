@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/new.schema.json",
+  "title": "confed new result",
+  "description": "The `result` of `confed new --json`: the page file scaffolded on disk, which the next `confed push` creates on the server. With --push the scaffold is nested under `created`, beside the push that created it.",
+  "type": "object",
+  "anyOf": [
+    { "$ref": "#/$defs/scaffold" },
+    {
+      "description": "`--push`: the file written, then pushed.",
+      "required": ["created", "push"],
+      "properties": {
+        "created": { "$ref": "#/$defs/scaffold" },
+        "push": { "$ref": "#/$defs/push_outcome" }
+      }
+    }
+  ],
+  "$defs": {
+    "scaffold": {
+      "type": "object",
+      "required": ["created_file", "title", "would_create_under"],
+      "properties": {
+        "created_file": { "type": "string", "description": "Workspace-relative path of the file written." },
+        "title": { "type": "string", "description": "The page title in its frontmatter." },
+        "would_create_under": {
+          "type": "object",
+          "required": ["parent_id"],
+          "properties": {
+            "parent_id": {
+              "type": ["string", "null"],
+              "description": "The page the new one goes under: the page whose file is the directory's `.md`, or null for the space's top level."
+            }
+          }
+        }
+      }
+    },
+    "push_outcome": {
+      "type": "object",
+      "description": "The push of the one new file, shaped as the `result` of `confed push --json` (see push.schema.json).",
+      "required": ["pushed", "created", "deleted", "attachments_uploaded", "attachments_deleted", "comments_added", "skipped", "failed", "dry_run"]
+    }
+  }
+}

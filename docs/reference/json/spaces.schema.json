@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/spaces.schema.json",
+  "title": "confed spaces result",
+  "description": "The `result` of `confed spaces --json`: the spaces the authenticated user can see, up to --limit.",
+  "type": "object",
+  "required": ["spaces"],
+  "properties": {
+    "spaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "id", "name", "type", "current"],
+        "properties": {
+          "key": { "type": "string", "description": "The space key: `DOCS`." },
+          "id": { "type": ["string", "null"], "description": "The server's numeric id for the space, as a string, when it reports one." },
+          "name": { "type": "string" },
+          "type": { "type": ["string", "null"], "description": "As the server names it: `global`, `personal`, …" },
+          "current": { "type": "boolean", "description": "The space this directory is bound to." }
+        }
+      }
+    }
+  }
+}

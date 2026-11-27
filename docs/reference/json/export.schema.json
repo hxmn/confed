@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/export.schema.json",
+  "title": "confed export result",
+  "description": "The `result` of `confed export --json`: the pages written out as standalone HTML or as raw storage format. Pages that match no path given are left out.",
+  "type": "object",
+  "required": ["format", "exported"],
+  "properties": {
+    "format": { "type": "string", "enum": ["html", "storage"] },
+    "exported": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "out"],
+        "properties": {
+          "path": { "type": "string", "description": "Workspace-relative path of the page file." },
+          "out": { "type": "string", "description": "The file written: `.html`, or `.xml` for storage format." }
+        }
+      }
+    }
+  }
+}

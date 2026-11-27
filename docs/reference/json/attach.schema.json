@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/attach.schema.json",
+  "title": "confed attach result",
+  "description": "The `result` of `confed attach --json`. It has three shapes: files copied into the page's sidecar directory (and, with --push, uploaded); `--list`, the page's attachments from the local state or, with --remote, from the server; and `--rm`, one attachment removed locally and, with --push, on the server.",
+  "type": "object",
+  "required": ["page_id"],
+  "anyOf": [
+    { "$ref": "#/$defs/attached" },
+    { "$ref": "#/$defs/list" },
+    { "$ref": "#/$defs/removed" }
+  ],
+  "properties": {
+    "page_id": { "type": "string", "description": "The page the attachments hang off." }
+  },
+  "$defs": {
+    "attached": {
+      "type": "object",
+      "required": ["page_id", "attached"],
+      "properties": {
+        "attached": {
+          "type": "array",
+          "description": "The files now in the sidecar directory, in the order given.",
+          "items": {
+            "type": "object",
+            "required": ["file", "size", "sha256"],
+            "properties": {
+              "file": { "type": "string", "description": "Its file name in the sidecar directory." },
+              "size": { "type": ["integer", "null"], "minimum": 0, "description": "Bytes." },
+              "sha256": { "type": "string", "description": "Hex SHA-256 of the file." }
+            }
+          }
+        },
+        "push": { "$ref": "#/$defs/push_outcome" }
+      }
+    },
+    "list": {
+      "type": "object",
+      "required": ["page_id", "source", "last_fetch_at", "attachments"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "enum": ["cache", "server"],
+          "description": "`cache`: the local state, as fresh as the last fetch. `server`: asked of the server just now (--remote)."
+        },
+        "last_fetch_at": {
+          "type": ["string", "null"],
+          "description": "RFC 3339 timestamp of the last fetch, or null if the space has never been fetched."
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "file", "size", "version"],
+            "properties": {
+              "id": { "type": "string", "description": "The attachment's id on the server." },
+              "file": { "type": "string", "description": "Its file name." },
+              "size": { "type": ["integer", "null"], "minimum": 0, "description": "Bytes, when known." },
+              "version": { "type": "integer", "minimum": 0 },
+              "media_type": { "type": ["string", "null"], "description": "`server` only." },
+              "sha256": { "type": ["string", "null"], "description": "`cache` only: hex SHA-256 of the downloaded file." },
+              "downloaded": { "type": "boolean", "description": "`cache` only: this version of the file has been pulled here." }
+            }
+          }
+        }
+      }
+    },
+    "removed": {
+      "type": "object",
+      "required": ["page_id", "file", "removed_locally", "removed_on_server", "staged"],
+      "properties": {
+        "file": { "type": "string", "description": "The attachment's file name." },
+        "removed_locally": { "type": "boolean", "description": "The file was in the sidecar directory and is now gone." },
+        "removed_on_server": { "type": "boolean", "description": "Deleted on the server by this run (--push)." },
+        "staged": {
+          "type": "boolean",
+          "description": "Still an attachment on the server: removed here only. A plain `confed push` holds the deletion back; it takes `--allow-delete`."
+        },
+        "needs": {
+          "const": "--allow-delete",
+          "description": "Present when staged without --push: the flag `confed push` needs to delete it on the server."
+        },
+        "push": { "$ref": "#/$defs/push_outcome" }
+      }
+    },
+    "push_outcome": {
+      "type": "object",
+      "description": "With --push: the push of the page, shaped as the `result` of `confed push --json` (see push.schema.json).",
+      "required": ["pushed", "created", "deleted", "attachments_uploaded", "attachments_deleted", "comments_added", "skipped", "failed", "dry_run"]
+    }
+  }
+}

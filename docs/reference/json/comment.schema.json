@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/comment.schema.json",
+  "title": "confed comment result",
+  "description": "The `result` of `confed comment <subcommand> --json`; each subcommand has its own shape. `list` reads the local copy of a page's comments, or the server's for a page id the workspace does not track. `add`, `reply` and `resolve` write drafts that the next push posts, or post them now with --push. `edit` and `rm` act on the server at once; `prune-markers` takes orphan inline-comment markers out of a page.",
+  "type": "object",
+  "anyOf": [
+    { "$ref": "#/$defs/list" },
+    { "$ref": "#/$defs/list_live" },
+    { "$ref": "#/$defs/add" },
+    { "$ref": "#/$defs/reply" },
+    { "$ref": "#/$defs/resolve" },
+    { "$ref": "#/$defs/edit" },
+    { "$ref": "#/$defs/rm" },
+    { "$ref": "#/$defs/prune_markers" }
+  ],
+  "$defs": {
+    "list": {
+      "type": "object",
+      "description": "`list`: the comments of a page in the workspace, from the local copy.",
+      "required": ["page_id", "comments", "orphan_markers", "checked_at", "refreshed"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "comments": { "type": "array", "items": { "$ref": "#/$defs/comment" } },
+        "orphan_markers": {
+          "type": "array",
+          "description": "Inline-comment markers in the page that belong to no comment.",
+          "items": { "$ref": "#/$defs/marker" }
+        },
+        "checked_at": {
+          "type": ["string", "null"],
+          "description": "RFC 3339 timestamp of the last time comments were read from the server, or null if never."
+        },
+        "refreshed": { "type": "boolean", "description": "--refresh read them from the server just now." },
+        "changed": { "type": "boolean", "description": "With --refresh only: the server's comments differed from the local copy." }
+      }
+    },
+    "list_live": {
+      "type": "object",
+      "description": "`list` of a page id the workspace does not track: read from the server, with a warning saying so.",
+      "required": ["page_id", "source", "comments"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "source": { "const": "server" },
+        "comments": { "type": "array", "items": { "$ref": "#/$defs/comment" } }
+      }
+    },
+    "comment": {
+      "type": "object",
+      "required": ["id", "kind", "author", "created", "resolved", "thread_resolved", "reply_to", "anchor", "body_markdown"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string", "enum": ["footer", "inline"] },
+        "author": { "type": ["string", "null"], "description": "The author's display name." },
+        "created": { "type": ["string", "null"], "description": "When it was posted, as the server gives it." },
+        "resolved": { "type": "boolean", "description": "Its thread is resolved: a reply is as resolved as its thread." },
+        "thread_resolved": { "type": "boolean", "description": "The same as `resolved`." },
+        "reply_to": { "type": ["string", "null"], "description": "The comment it replies to; null for a thread's root." },
+        "anchor": {
+          "type": ["object", "null"],
+          "description": "An inline thread root's anchor; null for page comments and replies.",
+          "required": ["text", "orphaned"],
+          "properties": {
+            "text": { "type": "string", "description": "The page text the comment is on." },
+            "orphaned": { "type": "boolean", "description": "That text can no longer be found in the page." },
+            "placed": { "type": "boolean", "description": "Local list only: a mark for it is in the page file." },
+            "line": { "type": ["integer", "null"], "minimum": 1, "description": "Local list only: the line of that mark in the page file." }
+          }
+        },
+        "body_markdown": { "type": "string" }
+      }
+    },
+    "marker": {
+      "type": "object",
+      "required": ["ref", "text"],
+      "properties": {
+        "ref": { "type": "string", "description": "Confluence's marker ref." },
+        "text": { "type": "string", "description": "The page text the marker wraps." }
+      }
+    },
+    "add": {
+      "type": "object",
+      "description": "`add`: a draft written to the page body (an inline comment the body can carry a mark for) or to the comments.md sidecar; with --push, posted.",
+      "required": ["page_id", "draft", "body", "anchor", "written_to"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "draft": { "type": "boolean", "description": "Still a draft: no --push, or the push failed." },
+        "body": { "type": "string", "description": "The comment as given, in Markdown." },
+        "anchor": { "type": ["string", "null"], "description": "--anchor: the text an inline comment is on; null for a page comment." },
+        "written_to": {
+          "type": "string",
+          "enum": ["body", "sidecar"],
+          "description": "`body`: a `<!--c new …-->` mark in the page file. `sidecar`: an entry in comments.md."
+        },
+        "line": { "type": "integer", "minimum": 1, "description": "`body` only: the line of the mark in the page file." },
+        "sidecar_reason": {
+          "type": ["string", "null"],
+          "description": "`sidecar` only: why an inline comment could not go into the page body; null when it did not have to."
+        },
+        "posted": {
+          "type": "array",
+          "description": "--push: the ids of the comments posted.",
+          "items": { "type": "string" }
+        },
+        "comments": {
+          "type": "array",
+          "description": "--push: what was posted, as the server reported it.",
+          "items": { "$ref": "#/$defs/posted" }
+        }
+      }
+    },
+    "posted": {
+      "type": "object",
+      "required": ["id", "page_id", "kind", "reply_to", "anchor", "marker_ref"],
+      "properties": {
+        "id": { "type": "string" },
+        "page_id": { "type": ["string", "null"] },
+        "kind": { "type": ["string", "null"], "enum": ["footer", "inline", null] },
+        "reply_to": { "type": ["string", "null"] },
+        "anchor": { "type": ["string", "null"], "description": "An inline comment's anchor text." },
+        "marker_ref": { "type": ["string", "null"], "description": "An inline comment's marker ref in the page." }
+      }
+    },
+    "push_counts": {
+      "type": "object",
+      "description": "--push: the comment work the push did, as ids.",
+      "required": ["comments_added", "replies_added", "comments_resolved"],
+      "properties": {
+        "comments_added": { "type": "array", "items": { "type": "string" } },
+        "replies_added": { "type": "array", "items": { "type": "string" } },
+        "comments_resolved": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "reply": {
+      "type": "object",
+      "description": "`reply`: the same reply queued on each thread named; with --push, posted.",
+      "required": ["queued", "draft"],
+      "properties": {
+        "queued": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["reply_to", "page_id"],
+            "properties": {
+              "reply_to": { "type": "string", "description": "The comment id replied to." },
+              "page_id": { "type": "string" }
+            }
+          }
+        },
+        "draft": { "type": "boolean", "description": "Still a draft: no --push, or the push failed." },
+        "result": { "$ref": "#/$defs/push_counts" },
+        "posted": {
+          "type": "array",
+          "description": "--push: the ids of the replies posted.",
+          "items": { "type": "string" }
+        },
+        "replies": {
+          "type": "array",
+          "description": "--push: each reply posted, under the parent the server keeps. An inline thread is one level deep, so a reply to a reply sits under the thread's root.",
+          "items": {
+            "type": "object",
+            "required": ["id", "reply_to", "parent", "kind"],
+            "properties": {
+              "id": { "type": "string" },
+              "reply_to": { "type": "string", "description": "The comment it was asked to reply to." },
+              "parent": { "type": "string", "description": "The comment it was posted under." },
+              "kind": { "type": "string", "enum": ["footer", "inline"] }
+            }
+          }
+        }
+      }
+    },
+    "resolve": {
+      "type": "object",
+      "description": "`resolve`: resolves queued in the sidecar for the threads named, or every open thread of a page (--all); with --push, applied.",
+      "required": ["queued", "skipped", "draft"],
+      "properties": {
+        "queued": { "type": "array", "description": "The thread ids.", "items": { "type": "string" } },
+        "skipped": {
+          "type": "array",
+          "description": "--all: threads left alone, and why.",
+          "items": {
+            "type": "object",
+            "required": ["id", "reason"],
+            "properties": { "id": { "type": "string" }, "reason": { "type": "string" } }
+          }
+        },
+        "draft": { "type": "boolean", "description": "No --push was given." },
+        "result": { "$ref": "#/$defs/push_counts" }
+      }
+    },
+    "edit": {
+      "type": "object",
+      "description": "`edit`: a posted comment changed on the server.",
+      "required": ["comment_id", "edited"],
+      "properties": {
+        "comment_id": { "type": "string" },
+        "edited": { "const": true }
+      }
+    },
+    "rm": {
+      "type": "object",
+      "description": "`rm`: posted comments deleted on the server, with their replies. Declining the prompt returns {\"deleted\": [], \"cancelled\": true}.",
+      "required": ["deleted"],
+      "anyOf": [
+        { "required": ["deleted", "replies_deleted"] },
+        { "required": ["deleted", "cancelled"], "properties": { "cancelled": { "const": true } } }
+      ],
+      "properties": {
+        "deleted": { "type": "array", "description": "The comment ids deleted.", "items": { "type": "string" } },
+        "replies_deleted": { "type": "array", "description": "The replies deleted with them.", "items": { "type": "string" } }
+      }
+    },
+    "prune_markers": {
+      "type": "object",
+      "description": "`prune-markers`: the orphan inline-comment markers taken out of the page, or with --dry-run that would be.",
+      "required": ["page_id", "dry_run", "removed"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "removed": { "type": "array", "items": { "$ref": "#/$defs/marker" } }
+      }
+    }
+  }
+}

@@ -1162,6 +1162,68 @@ async fn the_command_tree_is_printed_for_a_program_with_no_workspace_and_no_netw
     assert!(value["errors"][0]["hint"].as_str().unwrap().contains("perms"), "{value}");
 }
 
+/// Every top-level command publishes a schema for its `result`, so
+/// [`envelope`] validates whatever a test runs: `check_result` skips a command
+/// with no schema file, and a missing one would leave its output unchecked.
+/// No command is excused — even `tui`, which prints its envelope only when
+/// asked for one without a terminal, has a schema.
+#[tokio::test]
+async fn every_command_publishes_a_result_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = run(confed(dir.path(), &["commands", "--json"]));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "commands");
+    let names: Vec<&str> = value["result"]["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert!(names.len() > 20, "the command tree lists every command: {names:?}");
+
+    let missing: Vec<&&str> = names.iter().filter(|name| schema::load(name).is_none()).collect();
+    assert!(
+        missing.is_empty(),
+        "no docs/reference/json/<command>.schema.json for {missing:?}: write one describing \
+         the command's `--json` result"
+    );
+}
+
+/// The commands that work on the files alone, run once each in their
+/// commonest shapes, so their `result` meets its schema.
+#[tokio::test]
+async fn local_commands_results_match_their_schemas() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+
+    let ok = |args: &[&str], command: &str| -> Value {
+        let output = run(confed_authed(dir.path(), args));
+        assert_eq!(exit_code(&output), 0, "{args:?}: {}", stderr(&output));
+        envelope(&output, command)
+    };
+
+    let created = ok(&["new", "Team Handbook/Checklist", "--json"], "new");
+    assert_eq!(created["result"]["would_create_under"]["parent_id"], json!(ROOT_PAGE));
+    ok(&["new", "Top Level", "--json"], "new");
+    let opened = ok(&["open", CHILD_FILE, "--json"], "open");
+    assert_eq!(opened["result"]["opened"], json!(false));
+    ok(&["open", "--json"], "open");
+    let exported = ok(&["export", "--json"], "export");
+    assert!(!exported["result"]["exported"].as_array().unwrap().is_empty(), "{exported}");
+    ok(&["export", "--format", "storage", ROOT_FILE, "--json"], "export");
+    ok(&["completion", "bash", "--json"], "completion");
+    ok(&["config", "--json"], "config");
+    ok(&["config", "--get", "space", "--json"], "config");
+    ok(&["attach", CHILD_FILE, "--list", "--json"], "attach");
+    ok(&["comment", "list", CHILD_FILE, "--json"], "comment");
+    let planned = ok(&["rm", CHILD_FILE, "--dry-run", "--json"], "rm");
+    assert_eq!(planned["result"]["dry_run"], json!(true));
+    ok(&["rm", CHILD_FILE, "--json"], "rm");
+    assert!(!dir.path().join(CHILD_FILE).exists());
+}
+
 #[tokio::test]
 async fn version_reports_the_compatibility_contract_and_the_release_notes() {
     // Deliberately not a workspace: an agent must be able to ask what confed is

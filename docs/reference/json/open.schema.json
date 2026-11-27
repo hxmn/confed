@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/open.schema.json",
+  "title": "confed open result",
+  "description": "The `result` of `confed open --json`: the browser URL of a page, or of the space with no page named. With --json, --print or no terminal the URL is only printed, never opened.",
+  "type": "object",
+  "required": ["url", "opened"],
+  "properties": {
+    "url": { "type": "string", "description": "The page's (or the space's) address in the browser." },
+    "opened": { "type": "boolean", "description": "A browser was launched on it. Always false with --json." }
+  }
+}

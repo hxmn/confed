@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/completion.schema.json",
+  "title": "confed completion result",
+  "description": "The `result` of `confed completion <shell> --json`: the completion script, which without --json is printed as it is.",
+  "type": "object",
+  "required": ["shell", "script"],
+  "properties": {
+    "shell": { "type": "string", "description": "The shell, as given: `bash`, `zsh`, `fish`, `powershell` or `elvish`." },
+    "script": { "type": "string", "description": "The script to source in that shell." }
+  }
+}

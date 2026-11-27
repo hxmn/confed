@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/rm.schema.json",
+  "title": "confed rm result",
+  "description": "The `result` of `confed rm --json`: the pages removed on disk, which `confed push --allow-delete` then deletes on the server. With --dry-run nothing is removed and `removed` lists what would be; with --push they are deleted on the server now; declining the --push prompt returns {\"removed\": [], \"cancelled\": true}.",
+  "type": "object",
+  "required": ["removed"],
+  "anyOf": [
+    {
+      "description": "Removed on disk only.",
+      "required": ["removed", "dry_run"],
+      "properties": { "dry_run": { "const": false } }
+    },
+    {
+      "description": "`--dry-run`: the plan, nothing removed.",
+      "required": ["removed", "dry_run", "would_delete_on_server"],
+      "properties": {
+        "dry_run": { "const": true },
+        "would_delete_on_server": { "type": "boolean", "description": "--push was given too." }
+      }
+    },
+    {
+      "description": "`--push`: removed on disk, then deleted on the server.",
+      "required": ["removed", "dry_run", "push"],
+      "properties": {
+        "dry_run": { "const": false },
+        "push": { "$ref": "#/$defs/push_outcome" }
+      }
+    },
+    {
+      "description": "`--push` declined at the prompt: nothing was removed.",
+      "required": ["removed", "cancelled"],
+      "properties": { "cancelled": { "const": true } }
+    }
+  ],
+  "properties": {
+    "removed": {
+      "type": "array",
+      "description": "Every page named, once each.",
+      "items": { "$ref": "#/$defs/page" }
+    },
+    "dry_run": { "type": "boolean" }
+  },
+  "$defs": {
+    "page": {
+      "type": "object",
+      "required": ["page_id", "path", "server_deleted"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "path": { "type": "string", "description": "Workspace-relative path of the page file." },
+        "server_deleted": {
+          "type": "boolean",
+          "description": "Deleted on the server by this run. Only --push sets it; otherwise false."
+        }
+      }
+    },
+    "push_outcome": {
+      "type": "object",
+      "description": "The push that deleted the pages, shaped as the `result` of `confed push --json` (see push.schema.json).",
+      "required": ["pushed", "created", "deleted", "attachments_uploaded", "attachments_deleted", "comments_added", "skipped", "failed", "dry_run"]
+    }
+  }
+}

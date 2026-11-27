@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/config.schema.json",
+  "title": "confed config result",
+  "description": "The `result` of `confed config --json`. Its shape follows the flag: `--list` (the default) every setting and where its value came from; `--get` one setting; `--set` and `--unset` the change made; `--set rules_page_id` the page copied into CLAUDE.md and AGENTS.md, or {\"cancelled\": true} when the picker is left; `--no-keychain` and `--force-keychain` where the credential is now stored.",
+  "type": "object",
+  "anyOf": [
+    { "$ref": "#/$defs/list" },
+    { "$ref": "#/$defs/get" },
+    { "$ref": "#/$defs/set" },
+    { "$ref": "#/$defs/unset" },
+    { "$ref": "#/$defs/cancelled" },
+    { "$ref": "#/$defs/credential_store" }
+  ],
+  "$defs": {
+    "source": {
+      "type": "string",
+      "description": "Where the value came from, in order of precedence: a flag, the environment, the stored config, a prompt, the built-in default.",
+      "enum": ["flag", "env", "stored", "prompt", "default"]
+    },
+    "list": {
+      "type": "object",
+      "required": ["entries"],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "description": "Every setting, the username and token included.",
+          "items": {
+            "type": "object",
+            "required": ["key", "value", "source", "flag", "env"],
+            "properties": {
+              "key": { "type": "string" },
+              "value": { "type": "string", "description": "Empty when unset." },
+              "source": {
+                "type": "string",
+                "description": "As `source` in `--get`, or `unset`.",
+                "enum": ["flag", "env", "stored", "prompt", "default", "unset"]
+              },
+              "flag": { "type": "string", "description": "The command-line flag that sets it." },
+              "env": { "type": "string", "description": "The environment variable that sets it." }
+            }
+          }
+        }
+      }
+    },
+    "get": {
+      "type": "object",
+      "required": ["key", "value", "source"],
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "type": ["string", "null"], "description": "Null when unset; `***` for a secret." },
+        "source": {
+          "anyOf": [{ "$ref": "#/$defs/source" }, { "type": "null" }],
+          "description": "Null when unset."
+        }
+      }
+    },
+    "set": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "type": "string", "description": "As stored. For rules_page_id, the page id." },
+        "title": { "type": "string", "description": "rules_page_id only, once the page has been pulled: its title." },
+        "path": { "type": "string", "description": "rules_page_id only, once pulled: the page's workspace-relative path." },
+        "version": { "type": "integer", "minimum": 0, "description": "rules_page_id only, once pulled: the version copied." },
+        "agent_docs": {
+          "type": "array",
+          "description": "rules_page_id only: the agent contract files rewritten (CLAUDE.md, AGENTS.md); empty when they already carried it.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "unset": {
+      "type": "object",
+      "required": ["unset"],
+      "properties": {
+        "unset": { "type": "string", "description": "The key unset." },
+        "agent_docs": {
+          "type": "array",
+          "description": "rules_page_id only: the agent contract files its rules were removed from.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "cancelled": {
+      "type": "object",
+      "required": ["cancelled"],
+      "properties": { "cancelled": { "const": true } }
+    },
+    "credential_store": {
+      "type": "object",
+      "required": ["credential_store", "changed"],
+      "properties": {
+        "credential_store": {
+          "type": "string",
+          "enum": ["keyring", "sqlite"],
+          "description": "Where the credential is now: the OS keychain, or `.session.db`."
+        },
+        "previous": {
+          "type": "string",
+          "enum": ["keyring", "sqlite"],
+          "description": "Where it was, when it moved."
+        },
+        "changed": {
+          "type": "boolean",
+          "description": "False when it was there already. --force-keychain with no keychain available leaves it in sqlite, with a warning."
+        }
+      }
+    }
+  }
+}

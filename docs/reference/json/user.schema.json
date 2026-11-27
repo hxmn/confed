@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/user.schema.json",
+  "title": "confed user result",
+  "description": "The `result` of `confed user search --json`: the people matching a query, each with the mention that names them in a page.",
+  "type": "object",
+  "required": ["query", "users"],
+  "properties": {
+    "query": { "type": "string", "description": "The query, as given." },
+    "users": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["display_name", "username", "userkey", "account_id", "mention"],
+        "properties": {
+          "display_name": { "type": "string" },
+          "username": { "type": ["string", "null"], "description": "Data Center only." },
+          "userkey": { "type": ["string", "null"], "description": "Data Center only." },
+          "account_id": { "type": ["string", "null"], "description": "Cloud only." },
+          "mention": {
+            "type": ["string", "null"],
+            "description": "The Markdown that mentions them: `[@Alice Ng](user:KEY)` on Data Center, `[@Alice Ng](user:account-id=ID)` on Cloud; null when the server gave neither id."
+          }
+        }
+      }
+    }
+  }
+}

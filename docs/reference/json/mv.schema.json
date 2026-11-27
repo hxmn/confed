@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/mv.schema.json",
+  "title": "confed mv result",
+  "description": "The `result` of `confed mv --json`: the page moved or renamed on disk and, with --push, on the server too. Without --push the next `confed push` carries the move.",
+  "type": "object",
+  "required": ["page_id", "from", "to", "title_changed", "parent_changed", "pushed", "reordered"],
+  "properties": {
+    "page_id": { "type": "string" },
+    "from": { "type": "string", "description": "Workspace-relative path before the move." },
+    "to": {
+      "type": "string",
+      "description": "Workspace-relative path after it. The same as `from` for a reorder with no destination."
+    },
+    "title_changed": { "type": "boolean", "description": "The page title follows the new file name (--rename-title)." },
+    "parent_changed": { "type": "boolean", "description": "The page now sits under another parent." },
+    "pushed": { "type": "boolean", "description": "--push sent the move to the server. False when there was nothing to send." },
+    "reordered": { "type": "boolean", "description": "--before, --after or --position changed the page's place among its siblings on the server." }
+  }
+}
