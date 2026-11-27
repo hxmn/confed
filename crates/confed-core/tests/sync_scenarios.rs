@@ -418,6 +418,33 @@ both_flavors!(labels_survive_a_listing_that_carries_none, |mut h: Harness| async
     assert_eq!(stored, ["guide", "team"]);
 });
 
+both_flavors!(
+    a_parent_renamed_on_the_server_takes_its_children_along,
+    |mut h: Harness| async move {
+        h.mock.seed_page(
+            "1001",
+            "Model A",
+            None,
+            "<p>See <ac:link><ri:page ri:content-title=\"Child\" /></ac:link>.</p>",
+        );
+        h.mock.seed_page("1002", "Child", Some("1001"), "<p>Child.</p>");
+        h.mock.seed_page("1003", "Grandchild", Some("1002"), "<p>Grandchild.</p>");
+        h.pull().await;
+        assert!(h.path("Model A/Child.md").exists());
+
+        h.mock.rename_page("1001", "X / A");
+        let pull = h.pull().await;
+        assert!(h.path("X - A.md").exists(), "{pull:?}");
+        assert!(h.path("X - A/Child.md").exists(), "{pull:?}");
+        assert!(h.path("X - A/Child/Grandchild.md").exists(), "{pull:?}");
+        assert!(!h.path("Model A").exists(), "the old folder is gone");
+        assert!(h.read("X - A.md").contains("(<X - A/Child.md>)"), "{}", h.read("X - A.md"));
+        for id in ["1001", "1002", "1003"] {
+            assert_eq!(h.status(id), PageState::Unchanged, "{id}");
+        }
+    }
+);
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

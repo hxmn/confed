@@ -480,6 +480,18 @@ impl SyncEngine {
                 _ => false,
             };
             let mut action = decide_pull(remote_page, status, base_record, opts, stale_rendering);
+            // A clean page whose file belongs elsewhere now — under a parent
+            // renamed or moved on the server — follows it, though nothing
+            // about the page itself changed.
+            if action == PullAction::Nothing
+                && remote_page.storage_body.is_some()
+                && status.is_some_and(|s| s.state == PageState::Unchanged)
+            {
+                let placed = view.placements.get(&remote_page.page_id).map(|p| p.path.as_str());
+                if base_record.is_some_and(|b| placed.is_some_and(|p| p != b.local_path)) {
+                    action = PullAction::Overwrite;
+                }
+            }
             if let Some(status) = status.filter(|s| {
                 s.state == PageState::Conflicted && s.remote_ahead && action == PullAction::Nothing
             }) {
@@ -692,6 +704,11 @@ impl SyncEngine {
             let left = ws.absolute(old);
             if !view.claimed.contains(&old) && left.exists() {
                 let _ = std::fs::remove_file(&left);
+            }
+            // The folder it leaves — its old parent's, after a rename there —
+            // goes with its last page.
+            if let Some(parent) = left.parent() {
+                prune_empty_dirs(ws.root(), parent);
             }
         }
 
