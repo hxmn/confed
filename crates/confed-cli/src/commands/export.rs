@@ -28,7 +28,11 @@ pub async fn run(ctx: &mut Context, args: &ExportArgs) -> Result<Output> {
 
         let (extension, content) = match args.format.as_str() {
             "storage" => ("xml", page.storage_body.clone()),
-            _ => ("html", standalone_html(&page.title, &page.storage_body)),
+            _ => {
+                let opts = confed_core::sync::page_convert_options(ws, &page.local_path)?;
+                let markdown = confed_converter::storage_to_markdown(&page.storage_body, &opts)?;
+                ("html", standalone_html(&page.title, &markdown.markdown))
+            }
         };
 
         let relative = page.local_path.strip_suffix(".md").unwrap_or(&page.local_path).to_string();
@@ -58,9 +62,12 @@ pub async fn run(ctx: &mut Context, args: &ExportArgs) -> Result<Output> {
     Ok(Output::new(json!({ "format": args.format, "exported": exported }), human))
 }
 
-/// Storage format is already XHTML, so a document wrapper is enough to make it
-/// viewable. Confluence's own CSS is not reproduced.
-fn standalone_html(title: &str, storage: &str) -> String {
+/// A readable page, rendered from the page's Markdown. Storage is not HTML —
+/// a code macro's CDATA is a bogus comment to an HTML parser, and the code
+/// after its first `>` would be live markup — so it is never written as is.
+/// Confluence's own CSS is not reproduced.
+fn standalone_html(title: &str, markdown: &str) -> String {
+    let body = confed_converter::markdown_to_html(markdown);
     format!(
         "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n\
          <title>{}</title>\n\
@@ -70,7 +77,7 @@ fn standalone_html(title: &str, storage: &str) -> String {
          </head><body>\n<h1>{}</h1>\n{}\n</body></html>\n",
         escape(title),
         escape(title),
-        storage
+        body.trim_end()
     )
 }
 
@@ -83,10 +90,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn html_export_wraps_the_storage_body() {
-        let html = standalone_html("Onboarding & Setup", "<p>hello</p>");
+    fn html_export_renders_the_page() {
+        let html = standalone_html("Onboarding & Setup", "hello\n");
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.contains("<p>hello</p>"));
         assert!(html.contains("Onboarding &amp; Setup"), "the title must be escaped");
+    }
+
+    #[test]
+    fn code_is_exported_as_text_never_as_markup() {
+        let storage = r#"<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[if a > b { run("<img src=x>") }]]></ac:plain-text-body></ac:structured-macro>"#;
+        let md = confed_converter::storage_to_markdown(storage, &Default::default()).unwrap();
+        let html = standalone_html("Code", &md.markdown);
+        assert!(html.contains("<pre>"), "{html}");
+        assert!(html.contains("run(&quot;&lt;img src=x&gt;&quot;)"), "{html}");
+        assert!(!html.contains("<img"), "{html}");
     }
 }

@@ -204,6 +204,13 @@ pub fn markdown_to_storage(markdown: &str, opts: &ConvertOptions) -> ConvertResu
     to_storage::generate(markdown, opts)
 }
 
+/// HTML for reading, rendered from confed's Markdown: code is text, and
+/// markup the Markdown does not model (a preserved `confluence` fence, raw
+/// HTML) is shown escaped or left out, never passed through as live markup.
+pub fn markdown_to_html(markdown: &str) -> String {
+    comrak::markdown_to_html(markdown, &mdblock::options())
+}
+
 /// Block-level patch: rebuild the storage body from edited Markdown, reusing the
 /// original storage bytes for every block whose Markdown is unchanged.
 ///

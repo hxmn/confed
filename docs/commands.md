@@ -954,7 +954,7 @@ Write pages out in another format, from local state — no server access needed.
 | Flag | Meaning |
 |---|---|
 | *(positional)* | Paths or globs to export. |
-| `--format <html\|storage>` | Output format. Default `html`. |
+| `--format <html\|storage>` | Output format. Default `html`: a readable page rendered from the page's Markdown, code as text; a block kept as a `confluence` fence shows its markup as code. `storage` is the markup exactly as the server keeps it. |
 | `--out <DIR>` | Output directory. Default `export`. |
 
 ```bash
