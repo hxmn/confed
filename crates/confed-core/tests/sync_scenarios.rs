@@ -705,6 +705,36 @@ both_flavors!(a_dry_run_names_what_an_edit_will_lose, |mut h: Harness| async mov
     assert!(dry.losses.is_empty(), "{:?}", dry.losses);
 });
 
+both_flavors!(one_refused_update_leaves_the_rest_of_the_push_done, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "A", None, "<p>A.</p>");
+    h.mock.seed_page("1002", "B", None, "<p>B.</p>");
+    h.pull().await;
+    h.write("A.md", &h.read("A.md").replace("A.", "A, edited."));
+    h.write("B.md", &h.read("B.md").replace("B.", "B, edited."));
+    h.mock.break_update("1001", true);
+
+    let push = h.push().await;
+    assert_eq!(push.pushed.len(), 1, "{push:?}");
+    assert_eq!(push.failed.len(), 1, "{push:?}");
+    assert_eq!(push.failed[0].page_id, "1001");
+    assert_eq!(h.status("1001"), PageState::Modified, "the refused edit is still owed");
+    assert_eq!(h.status("1002"), PageState::Unchanged);
+
+    h.mock.break_update("1001", false);
+    assert_eq!(h.push().await.pushed.len(), 1, "the next push sends it");
+});
+
+both_flavors!(a_title_taken_in_the_space_is_refused_by_the_server, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Taken", None, "<p>One.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Two.</p>");
+    h.pull().await;
+    h.write("Other.md", &h.read("Other.md").replace("title: Other", "title: taken"));
+    let push = h.push().await;
+    assert_eq!(push.failed.len(), 1, "{push:?}");
+    assert!(push.failed[0].error.contains("already exists"), "{:?}", push.failed);
+    assert_eq!(h.mock.page_title("1002").as_deref(), Some("Other"));
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;
@@ -868,8 +898,9 @@ both_flavors!(a_create_whose_answer_was_lost_is_not_made_twice, |mut h: Harness|
 });
 
 // The create never reached the server, and somebody else's page with the
-// same title sits where it would have gone. It is not taken for ours: the
-// next push creates the page, and the other one is left alone.
+// same title sits where it would have gone. It is not taken for ours, and it
+// is left alone: the server refuses a second page of that title, and the push
+// says so.
 both_flavors!(a_lost_create_does_not_adopt_somebody_elses_page, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Parent", None, "<p>Parent page.</p>");
     h.pull().await;
@@ -884,12 +915,12 @@ both_flavors!(a_lost_create_does_not_adopt_somebody_elses_page, |mut h: Harness|
     h.mock.remote_edit("1500", "<p>Their words, edited.</p>");
 
     let outcome = h.push().await;
-    assert_eq!(outcome.created.len(), 1, "{outcome:?}");
-    let ours = &outcome.created[0].page_id;
-    assert_ne!(ours, "1500", "their page was not taken over");
-    assert!(h.mock.page_body(ours).unwrap().contains("Our words"));
+    assert!(outcome.created.is_empty(), "their page was not taken over: {outcome:?}");
+    assert_eq!(outcome.failed.len(), 1, "{outcome:?}");
+    assert!(outcome.failed[0].error.contains("already exists"), "{:?}", outcome.failed);
     assert!(h.mock.page_body("1500").unwrap().contains("Their words, edited"));
-    assert!(h.read("Parent/Child.md").contains(ours.as_str()));
+    assert!(h.read("Parent/Child.md").contains("Our words"), "our file is as it was");
+    assert!(!h.read("Parent/Child.md").contains("1500"));
 });
 
 // The same, with the file edited before the push that finds the page: the

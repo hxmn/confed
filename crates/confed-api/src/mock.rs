@@ -44,6 +44,9 @@ struct MockState {
     comment_listings_down: Vec<String>,
     /// Pages whose body cannot be fetched.
     pages_down: Vec<String>,
+    /// Pages whose next update is refused with a server error, as when one
+    /// write of several fails part-way.
+    updates_down: Vec<String>,
     /// Pages the listing skips although they exist, as a page list that
     /// shifted under its paginator would.
     skipped_in_listing: Vec<String>,
@@ -467,6 +470,27 @@ impl MockClient {
         }
     }
 
+    /// Whether another live page of `space` has `title` (case-insensitive, as
+    /// Confluence compares titles).
+    fn title_taken(&self, space: &str, title: &str, except: Option<&str>) -> bool {
+        let state = self.state.lock().expect("mock poisoned");
+        state.pages.values().any(|p| {
+            !p.deleted
+                && p.summary.space_key == space
+                && Some(p.summary.id.as_str()) != except
+                && p.summary.title.eq_ignore_ascii_case(title)
+        })
+    }
+
+    /// Refuse updates to `page_id` with a 500 while `down`.
+    pub fn break_update(&self, page_id: &str, down: bool) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.updates_down.retain(|p| p != page_id);
+        if down {
+            state.updates_down.push(page_id.to_string());
+        }
+    }
+
     /// Leave `page_id` out of the page listing while `skipped`, though it
     /// still exists: what a paginated listing that shifted between two
     /// requests returns.
@@ -834,8 +858,16 @@ impl ConfluenceClient for MockClient {
             self.record(format!("create_page:{}", new.title));
             return Err(ApiError::network("POST rest/api/content: connection reset"));
         }
-        let id = self.fresh_id();
         self.record(format!("create_page:{}", new.title));
+        // As both servers do: a title is unique within its space.
+        if self.title_taken(&new.space.key, &new.title, None) {
+            return Err(ApiError::from_status(
+                400,
+                format!("A page with this title already exists: {}", new.title),
+                "POST rest/api/content",
+            ));
+        }
+        let id = self.fresh_id();
         let summary = PageSummary {
             id: PageId::new(&id),
             title: new.title.clone(),
@@ -876,7 +908,18 @@ impl ConfluenceClient for MockClient {
 
     async fn update_page(&self, id: &PageId, update: &PageUpdate) -> ApiResult<Page> {
         self.record(format!("update_page:{id}"));
+        let space = self.page_space(id.as_str()).unwrap_or_default();
+        if self.title_taken(&space, &update.title, Some(id.as_str())) {
+            return Err(ApiError::from_status(
+                400,
+                format!("A page with this title already exists: {}", update.title),
+                &format!("PUT rest/api/content/{id}"),
+            ));
+        }
         let mut state = self.state.lock().expect("mock poisoned");
+        if state.updates_down.contains(&id.0) {
+            return Err(ApiError::Server { status: 500, body: format!("PUT content/{id}") });
+        }
         let page = state
             .pages
             .get_mut(id.as_str())
