@@ -18,6 +18,10 @@ ignore = [
     { id = "RUSTSEC-2026-0370", reason = "zvariant 4, via keyring 3; drop with the keyring 4 migration" },
     { id = "RUSTSEC-2026-0371", reason = "zbus_names 3, via keyring 3; drop with the keyring 4 migration" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 4, via keyring 3; drop with the keyring 4 migration" },
+    # chrono is unmaintained, with jiff or time recommended instead. It is a
+    # direct dependency of confed-api (timestamps on the wire); the move is its
+    # own change.
+    { id = "RUSTSEC-2026-0543", reason = "chrono, used directly; drop with the move to jiff" },
 ]
 
 [licenses]
