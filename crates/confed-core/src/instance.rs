@@ -397,6 +397,12 @@ impl Instance {
         entry.map(finish_entry).transpose()
     }
 
+    /// Drop an entry from the journal. Nothing else is touched: the server
+    /// and the workspaces stay as the entry left them.
+    pub fn journal_discard(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM journal WHERE id = ?1", params![id])? > 0)
+    }
+
     /// Entries that have neither finished nor been aborted, oldest first.
     pub fn journal_unfinished(&self) -> Result<Vec<JournalEntry>> {
         Ok(self.journal_all()?.into_iter().filter(|e| !e.state.is_final()).collect())

@@ -1169,6 +1169,10 @@ pub enum InstanceCommand {
     /// Roll back a move between spaces that stopped before the server moved
     /// anything.
     Abort(InstanceJournalArgs),
+
+    /// List the moves between spaces the journal holds, or discard one that
+    /// neither resume nor abort can finish.
+    Journal(InstanceJournalListArgs),
 }
 
 impl InstanceCommand {
@@ -1192,6 +1196,7 @@ impl InstanceCommand {
             InstanceCommand::Search(_) => "search",
             InstanceCommand::Resume(_) => "resume",
             InstanceCommand::Abort(_) => "abort",
+            InstanceCommand::Journal(_) => "journal",
         }
     }
 }
@@ -1553,6 +1558,14 @@ pub struct InstanceSearchArgs {
 pub struct InstanceJournalArgs {
     /// The journal entry [default: the only unfinished one].
     pub id: Option<String>,
+}
+
+#[derive(Args, Debug, Default)]
+pub struct InstanceJournalListArgs {
+    /// Drop this entry from the journal. The server and the workspaces are
+    /// left as it left them; an unfinished one needs --yes.
+    #[arg(long, value_name = "ID")]
+    pub discard: Option<String>,
 }
 
 #[derive(Args, Debug, Default)]

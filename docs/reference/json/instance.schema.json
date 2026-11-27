@@ -8,7 +8,7 @@
   "properties": {
     "action": {
       "type": "string",
-      "enum": ["init", "adopt", "spaces", "clone", "create", "add", "remove", "status", "fetch", "pull", "push", "doctor", "mv", "locate", "tree", "search", "resume", "abort"]
+      "enum": ["init", "adopt", "spaces", "clone", "create", "add", "remove", "status", "fetch", "pull", "push", "doctor", "mv", "locate", "tree", "search", "resume", "abort", "journal"]
     },
     "spaces": {
       "type": "array",
@@ -18,6 +18,15 @@
     "instance": {
       "type": "object",
       "description": "`doctor`: the checks that span spaces (registration, pages tracked twice, unfinished moves, pages in another space on the server), as doctor.schema.json describes checks."
+    },
+    "entries": {
+      "type": "array",
+      "description": "`journal`: every entry of the journal, oldest first.",
+      "items": { "$ref": "#/$defs/journal_entry" }
+    },
+    "discarded": {
+      "$ref": "#/$defs/journal_entry",
+      "description": "`journal --discard`: the entry dropped."
     },
     "journal_id": {
       "type": ["string", "null"],
@@ -231,6 +240,22 @@
     }
   },
   "$defs": {
+    "journal_entry": {
+      "type": "object",
+      "required": ["id", "op", "state", "finished", "pages", "created_at", "updated_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "op": { "type": "string" },
+        "state": { "type": "string", "description": "The last step done: planned, server_moved, …, done or aborted." },
+        "finished": { "type": "boolean" },
+        "source": { "type": ["string", "null"] },
+        "dest": { "type": ["string", "null"] },
+        "pages": { "type": "array", "items": { "type": "string" } },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" },
+        "error": { "type": ["string", "null"] }
+      }
+    },
     "created_space": {
       "type": "object",
       "description": "A space as the server has it after the create.",

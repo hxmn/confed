@@ -1247,8 +1247,22 @@ async fn a_refused_move_changes_nothing_and_can_be_aborted() {
         );
     }
 
+    // The journal lists it; a newer confed's plan is refused; it can be
+    // discarded, with --yes as it is unfinished.
+    let out = run(root.path(), &["instance", "journal", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let entries = envelope(&out, "instance")["result"]["entries"].clone();
+    assert_eq!(entries.as_array().unwrap().len(), 1, "{entries}");
+    assert_eq!(entries[0]["finished"], json!(false));
+    assert_eq!(entries[0]["source"], json!("DOCS"));
+    let id = entries[0]["id"].as_str().unwrap().to_string();
+
     let out = run(root.path(), &["instance", "abort", "--json"]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let out = run(root.path(), &["instance", "journal", "--discard", &id, "--json"]);
+    assert_eq!(code(&out), 0, "a finished entry goes without --yes: {}", stderr(&out));
+    let out = run(root.path(), &["instance", "journal", "--json"]);
+    assert_eq!(envelope(&out, "instance")["result"]["entries"], json!([]));
     let out = run(root.path(), &["instance", "doctor", "--offline", "--json"]);
     let env = envelope(&out, "instance");
     let journal = env["result"]["instance"]["checks"]

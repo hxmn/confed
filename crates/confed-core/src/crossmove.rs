@@ -42,6 +42,11 @@ use std::sync::Arc;
 /// The journal's name for this operation.
 pub const OP: &str = "mv";
 
+/// The version of [`MovePlan`] this confed writes. A plan in the journal
+/// with a higher one was written by a newer confed, and is refused rather
+/// than read with the fields this one does not know silently dropped.
+pub const PLAN_VERSION: u32 = 1;
+
 // ------------------------------------------------------------------ plan ---
 
 /// A space taking part in a move.
@@ -208,6 +213,9 @@ pub struct Verified {
 /// journal stores, so a move can be resumed by a later process.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MovePlan {
+    /// See [`PLAN_VERSION`]; 0 in a journal written before plans had one.
+    #[serde(default)]
+    pub plan_version: u32,
     pub source: SpaceRef,
     pub dest: SpaceRef,
     /// The first of `roots`.
@@ -267,6 +275,22 @@ pub struct MovePlan {
     /// What the move left, read back at its end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified: Option<Verified>,
+}
+
+/// The plan a journal entry holds, refused when a newer confed wrote it.
+pub fn plan_of(entry: &crate::instance::JournalEntry) -> Result<MovePlan> {
+    let version = entry.plan["plan_version"].as_u64().unwrap_or(0);
+    if version > u64::from(PLAN_VERSION) {
+        return Err(ConfedError::state_with_hint(
+            format!(
+                "journal entry {} was written by a newer confed (plan version {version}; this \
+                 one reads up to {PLAN_VERSION})",
+                entry.id
+            ),
+            "finish it with the confed that started it, or upgrade this one",
+        ));
+    }
+    Ok(serde_json::from_value(entry.plan.clone())?)
 }
 
 impl MovePlan {
@@ -498,6 +522,7 @@ pub async fn draft(
     let warnings = std::mem::take(&mut checks.warnings);
     // Links the move breaks, in every registered workspace.
     let mut plan = MovePlan {
+        plan_version: PLAN_VERSION,
         source: req.source.clone(),
         dest: req.dest.clone(),
         root_id: first.clone(),
@@ -2612,6 +2637,22 @@ pub fn duplicates(spaces: &BTreeMap<String, Workspace>) -> Result<Vec<DuplicateP
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plan_from_a_newer_confed_is_refused() {
+        let entry = crate::instance::JournalEntry {
+            id: "mv-1".into(),
+            op: OP.into(),
+            state: crate::instance::Step::Planned,
+            plan: serde_json::json!({ "plan_version": PLAN_VERSION + 1 }),
+            created_at: String::new(),
+            updated_at: String::new(),
+            error: None,
+        };
+        let err = plan_of(&entry).unwrap_err();
+        assert_eq!(err.exit_code(), crate::error::ExitCode::State);
+        assert!(err.to_string().contains("newer confed"), "{err}");
+    }
 
     fn moves(entries: &[(&str, &str, &str, &str)]) -> HashMap<(String, String), (String, String)> {
         entries

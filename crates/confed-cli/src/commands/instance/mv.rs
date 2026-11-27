@@ -1038,7 +1038,7 @@ pub async fn resume(
             format!("{} is already {}.\n", entry.id, entry.state.as_str()),
         ));
     }
-    let mut plan: MovePlan = serde_json::from_value(entry.plan.clone())?;
+    let mut plan: MovePlan = crossmove::plan_of(&entry)?;
     let client = connection.client(ctx)?;
     let (mut spaces, unopened) = open_all(&instance)?;
     require_open(&spaces, &unopened, &plan.spaces_written())?;
@@ -1070,11 +1070,77 @@ pub async fn abort(
     let Some(entry) = pick(&instance, args.id.as_deref())? else {
         return Ok(Output::new(json!({ "aborted": null }), "Nothing to abort.\n"));
     };
-    let mut plan: MovePlan = serde_json::from_value(entry.plan.clone())?;
+    let mut plan: MovePlan = crossmove::plan_of(&entry)?;
     let client = connection.client(ctx)?;
     crossmove::abort(&instance, &entry.id, &client, &mut plan, entry.state).await?;
     Ok(Output::new(
         json!({ "aborted": entry.id, "journal_id": entry.id, "renamed_back": entry.plan["renamed"] }),
         format!("Aborted {}; nothing was moved.\n", entry.id),
     ))
+}
+
+/// `confed instance journal`: every entry, and with `--discard` one dropped.
+pub fn journal(ctx: &mut Context, args: &crate::cli::InstanceJournalListArgs) -> Result<Output> {
+    let instance = ctx.instance()?;
+    let entries = instance.journal_all()?;
+    let describe = |e: &JournalEntry| {
+        let pages: Vec<&str> = e.plan["pages"]
+            .as_array()
+            .map(|p| p.iter().filter_map(|p| p["page_id"].as_str()).collect())
+            .unwrap_or_default();
+        json!({
+            "id": e.id,
+            "op": e.op,
+            "state": e.state.as_str(),
+            "finished": e.state.is_final(),
+            "source": e.plan["source"]["key"],
+            "dest": e.plan["dest"]["key"],
+            "pages": pages,
+            "created_at": e.created_at,
+            "updated_at": e.updated_at,
+            "error": e.error,
+        })
+    };
+    let Some(id) = &args.discard else {
+        let mut human = String::new();
+        for e in &entries {
+            let _ = writeln!(
+                human,
+                "{}  {:<13} {} -> {}  {}",
+                e.id,
+                e.state.as_str(),
+                e.plan["source"]["key"].as_str().unwrap_or("?"),
+                e.plan["dest"]["key"].as_str().unwrap_or("?"),
+                e.updated_at
+            );
+        }
+        if entries.is_empty() {
+            human.push_str("The journal is empty.\n");
+        }
+        return Ok(Output::new(
+            json!({ "entries": entries.iter().map(describe).collect::<Vec<_>>() }),
+            human,
+        ));
+    };
+    let entry = entries
+        .iter()
+        .find(|e| &e.id == id)
+        .ok_or_else(|| ConfedError::NotFound(format!("no journal entry {id}")))?;
+    let what = format!(
+        "{id} is at `{}`; the server and the workspaces stay as it left them",
+        entry.state.as_str()
+    );
+    if !entry.state.is_final() && !ctx.global.yes {
+        if !ctx.is_interactive() {
+            return Err(ConfedError::usage_with_hint(
+                format!("discarding the unfinished move {what}"),
+                "try `confed instance resume` or `abort` first; pass --yes to discard it anyway",
+            ));
+        }
+        if !crate::prompt::confirm(&format!("Discard {what}?"), false)? {
+            return Ok(Output::new(json!({ "cancelled": true }), "Cancelled.\n"));
+        }
+    }
+    instance.journal_discard(id)?;
+    Ok(Output::new(json!({ "discarded": describe(entry) }), format!("Discarded {what}.\n")))
 }

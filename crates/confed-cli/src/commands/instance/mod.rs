@@ -126,7 +126,7 @@ pub fn prepare(ctx: &mut Context, command: &InstanceCommand) -> Result<Prepared>
         I::Status(args) if !args.fetch => Prepared::Offline,
         I::Locate(args) if !args.remote => Prepared::Offline,
         I::Tree(args) if !args.remote => Prepared::Offline,
-        I::Add(_) | I::Remove(_) => Prepared::Offline,
+        I::Add(_) | I::Remove(_) | I::Journal(_) => Prepared::Offline,
         I::Doctor(args) if args.offline => Prepared::Offline,
         _ => Prepared::Connection(connection(ctx, &ctx.instance()?)?),
     })
@@ -169,6 +169,7 @@ pub async fn run(
         I::Tree(args) => locate::tree(ctx, args, connection).await?,
         I::Resume(args) => mv::resume(ctx, args, need(connection)?).await?,
         I::Abort(args) => mv::abort(ctx, args, need(connection)?).await?,
+        I::Journal(args) => mv::journal(ctx, args)?,
     };
     tag(output, action)
 }

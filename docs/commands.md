@@ -1433,5 +1433,11 @@ the journal entry.
   server where each page actually is. It is safe to run again.
 - `confed instance abort [ID]` is allowed only before the server moved anything. It
   asks the server first, since the journal can lag a killed process, and undoes any
-  title changes. After that, the way back is a move in the other direction.
+  title changes. It is refused while the server has accepted a move and not finished
+  it. After that, the way back is a move in the other direction.
+- `confed instance journal` lists every entry — id, step, spaces, pages, when — and
+  `confed instance journal --discard ID` drops one that neither command can finish,
+  leaving the server and the workspaces as they are (an unfinished one needs `--yes`).
+  A plan written by a newer confed is refused (exit 7) rather than read in part.
+- `status`, `pull` and `push` in a workspace an unfinished move involves warn about it.
 
