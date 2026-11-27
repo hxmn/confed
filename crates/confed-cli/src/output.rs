@@ -181,6 +181,18 @@ pub fn emit(
 
 /// Print a failed command in the requested format.
 pub fn emit_error(command: &str, error: &ConfedError, json_mode: bool, duration_ms: u128) {
+    emit_error_selected(command, error, json_mode, None, duration_ms);
+}
+
+/// [`emit_error`], with `--select` applied to the error envelope as it is to
+/// a success: `--select errors.0.message` reads the message of either.
+pub fn emit_error_selected(
+    command: &str,
+    error: &ConfedError,
+    json_mode: bool,
+    select: Option<&str>,
+    duration_ms: u128,
+) {
     let entry = ErrorEntry::from_error(error);
 
     if json_mode {
@@ -197,7 +209,11 @@ pub fn emit_error(command: &str, error: &ConfedError, json_mode: bool, duration_
             "errors": [entry],
             "warnings": Vec::<String>::new(),
         });
-        print(&serde_json::to_string_pretty(&envelope).unwrap_or_default());
+        let shown = match select {
+            Some(path) => self::select(&envelope, path),
+            None => envelope,
+        };
+        print(&serde_json::to_string_pretty(&shown).unwrap_or_default());
         return;
     }
 

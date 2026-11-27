@@ -78,7 +78,13 @@ pub fn main(views: Views) -> std::process::ExitCode {
             out.exit
         }
         Err(e) => {
-            output::emit_error(command_name, &e, json, started.elapsed().as_millis());
+            output::emit_error_selected(
+                command_name,
+                &e,
+                json,
+                select.as_deref(),
+                started.elapsed().as_millis(),
+            );
             e.exit_code()
         }
     };
