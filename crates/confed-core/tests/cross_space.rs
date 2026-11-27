@@ -355,6 +355,15 @@ async fn a_dirty_page_a_taken_title_and_the_home_page_are_all_refused_together()
 }
 
 #[tokio::test]
+async fn a_home_page_below_a_moved_root_is_refused() {
+    let h = Harness::new().await;
+    h.mock.set_homepage("DOCS", "1003");
+    let err = h.plan(&h.request("1002", "2002")).await.unwrap_err();
+    assert!(err.to_string().contains("home page of space DOCS"), "{err}");
+    assert!(err.to_string().contains("Week One"), "{err}");
+}
+
+#[tokio::test]
 async fn a_taken_title_can_take_the_source_key_instead() {
     let mut h = Harness::new().await;
     h.mock.seed_page_in("ENG", "2003", "Onboarding", Some("2001"), "<p>Ours.</p>");

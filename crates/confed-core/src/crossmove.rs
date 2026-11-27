@@ -475,10 +475,10 @@ pub async fn draft(
         Checks { client, spaces, req, src, dst, blocking: Vec::new(), warnings: Vec::new() };
 
     let roots = checks.roots()?;
-    checks.check_home_pages(&roots).await?;
     let remote = src.state().all_remote()?;
     let subtree = checks.subtree(&roots, &remote)?;
     let ids: HashSet<String> = subtree.iter().map(|(id, _)| id.clone()).collect();
+    checks.check_home_pages(&ids).await?;
     let (mut pages, scan) = checks.check_in_sync(&subtree, &remote)?;
     checks.check_unpushed(&pages, &scan, &ids)?;
     checks.check_destination_parent()?;
@@ -564,23 +564,29 @@ impl Checks<'_> {
     }
 
     /// Home pages stay where they are: a space without one is broken.
-    async fn check_home_pages(&mut self, roots: &[PageRecord]) -> Result<()> {
+    /// The space's home page cannot move, whether it is a root of the move
+    /// or anywhere below one: `ids` is the whole subtree.
+    async fn check_home_pages(&mut self, ids: &HashSet<String>) -> Result<()> {
         let client = self.client;
         let req = self.req;
         let src_key = self.req.source.key.as_str();
-        let blocking = &mut self.blocking;
         let source_space = client.get_space(&req.source.key).await?;
-        for root in roots {
-            if source_space.homepage_id.as_ref().is_some_and(|h| h.0 == root.page_id) {
-                blocking.push(
-                    Blocker::new(
-                        "home_page",
-                        format!("{} is the home page of space {}", root.local_path, req.source.key),
-                    )
-                    .page(&root.page_id, src_key, &root.local_path),
-                );
-            }
-        }
+        let Some(home) = source_space.homepage_id.filter(|h| ids.contains(&h.0)) else {
+            return Ok(());
+        };
+        let path = self
+            .src
+            .state()
+            .get_page(&home.0)?
+            .map(|p| p.local_path)
+            .unwrap_or_else(|| home.0.clone());
+        self.blocking.push(
+            Blocker::new(
+                "home_page",
+                format!("{path} is the home page of space {}", req.source.key),
+            )
+            .page(&home.0, src_key, &path),
+        );
         Ok(())
     }
 
