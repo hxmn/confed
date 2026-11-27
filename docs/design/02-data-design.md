@@ -1,6 +1,6 @@
 # 02 — Data Design
 
-Status: draft for review · Schema version: 1
+Status: design of record — where the implementation differs, the user documentation in `docs/` and the code are what is current · Schema version: 1
 
 ## 1. On-disk layout of a confed directory
 

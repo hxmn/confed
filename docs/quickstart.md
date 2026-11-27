@@ -5,6 +5,14 @@ Confluence: [Cloud](#track-a--confluence-cloud) or
 [Data Center / Server](#track-b--confluence-data-center-or-server). Everything after the
 tracks is identical.
 
+## Install a release
+
+Take the archive for your system from the
+[releases](https://github.com/hxmn/confed/releases) page, check it against its
+`.sha256` (`sha256sum -c` or `shasum -a 256 -c`), unpack it and put `confed` on your
+`PATH`. On Linux, a `*-linux-musl` archive is static and runs on any distribution; a
+`*-linux-gnu` one needs glibc 2.34 or newer.
+
 ## Install from source
 
 confed needs a Rust toolchain of 1.89 or newer. It has no system dependencies: TLS is

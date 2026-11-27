@@ -127,7 +127,7 @@ confed was designed to be driven by coding agents as much as by people.
 ```console
 $ confed status --json
 {
-  "confed": { "schema": 1, "version": "0.8.1", "command": "status", "ok": true, "exit_code": 0 },
+  "confed": { "schema": 1, "version": "…", "command": "status", "ok": true, "exit_code": 0 },
   "result": {
     "clean": false,
     "pages": [
@@ -255,18 +255,20 @@ Eight crates, dependencies flowing one way:
 | `confed-api` | the client contract both clients implement, and a mock server for tests |
 | `confed-dc` | the Confluence Data Center client |
 | `confed-cloud` | the Confluence Cloud client |
- Around 680 tests cover them, including sync scenarios that run
-end to end against a stateful mock server in both Cloud and Data Center modes.
+Over a thousand tests cover them, including sync scenarios that run end to end against
+a stateful mock server in both Cloud and Data Center modes.
 
 Contributing? Read [AGENTS.md](https://github.com/hxmn/confed/blob/main/AGENTS.md) first: this repository never takes real
 names, hosts or content from the Confluence instances confed is tested against.
 
 ## 📍 Status
 
-**0.8.1**, and complete enough for daily use: both API clients, the converter, the
-sync engine, comments, the full command set and the TUI are implemented and tested.
-[CHANGELOG.md](https://github.com/hxmn/confed/blob/main/CHANGELOG.md) records every release. Not there yet: prebuilt binaries
-and a crates.io release — install from source for now.
+Complete enough for daily use: both API clients, the converter, the sync engine,
+comments, moves between spaces, administration, the full command set and the TUI are
+implemented and tested. `confed version` names the release you run, and
+[CHANGELOG.md](https://github.com/hxmn/confed/blob/main/CHANGELOG.md) records every one.
+Each release is published with prebuilt archives for Linux, macOS and Windows; a
+crates.io release is not there yet.
 
 ## License
 

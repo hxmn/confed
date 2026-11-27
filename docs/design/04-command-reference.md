@@ -1,6 +1,6 @@
 # 04 — Command Reference (draft)
 
-Status: draft for review · JSON output schema version: 1
+Status: design of record — where the implementation differs, the user documentation in `docs/` and the code are what is current · JSON output schema version: 1
 
 ## Global behavior
 

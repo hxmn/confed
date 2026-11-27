@@ -1,6 +1,6 @@
 # 03 — Conversion & Conflict Strategy
 
-Status: draft for review
+Status: design of record — where the implementation differs, the user documentation in `docs/` and the code are what is current
 
 ## 1. Principles
 

@@ -41,18 +41,23 @@ after 05. Comment *snapshot fetching* lands in 04; all comment UX is 07. 10 foll
 
 ## Status as of the first implementation pass
 
-Phases 01–05 are complete and committed: the four-crate workspace, both API
-clients, the converter with block-level patching, the sync engine, and the
-command set. 375 tests pass, clippy is clean, and `confed` runs end to end
-against the stateful mock server for both Confluence flavors.
+This section records where the first pass stood, and is kept as history: the
+workspace has grown since (eight crates, over a thousand tests), and
+`CHANGELOG.md` says what each release added.
+
+Phases 01–05 were complete and committed: the workspace, both API clients, the
+converter with block-level patching, the sync engine, and the command set; clippy
+was clean, and `confed` ran end to end against the stateful mock server for both
+Confluence flavors.
 
 Phase 07 (comments) shipped its data path — the `comments.md` sidecar format,
 its parser, comment snapshots in `.state.db`, draft posting on push, and the
 `confed comment` subcommands. What is left there is inline-comment re-anchoring
 after edits, which is the hard half.
 
-Phase 09 has CI (`.github/workflows/ci.yml`, matrix across Linux/macOS/Windows
-plus MSRV and an advisory audit) but not packaging or a release.
+Phase 09 had CI (`.github/workflows/ci.yml`, matrix across Linux/macOS/Windows
+plus MSRV and an advisory audit) but not yet packaging or a release; both came later
+(`.github/workflows/release.yml`).
 
 Not started: nothing else — but see each phase file's "Notes on what shipped"
 section for the specific items inside a phase that were deferred, and

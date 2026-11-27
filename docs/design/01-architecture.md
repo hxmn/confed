@@ -1,6 +1,6 @@
 # 01 — Architecture Overview
 
-Status: draft for review · Schema/design version: 1 · Date: 2026-08-16
+Status: design of record — where the implementation differs, the user documentation in `docs/` and the code are what is current · Schema/design version: 1 · Date: 2026-08-16
 
 `confed` is an offline-first Confluence editor: it mirrors a Confluence space into a
 directory of Markdown files and moves changes between disk and server with a git-like
