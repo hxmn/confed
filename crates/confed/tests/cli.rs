@@ -1225,6 +1225,20 @@ async fn local_commands_results_match_their_schemas() {
 }
 
 #[tokio::test]
+async fn open_prints_a_url_with_no_credential_at_all() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    std::fs::remove_file(dir.path().join(".session.db")).unwrap();
+
+    let output = run(confed(dir.path(), &["open", CHILD_FILE, "--json"]));
+    assert_eq!(exit_code(&output), 0, "{}", stdout(&output));
+    let value = envelope(&output, "open");
+    assert!(value["result"]["url"].as_str().unwrap().contains(CHILD_PAGE), "{value}");
+}
+
+#[tokio::test]
 async fn version_reports_the_compatibility_contract_and_the_release_notes() {
     // Deliberately not a workspace: an agent must be able to ask what confed is
     // before it has one.
