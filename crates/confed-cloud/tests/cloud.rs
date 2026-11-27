@@ -43,6 +43,31 @@ async fn mount_space_lookup(server: &MockServer) {
         .await;
 }
 
+/// Built as the CLI builds it, a Cloud client keeps its requests about 200 ms
+/// apart, so a long pull stays under the rate limit.
+#[tokio::test]
+async fn a_cloud_client_spaces_its_requests_by_default() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wiki/rest/api/user/current"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accountId": "acc-1", "displayName": "Test User"
+        })))
+        .mount(&server)
+        .await;
+    let client = CloudClient::new(&format!("{}/wiki", server.uri()), Auth::None, 4).unwrap();
+    let started = std::time::Instant::now();
+    let (a, b, c) = tokio::join!(client.whoami(), client.whoami(), client.whoami());
+    for result in [a, b, c] {
+        result.unwrap();
+    }
+    assert!(
+        started.elapsed() >= 2 * confed_cloud::DEFAULT_REQUEST_INTERVAL,
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 #[tokio::test]
 async fn whoami_reads_the_v1_current_user_endpoint() {
     let server = MockServer::start().await;

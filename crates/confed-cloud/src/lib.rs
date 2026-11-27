@@ -46,6 +46,9 @@ pub struct CloudClient {
     spaces: Mutex<SpaceCache>,
 }
 
+/// The spacing of requests to Cloud unless `--rate` says otherwise.
+pub const DEFAULT_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl CloudClient {
     /// `base_url` is the site root, e.g. `https://acme.atlassian.net/wiki`.
     pub fn new(base_url: &str, auth: Auth, concurrency: usize) -> ApiResult<Self> {
@@ -54,7 +57,10 @@ impl CloudClient {
             caps.max_request_concurrency = concurrency;
         }
         Ok(Self {
-            http: Http::new(base_url, auth, caps.max_request_concurrency)?,
+            // Cloud counts requests against a rate limit: kept to about five a
+            // second, a long pull avoids 429s instead of only surviving them.
+            http: Http::new(base_url, auth, caps.max_request_concurrency)?
+                .with_pacing(DEFAULT_REQUEST_INTERVAL),
             base_url: base_url.trim_end_matches('/').to_string(),
             capabilities: caps,
             spaces: Mutex::new(SpaceCache::default()),

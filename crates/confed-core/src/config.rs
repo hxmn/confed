@@ -102,6 +102,14 @@ pub const CONCURRENCY: ValueSpec = ValueSpec {
     key: "concurrency",
     secret: false,
 };
+/// Requests a second, at most; `0` for no limit. Cloud defaults to about five.
+pub const RATE: ValueSpec = ValueSpec {
+    name: "requests a second (0: no limit)",
+    flag: "--rate",
+    env: "CONFED_RATE",
+    key: "rate",
+    secret: false,
+};
 pub const EDITOR: ValueSpec = ValueSpec {
     name: "editor",
     flag: "--editor",
@@ -133,7 +141,7 @@ pub const RULES_PAGE: ValueSpec = ValueSpec {
 
 /// Every value `confed config --set` accepts.
 pub const SETTABLE: &[ValueSpec] =
-    &[SPACE, CONCURRENCY, EDITOR, BASE_URL, FLAVOR, COMMENT_MARKS, RULES_PAGE];
+    &[SPACE, CONCURRENCY, RATE, EDITOR, BASE_URL, FLAVOR, COMMENT_MARKS, RULES_PAGE];
 
 /// Asks the user for a value. The CLI supplies a TTY implementation; tests and
 /// non-interactive runs supply [`NoPrompt`].

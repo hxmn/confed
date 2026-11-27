@@ -61,6 +61,11 @@ pub struct GlobalArgs {
     #[arg(long, global = true, env = "CONFED_CONCURRENCY")]
     pub concurrency: Option<usize>,
 
+    /// Requests a second, at most, across all in flight; 0 for no limit.
+    /// Default: about five on Cloud, no limit on Data Center.
+    #[arg(long, global = true, env = "CONFED_RATE")]
+    pub rate: Option<f64>,
+
     /// Run as if confed was started in this directory.
     #[arg(short = 'C', global = true, value_name = "DIR")]
     pub directory: Option<PathBuf>,

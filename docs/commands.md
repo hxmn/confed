@@ -41,6 +41,7 @@ These work before or after the subcommand: `confed --json status` and
 | `--space <KEY>` | `CONFED_SPACE` | Space key bound to this directory. |
 | `--flavor <cloud\|dc\|datacenter>` | `CONFED_FLAVOR` | Skip flavor auto-detection. |
 | `--concurrency <N>` | `CONFED_CONCURRENCY` | Maximum concurrent API requests. 0 or unset uses the client's default. |
+| `--rate <N>` | `CONFED_RATE` | Requests a second, at most, across everything in flight; 0 for no limit. Default: about five on Cloud, no limit on Data Center. Also the `rate` setting. A 429's `Retry-After` holds back every request, not only the one refused. |
 | `-C <DIR>` | — | Run as if confed had been started in `<DIR>`. |
 | `-y`, `--yes` | — | Answer yes to confirmations. *Accepted, but nothing prompts for confirmation today; see [known gaps](#known-gaps).* |
 | `-v`, `-vv`, `-vvv` | — | More detail on stderr. |

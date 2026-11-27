@@ -22,6 +22,7 @@ fn meta_key(key: &str) -> Option<&'static str> {
         "base_url" => Some("base_url"),
         "flavor" => Some("flavor"),
         "concurrency" => Some("concurrency"),
+        "rate" => Some("rate"),
         "editor" => Some("editor"),
         "comments.marks" => Some(confed_core::sync::MARKS_MODE_KEY),
         "rules_page_id" => Some(config::RULES_PAGE.key),
@@ -302,6 +303,14 @@ fn validate(ctx: &Context, meta: &str, value: &str, force: bool) -> Result<()> {
                 return Err(ConfedError::usage_with_hint(
                     format!("`{value}` is not a concurrency"),
                     "use a positive whole number of requests at once, such as 4",
+                ));
+            }
+        }
+        "rate" => {
+            if !value.parse::<f64>().is_ok_and(|r| r >= 0.0 && r.is_finite()) {
+                return Err(ConfedError::usage_with_hint(
+                    format!("`{value}` is not a request rate"),
+                    "use requests a second, such as 5 or 0.5, or 0 for no limit",
                 ));
             }
         }

@@ -125,24 +125,34 @@ struct Pacer {
     min_interval: Duration,
     floor: Duration,
     last: Option<Instant>,
+    /// No request goes out before this: a 429's `Retry-After` holds back
+    /// every request of the client, not only the one that received it.
+    hold_until: Option<Instant>,
 }
 
 impl Pacer {
     fn new(min_interval: Duration) -> Self {
-        Self { min_interval, floor: min_interval, last: None }
+        Self { min_interval, floor: min_interval, last: None, hold_until: None }
     }
 
     fn take(&mut self) -> Option<Duration> {
         let now = Instant::now();
-        let wait = match self.last {
-            Some(prev) => {
-                let elapsed = now.duration_since(prev);
-                (self.min_interval > elapsed).then(|| self.min_interval - elapsed)
-            }
-            None => None,
+        let mut at = match self.last {
+            Some(prev) => prev + self.min_interval,
+            None => now,
         };
-        self.last = Some(now + wait.unwrap_or_default());
-        wait
+        if let Some(hold) = self.hold_until {
+            at = at.max(hold);
+        }
+        let at = at.max(now);
+        self.last = Some(at);
+        (at > now).then(|| at - now)
+    }
+
+    /// The server asked for a pause: nobody sends before it is over.
+    fn hold(&mut self, pause: Duration) {
+        let until = Instant::now() + pause;
+        self.hold_until = Some(self.hold_until.map_or(until, |h| h.max(until)));
     }
 
     /// Widen the gap after a 429. Doubling alone would leave the usual
@@ -467,7 +477,11 @@ impl Http {
                     let code = status.as_u16();
                     let retry_after = parse_retry_after(&resp);
                     if code == 429 {
-                        self.pacer.lock().expect("pacer poisoned").on_rate_limit();
+                        let mut pacer = self.pacer.lock().expect("pacer poisoned");
+                        pacer.on_rate_limit();
+                        if let Some(pause) = retry_after {
+                            pacer.hold(pause);
+                        }
                     }
                     // A 429 is a refusal: nothing was done, so anything may be
                     // sent again. A gateway's 502–504 says nothing of the sort —
@@ -485,7 +499,13 @@ impl Http {
                         }
                         return Err(ApiError::from_status(code, body, context));
                     }
-                    let delay = retry_after.unwrap_or_else(|| self.policy.delay_for(attempt));
+                    // A 429's pause is already in the pacer, which the next
+                    // attempt waits for along with every other request.
+                    let delay = match (code, retry_after) {
+                        (429, Some(_)) => Duration::ZERO,
+                        (_, Some(pause)) => pause,
+                        _ => self.policy.delay_for(attempt),
+                    };
                     warn!(
                         target: "confed::http",
                         context, status = code, attempt = attempt + 1,
@@ -1078,6 +1098,63 @@ mod tests {
         pacer.on_success();
         assert!(pacer.min_interval < Duration::from_millis(200));
         assert!(pacer.min_interval >= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn a_paced_client_spaces_its_requests() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let http = Http::new(&server.uri(), Auth::None, 4)
+            .unwrap()
+            .with_pacing(Duration::from_millis(100));
+        let started = Instant::now();
+        let calls = (0..4).map(|_| http.get_json::<serde_json::Value>("x", &[]));
+        futures::future::join_all(calls).await;
+        assert!(started.elapsed() >= Duration::from_millis(300), "{:?}", started.elapsed());
+    }
+
+    /// A 429's Retry-After holds back the requests in flight beside it.
+    #[tokio::test]
+    async fn retry_after_delays_every_request_not_only_the_refused_one() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/limited"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "1"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let http = Http::new(&server.uri(), Auth::None, 4).unwrap();
+        let started = Instant::now();
+        let limited = http.get_json::<serde_json::Value>("limited", &[]);
+        let other = async {
+            // Sent once the 429 has come back, while its pause is still on.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            http.get_json::<serde_json::Value>("other", &[]).await.unwrap();
+            started.elapsed()
+        };
+        let (first, other_done) = tokio::join!(limited, other);
+        first.unwrap();
+        assert!(other_done >= Duration::from_millis(900), "{other_done:?}");
+    }
+
+    #[test]
+    fn a_hold_delays_the_next_request_whatever_the_interval() {
+        let mut pacer = Pacer::new(Duration::ZERO);
+        pacer.hold(Duration::from_millis(500));
+        let wait = pacer.take().expect("held back");
+        assert!(wait > Duration::from_millis(400), "{wait:?}");
     }
 
     /// Clients start unpaced. A 429 must still slow them down — doubling a gap

@@ -209,6 +209,19 @@ impl Context {
             .unwrap_or(0)
     }
 
+    /// The spacing `--rate` (or `CONFED_RATE`, or the `rate` setting) asks
+    /// for: `Some(ZERO)` for no limit, `None` to keep the flavor's default.
+    pub fn request_interval(&self) -> Option<std::time::Duration> {
+        let rate = self.global.rate.or_else(|| {
+            self.resolver.lookup(&config::RATE, None).and_then(|r| r.value.parse().ok())
+        })?;
+        Some(if rate > 0.0 {
+            std::time::Duration::from_secs_f64(1.0 / rate)
+        } else {
+            std::time::Duration::ZERO
+        })
+    }
+
     /// The stored session: the workspace's own, or else — for a member of an
     /// instance root — the one the root keeps for all its spaces.
     pub fn session(&self) -> Result<Option<Session>> {
@@ -331,9 +344,21 @@ impl Context {
         auth: Auth,
     ) -> Result<Arc<dyn ConfluenceClient>> {
         let concurrency = self.concurrency();
+        let paced = |http: confed_api::http::Http| match self.request_interval() {
+            Some(interval) => http.with_pacing(interval),
+            None => http,
+        };
         Ok(match flavor {
-            Flavor::Cloud => Arc::new(CloudClient::new(base_url, auth, concurrency)?),
-            Flavor::DataCenter => Arc::new(DcClient::new(base_url, auth, concurrency)?),
+            Flavor::Cloud => {
+                let client = CloudClient::new(base_url, auth, concurrency)?;
+                let http = paced(client.http().clone());
+                Arc::new(client.with_http(http))
+            }
+            Flavor::DataCenter => {
+                let client = DcClient::new(base_url, auth, concurrency)?;
+                let http = paced(client.http().clone());
+                Arc::new(client.with_http(http))
+            }
         })
     }
 
@@ -350,12 +375,18 @@ impl Context {
         Ok(match flavor {
             Flavor::Cloud => {
                 let client = CloudClient::new(base_url, auth, concurrency)?;
-                let http = client.http().clone().with_limit(limit);
+                let mut http = client.http().clone().with_limit(limit);
+                if let Some(interval) = self.request_interval() {
+                    http = http.with_pacing(interval);
+                }
                 Arc::new(client.with_http(http))
             }
             Flavor::DataCenter => {
                 let client = DcClient::new(base_url, auth, concurrency)?;
-                let http = client.http().clone().with_limit(limit);
+                let mut http = client.http().clone().with_limit(limit);
+                if let Some(interval) = self.request_interval() {
+                    http = http.with_pacing(interval);
+                }
                 Arc::new(client.with_http(http))
             }
         })

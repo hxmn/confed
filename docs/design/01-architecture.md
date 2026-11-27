@@ -140,8 +140,10 @@ converter, one merge base representation, and DC parity. ADF is revisited in
   **only** on connect-before-send errors.
 - Bounded worker pool: a `tokio::sync::Semaphore` with `--concurrency N`
   (`CONFED_CONCURRENCY`, default per capabilities) gates all in-flight requests.
-- A process-wide token-bucket soft limiter keeps Cloud under ~5 req/s to avoid tripping
-  429s in the first place; 429 responses shrink the bucket adaptively.
+- A per-client pacer keeps Cloud under ~5 req/s (one request every 200 ms) to avoid
+  tripping 429s in the first place; `--rate` / `CONFED_RATE` / the `rate` setting change it,
+  and Data Center is unpaced unless asked. A 429 widens the gap adaptively, and its
+  `Retry-After` holds back every request of the client, not only the one refused.
 - `tracing` instruments every request (method, path, status, ms) at `debug`; secrets are
   wrapped in a `Secret<String>` newtype whose `Debug`/`Display` print `***`.
 
