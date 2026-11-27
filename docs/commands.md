@@ -519,7 +519,7 @@ Delete a page locally and record the deletion. The server is not touched until
 | Flag | Meaning |
 |---|---|
 | `--keep-local` | Record the deletion but keep the file on disk. |
-| `--push` | Delete on the server immediately — only the pages named; nothing else is pushed. |
+| `--push` | Delete on the server immediately — only the pages named; nothing else is pushed. Asks first, before anything is removed; unattended (`--json`, no terminal) it needs `--yes`, or exits 2 and changes nothing. |
 | `--dry-run` | Say what would be removed (and, with `--push`, deleted on the server) and change nothing. |
 
 `--json` reports each page under `removed` with `server_deleted`, true when the push
@@ -529,7 +529,7 @@ deleted it.
 confed rm "Drafts/Obsolete.md" --push --dry-run
 confed rm "Drafts/Obsolete.md"
 confed push --allow-delete
-confed rm 163842 --push --json
+confed rm 163842 --push --yes --json
 ```
 
 After a page is gone from the workspace its id still works where the server or the

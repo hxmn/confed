@@ -77,23 +77,26 @@ pub async fn run_and_push(ctx: &mut Context, args: &RmArgs) -> Result<Output> {
     if args.dry_run {
         return run(ctx, args);
     }
-    let (mut removed, mut human) = remove_locally(ctx, args)?;
-    let mut output_json = json!({ "removed": removed, "dry_run": false });
-
-    // Deleting on the server is not undoable from confed's side, so ask
-    // unless the user has already said yes.
-    if !ctx.global.yes && ctx.is_interactive() {
-        let question = format!(
-            "Delete {} on the server?",
-            crate::output::plural(removed.len(), "page", "pages")
-        );
-        if !crate::prompt::confirm(&question, false)? {
+    // Deleting on the server is not undoable from confed's side: asked
+    // before anything is removed, here or there. Unattended, only `--yes`
+    // says yes — as for every destructive command.
+    if !ctx.global.yes {
+        let pages = crate::output::plural(args.paths.len(), "page", "pages");
+        if !ctx.is_interactive() {
+            return Err(ConfedError::usage_with_hint(
+                format!("`rm --push` deletes {pages} on the server, and nothing confirmed it"),
+                "add --yes to delete without asking, or drop --push to remove the files only",
+            ));
+        }
+        if !crate::prompt::confirm(&format!("Delete {pages} on the server?"), false)? {
             return Ok(Output::new(
-                json!({ "removed": removed, "cancelled": true }),
-                format!("{human}Cancelled: nothing was deleted on the server.\n"),
+                json!({ "removed": [], "cancelled": true }),
+                "Cancelled: nothing was removed.\n".to_string(),
             ));
         }
     }
+    let (mut removed, mut human) = remove_locally(ctx, args)?;
+    let mut output_json = json!({ "removed": removed, "dry_run": false });
     let client = ctx.build_client()?;
     let engine = ctx.engine(client)?;
     let ws = ctx.workspace_mut()?;

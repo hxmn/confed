@@ -1672,6 +1672,13 @@ async fn rm_previews_and_deletes_only_what_it_names() {
     assert!(dir.path().join(CHILD_FILE).exists(), "a dry run removes nothing");
     assert!(mutations(&server).await.is_empty());
 
+    // Unattended, only --yes confirms: without it nothing is removed, here
+    // or there.
+    let output = run(confed_authed(dir.path(), &["rm", CHILD_FILE, "--push", "--json"]));
+    assert_eq!(exit_code(&output), 2, "{}", stdout(&output));
+    assert!(dir.path().join(CHILD_FILE).exists(), "the file is untouched");
+    assert!(mutations(&server).await.is_empty(), "the server is untouched");
+
     let output = run(confed_authed(dir.path(), &["rm", CHILD_FILE, "--push", "--yes", "--json"]));
     assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
     let value = envelope(&output, "rm");
