@@ -333,6 +333,17 @@ async fn init_creates_the_workspace_and_reports_it_in_the_envelope() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn init_over_plain_http_warns_unless_the_server_is_this_machine() {
+    // The test server is on 127.0.0.1: loopback, so no warning.
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let output = init(dir.path(), &server);
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    let value = envelope(&output, "init");
+    assert!(!value["warnings"].to_string().contains("plain http"), "{value}");
+}
+
+#[tokio::test]
 async fn the_session_database_is_private_to_its_owner() {
     use std::os::unix::fs::PermissionsExt;
 

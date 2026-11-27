@@ -748,6 +748,26 @@ fn edit_distance(a: &str, b: &str) -> usize {
     d[a.len()][b.len()]
 }
 
+/// A warning for a base URL that sends the token in clear: plain `http://`
+/// to anything but this machine.
+pub(crate) fn plain_http_warning(base_url: &str) -> Option<String> {
+    let url = url::Url::parse(base_url.trim()).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let loopback = match url.host()? {
+        url::Host::Domain(name) => name.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    };
+    (!loopback).then(|| {
+        format!(
+            "{base_url} is plain http: every request carries the token unencrypted; use the \
+             https address if the server has one"
+        )
+    })
+}
+
 /// Do two base URLs name the same server — scheme, host and port? A URL that
 /// does not parse is compared as text.
 pub(crate) fn same_origin(a: &str, b: &str) -> bool {
@@ -760,6 +780,14 @@ pub(crate) fn same_origin(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod path_tests {
     use super::*;
+
+    #[test]
+    fn plain_http_is_warned_about_except_on_this_machine() {
+        assert!(plain_http_warning("http://wiki.example.test").is_some());
+        assert!(plain_http_warning("http://127.0.0.1:8090").is_none());
+        assert!(plain_http_warning("http://localhost:8090/confluence").is_none());
+        assert!(plain_http_warning("https://wiki.example.test").is_none());
+    }
 
     #[test]
     fn origins_compare_scheme_host_and_port() {

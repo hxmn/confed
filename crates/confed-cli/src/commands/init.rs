@@ -342,6 +342,9 @@ pub async fn initialize(
              prefer CONFED_TOKEN in CI",
         );
     }
+    if let Some(warning) = crate::context::plain_http_warning(&input.base_url) {
+        output = output.warn(warning);
+    }
     ctx.set_workspace(ws);
     Ok(output)
 }

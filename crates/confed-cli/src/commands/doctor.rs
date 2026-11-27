@@ -100,6 +100,9 @@ pub async fn run(ctx: &mut Context, args: &DoctorArgs) -> Result<Output> {
                 "credentials",
                 format!("{} auth for {}", session.auth_method.as_str(), session.base_url),
             ));
+            if let Some(warning) = crate::context::plain_http_warning(&session.base_url) {
+                checks.push(Check::warn("transport", warning));
+            }
             if let Some(ws_url) = ctx.workspace().ok().and_then(|ws| ws.base_url().ok().flatten()) {
                 if !crate::context::same_origin(&ws_url, &session.base_url) {
                     checks.push(Check::fail(
