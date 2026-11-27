@@ -276,6 +276,10 @@ impl Renderer<'_> {
             "status" => {
                 let params = macros::macro_params(el);
                 let title = macros::macro_param(&params, "title").unwrap_or("").trim().to_string();
+                // No Markdown spelling carries a lozenge and its colour back,
+                // so its block is kept as it is: an edit beside it — another
+                // cell of the same table — must not turn it into bold text.
+                self.keep_verbatim = true;
                 if title.is_empty() {
                     String::new()
                 } else {
@@ -1464,6 +1468,28 @@ mod user_mention_tests {
         let md = crate::storage_to_markdown(MENTION, &opts_with_user()).unwrap().markdown;
         assert_eq!(md.trim(), "Ask [@Alice Ng](https://wiki.corp/display/~alice.ng) about it.");
         assert!(!md.contains("6cb6d404"), "the opaque key is not shown to the reader");
+    }
+
+    #[test]
+    fn an_edit_beside_a_status_lozenge_keeps_the_lozenge() {
+        let storage = "<table><tbody><tr><th>Task</th><th>State</th></tr><tr><td>Ship it</td>\
+            <td><ac:structured-macro ac:name=\"status\"><ac:parameter ac:name=\"colour\">Green</ac:parameter>\
+            <ac:parameter ac:name=\"title\">DONE</ac:parameter></ac:structured-macro></td></tr></tbody></table>";
+        let opts = ConvertOptions::default();
+        let base = crate::storage_to_markdown(storage, &opts).unwrap();
+        let edited = base.markdown.replace("Ship it", "Ship it now");
+        assert_ne!(edited, base.markdown, "the cell is editable: {}", base.markdown);
+        let out = crate::markdown_to_storage_patched(
+            storage,
+            &base.block_map,
+            &base.markdown,
+            &edited,
+            &opts,
+        )
+        .unwrap();
+        assert!(out.contains("Ship it now"), "{out}");
+        assert!(out.contains(r#"<ac:parameter ac:name="colour">Green</ac:parameter>"#), "{out}");
+        assert!(out.contains(r#"ac:name="status""#) && !out.contains("<strong>[DONE]"), "{out}");
     }
 
     #[test]

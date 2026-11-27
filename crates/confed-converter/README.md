@@ -52,7 +52,7 @@ Both are enforced by tests, not by convention:
 | …admonition `title` param | bold first paragraph inside the alert | |
 | `expand` | `<details><summary>…</summary>…</details>` | |
 | `toc` | `<!-- confed:toc -->` | |
-| `status` | `**\[TITLE\]**` | brackets escaped so the form is a fixed point |
+| `status` | its block as a ` ```confluence ` fence | no Markdown spelling carries the colour back; an edit beside a lozenge must not turn it into bold text |
 | `ac:image` → `ri:attachment` | `![alt](<attachment_dir>/file.png)` | angle-bracketed when the path has spaces |
 | `ac:image` → `ri:url` | `![alt](url)` | |
 | `ac:link` → `ri:page` in `page_links` | relative `.md` link | matched by content-id, then title, then `SPACE:title` |
@@ -89,8 +89,8 @@ A top-level block becomes a verbatim ` ```confluence ` fence when it — or
 anything inside it — cannot be said in Markdown without losing information:
 
 - any macro that is not `code`, `noformat`, `info`, `note`, `warning`, `tip`,
-  `panel`, `expand`, `toc`, `status` (jira, drawio, children, page-properties,
-  third-party macros…)
+  `panel`, `expand`, `toc` (jira, drawio, children, page-properties,
+  third-party macros…) — and `status`, whose colour has no Markdown form
 - `ac:layout` and its sections and cells
 - a `code` macro with a parameter other than `language` (`collapse`,
   `linenumbers`, `theme`) — the parameter would otherwise vanish

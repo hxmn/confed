@@ -178,7 +178,7 @@ alerts. The full mapping in both directions is tabulated in
 | `info`, `note`, `panel` | `> [!NOTE]`; `tip` → `> [!TIP]`; `warning` → `> [!WARNING]` |
 | `expand` | `<details><summary>…</summary>…</details>` |
 | `toc` | `<!-- confed:toc -->` |
-| `status` | `**\[TITLE\]**` |
+| `status` | its block kept as a ` ```confluence ` fence (the colour has no Markdown form) |
 | images and links to attachments | `![alt](.Page/file.png)` |
 | links to pages in this workspace | relative `.md` links |
 | links to pages elsewhere, users | absolute URLs built from the base URL |
