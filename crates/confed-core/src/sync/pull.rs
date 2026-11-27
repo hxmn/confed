@@ -557,7 +557,14 @@ impl SyncEngine {
                 });
             }
             if !opts.dry_run {
-                self.delete_local(ws, base_record)?;
+                let kept = self.delete_local(ws, base_record, opts.force || opts.reset)?;
+                if !kept.is_empty() {
+                    outcome.warnings.push(format!(
+                        "{path}: deleted on the server; kept what confed did not put in its \
+                         sidecar: {}",
+                        kept.join(", ")
+                    ));
+                }
             }
             self.progress.item(&path);
             outcome.deleted.push(PageChange {
@@ -1128,16 +1135,56 @@ impl SyncEngine {
         ))
     }
 
-    pub(super) fn delete_local(&self, ws: &mut Workspace, base: Option<&PageRecord>) -> Result<()> {
-        let Some(base) = base else { return Ok(()) };
+    /// Remove a page deleted on the server: its file, and from its sidecar
+    /// what confed put there. Anything else in the sidecar — a file dropped in
+    /// and never pushed, an attachment edited since it was downloaded — is
+    /// local work: it stays, and its workspace path is returned for a warning.
+    /// `discard` (`--force`, `--reset`) removes the whole sidecar.
+    pub(super) fn delete_local(
+        &self,
+        ws: &mut Workspace,
+        base: Option<&PageRecord>,
+        discard: bool,
+    ) -> Result<Vec<String>> {
+        let Some(base) = base else { return Ok(Vec::new()) };
         let path = ws.absolute(&base.local_path);
         if path.exists() {
             std::fs::remove_file(&path)
                 .map_err(|e| ConfedError::io(format!("removing {}", path.display()), e))?;
         }
-        let sidecar = ws.absolute(&paths::sidecar_for(&base.local_path));
-        if sidecar.is_dir() {
+        let sidecar_rel = paths::sidecar_for(&base.local_path);
+        let sidecar = ws.absolute(&sidecar_rel);
+        let mut kept = Vec::new();
+        if sidecar.is_dir() && discard {
             let _ = std::fs::remove_dir_all(&sidecar);
+        } else if sidecar.is_dir() {
+            let attachments = ws.state().page_attachments(&base.page_id)?;
+            let removed = ws.state().removed_attachments(&base.page_id)?;
+            let entries = std::fs::read_dir(&sidecar)
+                .map_err(|e| ConfedError::io(format!("reading {}", sidecar.display()), e))?;
+            for entry in entries.filter_map(std::result::Result::ok) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let file = entry.path();
+                let ours = file.is_file()
+                    && (name == paths::STORAGE_FILENAME
+                        || name == crate::comments::COMMENTS_FILENAME
+                        || attachments::is_partial(&name)
+                        || {
+                            let hash = attachments::file_sha256(&file).ok();
+                            attachments.iter().any(|a| {
+                                a.filename == name && a.sha256.is_some() && a.sha256 == hash
+                            }) || removed.iter().any(|r| {
+                                r.filename == name && r.sha256.is_some() && r.sha256 == hash
+                            })
+                        });
+                if ours {
+                    let _ = std::fs::remove_file(&file);
+                } else {
+                    kept.push(format!("{sidecar_rel}/{name}"));
+                }
+            }
+            let _ = std::fs::remove_dir(&sidecar);
+            kept.sort();
         }
         let children = ws.absolute(&paths::children_dir(&base.local_path));
         if children.is_dir() && std::fs::read_dir(&children).map(|d| d.count()).unwrap_or(1) == 0 {
@@ -1147,7 +1194,7 @@ impl SyncEngine {
             prune_empty_dirs(ws.root(), parent);
         }
         ws.state().delete_page(&base.page_id)?;
-        Ok(())
+        Ok(kept)
     }
 
     /// Bring a page's sidecar, and the `attachments` its file lists, in line

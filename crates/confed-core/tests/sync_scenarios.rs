@@ -256,6 +256,29 @@ both_flavors!(
     }
 );
 
+both_flavors!(
+    a_page_deleted_on_the_server_keeps_files_confed_did_not_write,
+    |mut h: Harness| async move {
+        h.mock.seed_page("1001", "Doc", None, "<p>Doc.</p>");
+        h.mock.attach_directly("1001", "known.txt", b"from the server");
+        h.pull().await;
+        assert!(h.path(".Doc/known.txt").exists());
+        std::fs::write(h.path(".Doc/new.png"), b"dropped in, never pushed").unwrap();
+
+        h.mock.delete_page_directly("1001");
+        let outcome = h.pull().await;
+        assert_eq!(outcome.deleted.len(), 1);
+        assert!(!h.path("Doc.md").exists());
+        assert!(!h.path(".Doc/known.txt").exists(), "confed's own copy goes");
+        assert_eq!(std::fs::read(h.path(".Doc/new.png")).unwrap(), b"dropped in, never pushed");
+        assert!(
+            outcome.warnings.iter().any(|w| w.contains(".Doc/new.png")),
+            "{:?}",
+            outcome.warnings
+        );
+    }
+);
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;
