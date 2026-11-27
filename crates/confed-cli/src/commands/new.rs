@@ -98,7 +98,9 @@ fn scaffold(ctx: &Context, args: &NewArgs) -> Result<(String, MarkdownFile)> {
     let body = match &args.template {
         Some(template) => std::fs::read_to_string(template)
             .map_err(|e| ConfedError::io(format!("reading {}", template.display()), e))?,
-        None => format!("# {title}\n\n"),
+        // Empty: Confluence shows the title above the body, so a heading
+        // repeating it would show it twice.
+        None => String::new(),
     };
 
     Ok((
@@ -148,7 +150,7 @@ mod tests {
         assert_eq!(path, "Runbooks/Database Failover.md");
         assert_eq!(file.frontmatter.title, "Database Failover");
         assert!(file.frontmatter.is_new());
-        assert!(file.body.starts_with("# Database Failover"));
+        assert!(!file.body.contains("# "), "no heading repeats the title: {:?}", file.body);
     }
 
     #[test]
