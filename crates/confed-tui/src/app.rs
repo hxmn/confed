@@ -75,6 +75,9 @@ pub struct App {
     pub scroll: u16,
     pub status: String,
     pub plan: Option<PushPlan>,
+    /// How far the push plan is scrolled: a long plan must not hide the
+    /// line that says how to confirm it.
+    pub plan_scroll: u16,
     pub resolver: Option<Resolver>,
     pub job: Option<Job>,
     pub should_quit: bool,
@@ -111,6 +114,7 @@ impl App {
             scroll: 0,
             status: String::new(),
             plan: None,
+            plan_scroll: 0,
             resolver: None,
             job: None,
             should_quit: false,
@@ -323,6 +327,14 @@ impl App {
     fn plan_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter | KeyCode::Char('y') => self.confirm_push(),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.plan_scroll = self.plan_scroll.saturating_add(1);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.plan_scroll = self.plan_scroll.saturating_sub(1);
+            }
+            KeyCode::PageDown => self.plan_scroll = self.plan_scroll.saturating_add(10),
+            KeyCode::PageUp => self.plan_scroll = self.plan_scroll.saturating_sub(10),
             KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
                 self.plan = None;
                 self.mode = Mode::Browse;
@@ -530,6 +542,7 @@ impl App {
             Ok(plan) if plan.is_empty() => self.status = "Nothing to push.".into(),
             Ok(plan) => {
                 self.plan = Some(plan);
+                self.plan_scroll = 0;
                 self.mode = Mode::PushPlan;
             }
             Err(e) => self.status = format!("Could not plan the push: {e}"),
@@ -708,6 +721,7 @@ impl App {
             scroll: 0,
             status: String::new(),
             plan: None,
+            plan_scroll: 0,
             resolver: None,
             job: None,
             should_quit: false,

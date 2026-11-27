@@ -205,17 +205,33 @@ fn draw_plan(frame: &mut Frame<'_>, app: &App, area: Rect) {
     for op in &plan.attachment_ops {
         lines.push(Line::from(format!("attach {op}")));
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Enter/y upload    Esc/n cancel",
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
 
     let popup = centered(70, 60, area);
     frame.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(" Push plan ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    // The plan scrolls; the line saying how to confirm it never does.
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    let visible = rows[0].height as usize;
+    let overflow = lines.len() > visible;
+    let max_scroll = lines.len().saturating_sub(visible) as u16;
+    frame
+        .render_widget(Paragraph::new(lines).scroll((app.plan_scroll.min(max_scroll), 0)), rows[0]);
+    let hint = if overflow {
+        "Enter/y upload    Esc/n cancel    ↑/↓ scroll"
+    } else {
+        "Enter/y upload    Esc/n cancel"
+    };
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Push plan ")),
-        popup,
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().add_modifier(Modifier::BOLD),
+        ))),
+        rows[1],
     );
 }
 
@@ -393,6 +409,33 @@ mod tests {
 └───────────────────────┘└───────────────────────────────────┘
  q quit  ? help  / filter  d diff  f fetch  p pull  P push  c"
                 .trim_start_matches('\n')
+        );
+    }
+
+    /// A plan longer than the popup scrolls, and the line saying how to
+    /// confirm it stays in sight.
+    #[test]
+    fn a_long_push_plan_keeps_its_confirm_line_in_sight() {
+        let mut app = sample_app();
+        let skipped = (0..40)
+            .map(|i| confed_core::sync::BlockedPage {
+                page_id: format!("{}", 1000 + i),
+                path: format!("Page {i}.md"),
+                reason: "held back".into(),
+                kind: confed_core::sync::Blocked::Other,
+            })
+            .collect();
+        app.plan = Some(confed_core::sync::PushPlan { skipped, ..Default::default() });
+        app.mode = crate::app::Mode::PushPlan;
+        let rendered = frame(&mut app, 80, 24);
+        assert!(rendered.contains("Enter/y upload"), "{rendered}");
+        assert!(rendered.contains("scroll"), "{rendered}");
+        assert!(rendered.contains("Page 0.md") && !rendered.contains("Page 39.md"), "{rendered}");
+        app.plan_scroll = 100;
+        let rendered = frame(&mut app, 80, 24);
+        assert!(
+            rendered.contains("Page 39.md") && rendered.contains("Enter/y upload"),
+            "{rendered}"
         );
     }
 
