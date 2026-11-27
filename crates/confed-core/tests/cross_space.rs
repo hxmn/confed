@@ -251,6 +251,29 @@ async fn links_the_server_fixed_itself_are_left_to_it() {
 }
 
 #[tokio::test]
+async fn an_edit_made_after_the_plan_arrives_in_the_destination() {
+    let mut h = Harness::new().await;
+    let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();
+    let id =
+        h.instance.journal_begin(crossmove::OP, &serde_json::to_value(&plan).unwrap()).unwrap();
+
+    // Edited while the move waits for confirmation.
+    let path = "Team Handbook/Onboarding/Week One.md";
+    let edited = h.read("DOCS", path).replace("день за днём.", "день за днём. Ещё строка.");
+    std::fs::write(h.ws("DOCS").absolute(path), &edited).unwrap();
+
+    let client = h.client();
+    crossmove::execute(&h.instance, &id, &client, &mut h.spaces, &mut plan, Step::Planned, 2)
+        .await
+        .expect("move");
+
+    let moved = "Engineering Home/Runbooks/Onboarding/Week One.md";
+    assert!(h.read("ENG", moved).contains("Ещё строка."), "{}", h.read("ENG", moved));
+    let status = worktree::scan(h.ws("ENG")).unwrap();
+    assert_eq!(status.find("1003").unwrap().state, worktree::PageState::Modified);
+}
+
+#[tokio::test]
 async fn an_interrupted_move_is_finished_by_running_it_again() {
     let mut h = Harness::new().await;
     let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();

@@ -1696,6 +1696,15 @@ pub async fn transfer(
         let text = std::fs::read_to_string(&path)
             .map_err(|e| ConfedError::io(format!("reading {}", path.display()), e))?;
         let mut file = frontmatter::parse(&text, &placement.path)?;
+        // The plan checked every page was in sync, but the file may have been
+        // edited since — at the confirmation prompt, during `--wait`, before a
+        // resume. Such an edit is local work: the page keeps its old base, so
+        // it arrives `Modified` rather than adopted as the base and then
+        // re-rendered away by the closing pull.
+        let edited_since = dst
+            .state()
+            .get_page(&page.page_id)?
+            .is_some_and(|record| record.markdown_hash != file.content_hash());
         if let Some(managed) = file.frontmatter.managed.as_mut() {
             managed.space_key = plan.dest.key.clone();
         }
@@ -1709,7 +1718,9 @@ pub async fn transfer(
         if let Some(mut record) = dst.state().get_page(&page.page_id)? {
             record.local_path = placement.path.clone();
             record.slug = placement.slug.clone();
-            record.markdown_hash = file.content_hash();
+            if !edited_since {
+                record.markdown_hash = file.content_hash();
+            }
             dst.state().upsert_page(&record)?;
             moved.push(MovedPage {
                 page_id: page.page_id.clone(),
