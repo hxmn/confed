@@ -409,6 +409,28 @@ async fn a_failed_link_fix_is_retried_though_the_page_has_a_dead_link() {
     );
 }
 
+/// A rename the move made whose answer never came back is not in the journal;
+/// abort still renames the page back, as it carries the move's title.
+#[tokio::test]
+async fn abort_renames_back_a_page_whose_rename_answer_was_lost() {
+    let mut h = Harness::new().await;
+    h.mock.seed_page_in("ENG", "2003", "Onboarding", Some("2001"), "<p>Ours.</p>");
+    h.pull("ENG").await;
+    let mut request = h.request("1002", "2002");
+    request.on_conflict = OnConflict::Suffix;
+    let mut plan = h.plan(&request).await.unwrap();
+    assert_eq!(plan.pages[0].new_title.as_deref(), Some("Onboarding (DOCS)"));
+    let id =
+        h.instance.journal_begin(crossmove::OP, &serde_json::to_value(&plan).unwrap()).unwrap();
+    // Renamed on the server; the answer lost, so the journal never heard.
+    h.mock.rename_page("1002", "Onboarding (DOCS)");
+    assert!(plan.renamed.is_empty());
+
+    let client = h.client();
+    crossmove::abort(&h.instance, &id, &client, &mut plan, Step::Planned).await.unwrap();
+    assert_eq!(h.mock.page_title("1002").as_deref(), Some("Onboarding"));
+}
+
 #[tokio::test]
 async fn a_home_page_below_a_moved_root_is_refused() {
     let h = Harness::new().await;

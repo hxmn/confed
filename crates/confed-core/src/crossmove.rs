@@ -1371,11 +1371,27 @@ pub async fn abort(
             ));
         }
     }
-    let renamed = std::mem::take(&mut plan.renamed);
+    // The renames recorded, and any the move asked for whose answer never
+    // came back — renamed on the server all the same. A page that carries
+    // its new title is renamed back, whatever the journal says.
+    let recorded = std::mem::take(&mut plan.renamed);
+    let mut renamed: Vec<String> = recorded.clone();
+    for page in &plan.pages {
+        if page.new_title.is_some() && !renamed.contains(&page.page_id) {
+            renamed.push(page.page_id.clone());
+        }
+    }
     for id in &renamed {
         let Some(page) = plan.pages.iter().find(|p| &p.page_id == id) else { continue };
         let current = client.get_page(&PageId::new(id), BodyFormat::Storage).await?;
         if current.summary.title == page.title {
+            continue;
+        }
+        // Not recorded, and not carrying the title the move gave it: renamed
+        // by somebody else since, which is theirs, not the move's, to undo.
+        if !recorded.contains(id)
+            && page.new_title.as_deref() != Some(current.summary.title.as_str())
+        {
             continue;
         }
         client
