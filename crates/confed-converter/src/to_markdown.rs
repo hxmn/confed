@@ -28,6 +28,7 @@ pub fn render(doc: &StorageDoc, storage: &str, opts: &ConvertOptions) -> Convert
         mark_mode: false,
         sentinels: Vec::new(),
         previewed: HashSet::new(),
+        next_char: None,
     };
 
     // Render first, assemble second: a block that renders to nothing is dropped
@@ -120,6 +121,8 @@ struct Renderer<'a> {
     mark_mode: bool,
     /// What each sentinel character stands for, by index.
     sentinels: Vec<Sentinel>,
+    /// The first character of the node after the one being rendered inline.
+    next_char: Option<char>,
     /// Comment ids whose preview has been written once already; a comment split
     /// across blocks shows its preview on the first fragment only.
     previewed: HashSet<String>,
@@ -428,9 +431,13 @@ impl Renderer<'_> {
         let merged = merge_adjacent_emphasis(nodes);
         let nodes = merged.as_deref().unwrap_or(nodes);
         let mut out = String::new();
-        for n in nodes {
+        for (i, n) in nodes.iter().enumerate() {
+            // What follows, for an emphasis that must know whether a letter
+            // touches its closing delimiter.
+            self.next_char = nodes.get(i + 1).and_then(first_char);
             self.inline_node(n, &mut out);
         }
+        self.next_char = None;
         out
     }
 
@@ -571,6 +578,8 @@ impl Renderer<'_> {
     }
 
     fn wrap(&mut self, el: &Element, open: &str, close: &str, out: &mut String) {
+        let before = out.chars().last();
+        let after = self.next_char;
         let inner = self.inline(&el.children);
         if inner.trim().is_empty() {
             out.push_str(&inner);
@@ -585,6 +594,21 @@ impl Renderer<'_> {
             .map(char::len_utf8)
             .sum::<usize>();
         let core = &inner[lead.len()..inner.len() - trail_len];
+        // CommonMark refuses a delimiter run with punctuation inside and a
+        // letter outside — `**Note:**text`, `**注意：**请` — and the asterisks
+        // come back as text. With punctuation on an inner edge, the element is
+        // written as inline HTML, which passes through whatever is around it.
+        let is_punct = |c: char| !c.is_alphanumeric() && !c.is_whitespace();
+        let touches = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+        let refused =
+            (lead.is_empty() && touches(before) && core.chars().next().is_some_and(is_punct))
+                || (trail_len == 0 && touches(after) && core.chars().last().is_some_and(is_punct));
+        let (open, close) = match (open, refused) {
+            ("**", true) => ("<strong>", "</strong>"),
+            ("*", true) => ("<em>", "</em>"),
+            ("~~", true) => ("<del>", "</del>"),
+            _ => (open, close),
+        };
         out.push_str(&lead);
         out.push_str(open);
         out.push_str(core);
@@ -1035,6 +1059,17 @@ fn md_image(alt: &str, src: &str) -> String {
 
 /// Markdown link destinations cannot contain spaces or parentheses unless they
 /// are wrapped in angle brackets.
+/// The first character a node renders as, near enough to tell a letter from
+/// punctuation or space.
+fn first_char(node: &Node) -> Option<char> {
+    match node {
+        Node::Text(c) => dom::unescape(&c.raw).chars().next(),
+        Node::CData(c) => c.raw.chars().next(),
+        Node::Element(el) => el.text().chars().next(),
+        _ => None,
+    }
+}
+
 fn wrap_destination(href: &str) -> String {
     if href.contains(char::is_whitespace) || href.contains('(') || href.contains(')') {
         format!("<{}>", href.replace('<', "%3C").replace('>', "%3E"))
@@ -1470,6 +1505,29 @@ mod user_mention_tests {
         let md = crate::storage_to_markdown(MENTION, &opts_with_user()).unwrap().markdown;
         assert_eq!(md.trim(), "Ask [@Alice Ng](https://wiki.corp/display/~alice.ng) about it.");
         assert!(!md.contains("6cb6d404"), "the opaque key is not shown to the reader");
+    }
+
+    #[test]
+    fn emphasis_that_touches_punctuation_round_trips() {
+        let opts = ConvertOptions::default();
+        for (storage, edit) in [
+            ("<p><strong>Note:</strong>text follows</p>", ("follows", "follows here")),
+            ("<p><strong>注意：</strong>请阅读本页</p>", ("本页", "本页。")),
+            ("<p>call foo<strong>(bar)</strong> twice</p>", ("twice", "once")),
+            ("<p>a<em>(b)</em>c</p>", ("c", "cd")),
+        ] {
+            let md = crate::storage_to_markdown(storage, &opts).unwrap().markdown;
+            let edited = md.replace(edit.0, edit.1);
+            let back = crate::markdown_to_storage(&edited, &opts).unwrap();
+            assert!(!back.contains('*'), "{storage} -> {md} -> {back}");
+            assert!(
+                back.contains("<strong>") || back.contains("<em>"),
+                "{storage} -> {md} -> {back}"
+            );
+        }
+        // Where Markdown can say it, it still does.
+        let md = crate::storage_to_markdown("<p><strong>Note:</strong> text</p>", &opts).unwrap();
+        assert_eq!(md.markdown.trim(), "**Note:** text");
     }
 
     #[test]

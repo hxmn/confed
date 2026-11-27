@@ -35,6 +35,10 @@ fn storage_text() -> impl Strategy<Value = String> {
             1 => Just("`tick`".to_string()),
             1 => Just("# hash".to_string()),
             1 => Just("[a](b)".to_string()),
+            // Punctuation at the edge of an emphasis, touching a letter.
+            1 => Just("Note:".to_string()),
+            1 => Just("(bar)".to_string()),
+            1 => Just("注意：".to_string()),
         ],
         1..6,
     )
