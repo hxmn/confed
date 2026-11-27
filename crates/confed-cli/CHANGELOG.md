@@ -20,6 +20,76 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-27
+
+Old versions can be read, compared and restored; a fresh clone of a workspace no longer
+needs `pull --force`; part of a space can be cloned; and an edit to one cell or one list
+item no longer rewrites the whole table or list.
+
+### Changed
+
+- **Cloud requests are paced** at about five a second, so a long pull avoids 429s instead
+  of only surviving them. `--rate` (`CONFED_RATE`, the `rate` setting) changes it for
+  either flavor, `0` for no limit; Data Center stays unpaced unless asked. A 429's
+  `Retry-After` now holds back every request in flight, not only the one refused (#78).
+- **After a fresh clone or a deleted `.state.db`, `pull` takes each file back** on the
+  version its frontmatter names, instead of stopping for `pull --force`: a file as it was
+  rendered is `unchanged`, an edited one `modified` (or merged), and nothing is
+  overwritten. The files are listed under `adopted` (#68).
+- **`diff --version` and `restore --version` take a page version.** On those two commands
+  `--version` is no longer confed's own; `confed --version` and `confed version` still are.
+- The converter renders emphasis that begins with punctuation right after other emphasis,
+  and a code span right after another, as inline HTML; the converter version moves, so the
+  next pull re-renders clean pages (#64).
+
+### Added
+
+- **`confed restore <page> --version N [--push]`** writes an old version into the file as
+  a local change; **`confed log <page> --show N`** prints it as Markdown; **`confed diff
+  <page> --version N`** compares the file with it (#67).
+- **`confed clone --root <page>`** and **`--label <label>`** sync part of a space; the
+  limit is stored (`scope_root`, `scope_label`) and every later fetch and pull keeps to
+  it (#69).
+- **`push --dry-run` reports `losses`**: each edited block whose base holds what Markdown
+  cannot spell — a coloured span, column widths — which regenerating it drops (#66).
+- `comment reply --push` and `comment resolve --push` report their counts under `push`, as
+  `add --push` does; `result` stays, as the old name. `comment list` of a tracked page says
+  `source: local` (#108).
+
+### Fixed
+
+- **An edit to one cell of a table, or one item of a list or task list, keeps every
+  other row or item byte for byte**, and the table its column widths and attributes;
+  before, the whole block was regenerated (#65).
+- Emphasis that begins with punctuation right after other emphasis (`**a***(bar)*`), and
+  two code spans side by side, lost their formatting when their block was edited (#64).
+- `status --fetch` and `diff --remote` fetched without the workspace lock and showed a
+  partly failed fetch as current; they now lock, and warn about pages they could not read.
+- A character XML forbids is refused with its Markdown line, instead of the server
+  refusing the whole body.
+- A page created on the server whose label was then refused was reported as a failure,
+  so the next push tried to create it again.
+- A DELETE retried after a gateway error, and finding the page gone, reported 404 for a
+  delete that had worked.
+- `resolve` reported `draft: true` with nothing queued; cancelled `rm` and `config` results
+  dropped `dry_run` and `key` (#108).
+- `config --set rate` was stored but not read back.
+- `instance remove --delete-files` deleted a workspace with unpushed attachments, or one an
+  unfinished move still needed; `instance adopt --move-credentials` removed credentials of
+  another account than the one it shared.
+- A space key in lower case works when the space is known; attachments that Windows, or a
+  system whose file names ignore case, cannot keep are left out with a warning; the rules
+  copy in the agent files is capped at 20,000 characters and names who last changed it.
+- `status` no longer reads every page body, and pull looks pages up by id: on 5,000 pages
+  `status` went from about 195 ms to 105–180 ms (#47).
+
+### Tests
+
+- A property test of the sync engine: random sequences of edits, pulls, pushes and
+  resolutions, checked against three invariants after every step (#48). A round-trip
+  property that starts from storage as Confluence writes it (#64). The mock refuses a
+  duplicate title in a space and can fail one page's updates (#49).
+
 ## [0.23.0] - 2026-11-27
 
 The fixes from the review of 0.21.0 and 0.22.0, and from an agent's editing session on
@@ -1641,7 +1711,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/hxmn/confed/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/hxmn/confed/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/hxmn/confed/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/hxmn/confed/compare/v0.21.0...v0.21.1
