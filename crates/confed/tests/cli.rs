@@ -958,7 +958,7 @@ async fn last_body(server: &MockServer, http_method: &str) -> Value {
 /// work. Rebuilding `.state.db` — what a fresh clone of a repository that
 /// (correctly) does not track it looks like — must not cost you those edits.
 #[tokio::test]
-async fn pull_refuses_to_overwrite_an_untracked_file() {
+async fn pull_adopts_the_files_of_a_workspace_whose_state_was_rebuilt() {
     let server = dc_server().await;
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(exit_code(&init(dir.path(), &server)), 0);
@@ -980,17 +980,18 @@ async fn pull_refuses_to_overwrite_an_untracked_file() {
         .expect("the file is still listed");
     assert_eq!(page["state"], json!("untracked"));
 
+    // pull takes every file back on the version it names: the edit is kept,
+    // as a local change, and the other pages are unchanged.
     let output = run(confed_authed(dir.path(), &["pull", "--json"]));
-    assert_eq!(exit_code(&output), 7, "pull stops rather than overwriting: {}", stderr(&output));
-    assert!(
-        read(dir.path(), ROOT_FILE).contains("Work I have not pushed yet"),
-        "the local edit survives"
-    );
-
-    // --force is the explicit way through, and it takes the server's copy.
-    let forced = run(confed_authed(dir.path(), &["pull", "--force", "--json"]));
-    assert_eq!(exit_code(&forced), 0, "stderr: {}", stderr(&forced));
-    assert!(!read(dir.path(), ROOT_FILE).contains("Work I have not pushed yet"));
+    assert_eq!(exit_code(&output), 0, "{}", stderr(&output));
+    let value = envelope(&output, "pull");
+    assert!(value["result"]["adopted"].to_string().contains(ROOT_FILE), "{value}");
+    assert!(read(dir.path(), ROOT_FILE).contains("Work I have not pushed yet"));
+    let value = envelope(&run(confed(dir.path(), &["status", "--json"])), "status");
+    for page in value["result"]["pages"].as_array().unwrap() {
+        let expected = if page["path"] == json!(ROOT_FILE) { "modified" } else { "unchanged" };
+        assert_eq!(page["state"], json!(expected), "{page}");
+    }
 }
 
 #[tokio::test]

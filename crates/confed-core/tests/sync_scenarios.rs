@@ -1570,18 +1570,49 @@ async fn a_renamed_page_brings_its_sidecar_along() {
 }
 
 /// A file naming a page confed has no record of — the shape of a fresh git
-/// clone, since `.state.db` is git-ignored — must not be silently overwritten.
+/// clone, since `.state.db` is git-ignored — is taken back on the version it
+/// names: an edit to it is a local change, kept, and nothing is overwritten.
 #[tokio::test]
-async fn pull_refuses_to_overwrite_a_page_it_has_no_record_of() {
+async fn pull_adopts_files_after_the_state_database_is_rebuilt() {
+    let mut h = Harness::new(Flavor::Cloud);
+    h.mock.seed_page("1001", "Notes", None, "<p>Server text.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Other text.</p>");
+    h.mock.seed_page("1003", "Moved on", None, "<p>Old text.</p>");
+    h.pull().await;
+    h.mock.remote_edit("1003", "<p>New text.</p>");
+
+    // A rebuilt state database: the files and their page ids survive, the
+    // base records do not.
+    h.edit_body("Notes.md", "\nUnpushed local work.\n");
+    for id in ["1001", "1002", "1003"] {
+        h.ws.state().delete_page(id).unwrap();
+    }
+    assert_eq!(h.status("1001"), PageState::Untracked);
+
+    let outcome = h.pull().await;
+    assert_eq!(outcome.adopted.len(), 3, "{outcome:?}");
+    assert!(h.read("Notes.md").contains("Unpushed local work."), "the edit is kept");
+    assert_eq!(h.status("1001"), PageState::Modified);
+    assert_eq!(h.status("1002"), PageState::Unchanged);
+    // Behind when adopted, so brought up to date by the same pull.
+    assert!(h.read("Moved on.md").contains("New text."), "{}", h.read("Moved on.md"));
+    assert_eq!(h.status("1003"), PageState::Unchanged);
+
+    // And the edit pushes as any other.
+    assert_eq!(h.push().await.pushed.len(), 1);
+}
+
+/// A file whose version cannot be read back is left alone, untracked, and the
+/// pull says so; `--force` is the way through, taking the server's copy.
+#[tokio::test]
+async fn pull_refuses_to_overwrite_a_page_it_cannot_adopt() {
     let mut h = Harness::new(Flavor::Cloud);
     h.mock.seed_page("1001", "Notes", None, "<p>Server text.</p>");
     h.pull().await;
-
-    // Simulate a rebuilt state database: the file and its page_id survive, the
-    // base record does not.
     h.edit_body("Notes.md", "\nUnpushed local work.\n");
     h.ws.state().delete_page("1001").unwrap();
-    assert_eq!(h.status("1001"), PageState::Untracked);
+    // The file names a version the server never had.
+    h.write("Notes.md", &h.read("Notes.md").replace("version: 1", "version: 42"));
 
     let err = h
         .engine
@@ -1589,12 +1620,8 @@ async fn pull_refuses_to_overwrite_a_page_it_has_no_record_of() {
         .await
         .expect_err("pull must stop rather than overwrite work it cannot compare");
     assert_eq!(err.exit_code(), confed_core::ExitCode::State);
-    assert!(
-        h.read("Notes.md").contains("Unpushed local work."),
-        "the local edit survives the refusal"
-    );
+    assert!(h.read("Notes.md").contains("Unpushed local work."));
 
-    // --force is the way through, and it takes the server's copy.
     h.engine
         .pull(&mut h.ws, &PullOptions { force: true, ..PullOptions::everything() })
         .await

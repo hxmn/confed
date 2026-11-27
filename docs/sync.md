@@ -57,7 +57,7 @@ Two flags override that square: a page whose base `sync_state` is `conflicted` i
 | `local_deleted` | `D` | Base has a record but the file is gone. | You deleted the file, or ran `confed rm`. `push --allow-delete` deletes it on the server. |
 | `remote_deleted` | `X` | The page vanished from the space listing. | Someone deleted or trashed it. `pull` removes the local file — unless you have local edits, in which case it stops. |
 | `conflicted` | `C` | A merge left conflict markers in the file. | A `pull` that could not merge cleanly. `push` refuses the page until `confed resolve`. |
-| `untracked` | `?` | The file names a page id confed has no base record for. | Usually a deleted or rebuilt `.state.db`. `fetch` repairs it. |
+| `untracked` | `?` | The file names a page id confed has no base record for. | Usually a deleted or rebuilt `.state.db`, or a fresh clone. `pull` takes it back. |
 
 Two extra buckets appear in `status` output but are not page states:
 `untracked_files` (Markdown files with no frontmatter — confed ignores them) and
@@ -87,7 +87,7 @@ written at all and the command exits 7. Per page:
 | Situation | Action |
 |---|---|
 | `remote_new` | create the file |
-| `untracked` | block, because there is no base to compare against; `--force` overwrites |
+| `untracked` | take it back on the version its frontmatter names (see below); block only when that version cannot be read; `--force` overwrites |
 | `behind` | overwrite from the server |
 | `diverged` or `conflicted` | three-way merge (or, with `--no-merge`, block; with `--force`, overwrite) |
 | `modified` | leave it alone — pull has nothing to add |
@@ -97,9 +97,13 @@ written at all and the command exits 7. Per page:
 
 An `untracked` page is a file whose `page_id` has no base record, which is what you get
 after `.state.db` is deleted or rebuilt — including a fresh clone of a repository that
-tracks the Markdown but not the state. confed has nothing to compare such a file against,
-so it cannot tell whether the file holds work you never pushed, and `pull` stops with exit
-code 7 rather than guessing. `pull --force` takes the server's copy. See
+tracks the Markdown but not the state. The file still names the version it was synced
+with, so `pull` reads that version back (from the fetched copy, the page cache or the
+server's history) and records it as the base: a file as it was rendered is `unchanged`
+(or `behind`, and brought up to date), and one you edited is `modified` (or `diverged`,
+and merged) — nothing is overwritten. They are listed under `adopted`. Only when that
+version cannot be read does `pull` stop with exit code 7 for the file; `pull --force`
+then takes the server's copy. See
 [troubleshooting.md](troubleshooting.md#untracked-pages-after-rebuilding-statedb).
 
 Frontmatter is merged field by field: labels three-way as a set (additions from both sides

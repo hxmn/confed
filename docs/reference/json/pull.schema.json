@@ -60,6 +60,11 @@
       "description": "Local copies removed because the attachment was deleted on the server. A copy changed locally is kept, with a warning."
     },
     "dry_run": { "type": "boolean" },
+    "adopted": {
+      "type": "array",
+      "description": "Files confed had no record of (a rebuilt `.state.db`, a fresh clone) taken back on the version their frontmatter names, by path. Absent when none.",
+      "items": { "type": "string" }
+    },
     "interrupted": { "type": "boolean", "description": "Stopped by Ctrl-C (exit 130): the lists say what was done before it stopped, and running the command again finishes the rest. Present only when true." }
   },
   "$defs": {

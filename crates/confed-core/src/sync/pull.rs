@@ -51,6 +51,11 @@ pub struct PullOutcome {
     /// Local copies removed because the server no longer has the attachment.
     pub attachments_removed: usize,
     pub dry_run: bool,
+    /// Files confed had no record of — a fresh clone of a workspace, a
+    /// deleted `.state.db` — taken back on the version they name, so their
+    /// edits are local changes like any other. By path.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub adopted: Vec<String>,
     /// What the user should know besides the changes: comments that could not
     /// be re-read, say. Reported as warnings, not as part of the result.
     #[serde(skip)]
@@ -328,6 +333,9 @@ impl SyncEngine {
 
         let (files, _) = worktree::read_working_files(ws)?;
         self.reconcile_paths(ws, &files)?;
+        if !opts.dry_run && !(opts.force || opts.reset) {
+            outcome.adopted = self.adopt_untracked(ws, &files).await?;
+        }
         let base = ws.state().all_pages()?;
         let remote = ws.state().all_remote()?;
         let statuses = worktree::compute_status(&files, &base, &remote);
@@ -1020,6 +1028,99 @@ impl SyncEngine {
             ops: Vec::new(),
             parent: None,
         })
+    }
+
+    /// Take back the files that name a page and the version they were synced
+    /// with, but that the state database has no record of: that version is
+    /// recorded as their base, so a file as it was rendered is unchanged (or
+    /// behind) and an edited one modified (or diverged, and merged) — nothing
+    /// is overwritten. A version that cannot be read leaves the file as it
+    /// was, untracked, for `pull --force`.
+    async fn adopt_untracked(
+        &self,
+        ws: &mut Workspace,
+        files: &[LocalFile],
+    ) -> Result<Vec<String>> {
+        let cache = ws.page_store().ok();
+        let mut adopted = Vec::new();
+        for local in files {
+            let Some(managed) = local.file.frontmatter.managed.as_ref() else { continue };
+            let page_id = managed.page_id.as_str();
+            let version = managed.version;
+            if ws.state().get_page(page_id)?.is_some() {
+                continue;
+            }
+            let Some(remote) = ws.state().get_remote(page_id)?.filter(|r| !r.deleted) else {
+                continue;
+            };
+            // That version, as the server keeps it: the fetched copy when it
+            // is the current one, else the cache, else the server's history.
+            let at = if remote.version == version && remote.storage_body.is_some() {
+                Some(remote.clone())
+            } else if let Some(body) =
+                cache.as_ref().and_then(|c| c.body(page_id, version).ok().flatten())
+            {
+                Some(RemotePage {
+                    version,
+                    storage_hash: Some(hash_str(&body)),
+                    storage_body: Some(body),
+                    ..remote.clone()
+                })
+            } else {
+                match self.client.get_page_at_version(&PageId::new(page_id), version).await {
+                    Ok(page) => Some(RemotePage {
+                        title: page.summary.title.clone(),
+                        parent_id: page.summary.parent_id.as_ref().map(|p| p.0.clone()),
+                        version,
+                        labels: page
+                            .summary
+                            .labels
+                            .clone()
+                            .unwrap_or_else(|| remote.labels.clone()),
+                        storage_hash: Some(hash_str(&page.body_storage)),
+                        storage_body: Some(page.body_storage),
+                        ..remote.clone()
+                    }),
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "confed::sync",
+                            page = %page_id, version, error = %e,
+                            "version of an untracked file could not be read"
+                        );
+                        None
+                    }
+                }
+            };
+            let Some(at) = at else { continue };
+            let storage = at.storage_body.clone().unwrap_or_default();
+            let opts = page_convert_options(ws, &local.path)?;
+            let converted = confed_converter::storage_to_markdown(&storage, &opts)?;
+            let placement = Placement {
+                path: local.path.clone(),
+                slug: local
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .and_then(|f| f.strip_suffix(".md"))
+                    .unwrap_or(&local.path)
+                    .to_string(),
+                sidecar: paths::sidecar_for(&local.path),
+            };
+            let as_rendered =
+                self.build_file(ws, &at, &placement, Some(local), converted.markdown)?;
+            self.record_base(
+                ws,
+                &at,
+                &placement,
+                &as_rendered,
+                &storage,
+                &converted.block_map,
+                SyncState::Clean,
+                &opts.users,
+            )?;
+            adopted.push(local.path.clone());
+        }
+        Ok(adopted)
     }
 
     pub(super) fn build_file(

@@ -428,18 +428,16 @@ skipped by name), or it lives in a directory whose name starts with `.` (sidecar
 what you get after deleting the database, or cloning a git repository that contains the
 Markdown but (correctly) not the state.
 
-**Fix.** `confed pull` stops with exit code 7 and lists the affected files rather than
-writing over them, because with no base record confed cannot tell whether a file holds
-work you never pushed.
+**Fix.** Run `confed pull`. Each file names the version it was synced with; pull reads
+that version back and records it as the file's base, so your edits are kept as local
+changes and every other page is unchanged. The files are listed under `adopted`.
 
-If you know the files match the server — the usual case for a fresh clone — run
-`confed pull --force`, which takes the server's copy for every one of them.
+If a file names a version the server cannot give back, pull stops with exit code 7 for
+it rather than writing over it. If you know it matches the server, `confed pull --force`
+takes the server's copy; if it might hold edits, copy it aside first (`pull --force`
+discards them without further warning), then diff it back in.
 
-If you might have local edits, save them first (`cp -r . ../backup`), then pull with
-`--force` and diff your backup back in. `pull --force` discards local content for these
-pages without further warning, so make the copy before you run it.
-
-This is covered by `pull_refuses_to_overwrite_an_untracked_file` in
+This is covered by `pull_adopts_the_files_of_a_workspace_whose_state_was_rebuilt` in
 `crates/confed/tests/cli.rs`.
 
 ### A page has no `storage.xml`, or it looks wrong
