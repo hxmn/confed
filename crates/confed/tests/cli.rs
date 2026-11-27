@@ -367,6 +367,39 @@ async fn the_stored_token_is_never_sent_to_another_server() {
 }
 
 #[tokio::test]
+async fn a_pull_filter_that_matches_nothing_pulls_nothing() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let edited = read(dir.path(), ROOT_FILE).replace("Welcome", "Welcome, edited locally,");
+    std::fs::write(dir.path().join(ROOT_FILE), &edited).unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/rest/api/search"))
+        .and(wiremock::matchers::query_param_contains("cql", "nosuchlabel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [], "start": 0, "limit": 25, "size": 0, "_links": {}
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    for args in [
+        &["pull", "--label", "nosuchlabel", "--reset", "--json"][..],
+        &["pull", "--cql", "title = \"nosuchlabel\"", "--reset", "--json"],
+    ] {
+        let output = run(confed_authed(dir.path(), args));
+        assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+        let value = envelope(&output, "pull");
+        assert_eq!(value["result"]["updated"], json!([]), "{value}");
+        assert_eq!(value["result"]["discarded"], json!([]), "{value}");
+        assert!(value["warnings"].to_string().contains("no page matches"), "{value}");
+        assert_eq!(read(dir.path(), ROOT_FILE), edited, "the local edit is untouched");
+    }
+}
+
+#[tokio::test]
 async fn pull_materializes_the_hierarchy_and_status_is_then_clean() {
     let server = dc_server().await;
     let dir = tempfile::tempdir().unwrap();

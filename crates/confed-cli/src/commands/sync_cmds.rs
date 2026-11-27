@@ -110,6 +110,16 @@ pub mod pull {
         if let Some(cql) = &args.cql {
             scope.extend(search_ids(&client, cql).await?);
         }
+        // An empty scope means every page, so a filter that matched nothing
+        // must stop here: `--label typo --reset` would otherwise discard the
+        // local edits of the whole space.
+        if scope.is_empty() && (args.label.is_some() || args.cql.is_some()) {
+            let outcome =
+                confed_core::sync::PullOutcome { dry_run: args.dry_run, ..Default::default() };
+            let human = format!("{}\n", ctx.style.yellow("No page matches; nothing was pulled."));
+            return Ok(Output::from_data(&outcome, human)
+                .warn("no page matches the --label or --cql filter; nothing was pulled"));
+        }
 
         let opts = PullOptions {
             scope,
