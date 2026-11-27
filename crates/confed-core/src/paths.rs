@@ -62,10 +62,14 @@ pub fn plan_paths(
     let by_id: HashMap<&str, &PagePlacement> =
         pages.iter().map(|p| (p.page_id.as_str(), p)).collect();
 
-    // Group siblings so collisions are resolved per parent, not globally.
+    // Group siblings so collisions are resolved per directory, not globally.
+    // A page whose parent is not in the listing (a folder, a restricted or
+    // trashed page) is placed at the top, so it is a sibling of the top-level
+    // pages there, not of the other children of its unseen parent.
     let mut children: HashMap<Option<String>, Vec<&PagePlacement>> = HashMap::new();
     for page in pages {
-        children.entry(page.parent_id.clone()).or_default().push(page);
+        let parent = page.parent_id.clone().filter(|id| by_id.contains_key(id.as_str()));
+        children.entry(parent).or_default().push(page);
     }
     for siblings in children.values_mut() {
         siblings.sort_by(|a, b| {
@@ -264,6 +268,17 @@ mod tests {
         let placed = plan_paths(&pages, &HashMap::new());
         assert_ne!(placed["2"].path, placed["3"].path);
         assert!(placed["3"].path.contains('~'));
+    }
+
+    #[test]
+    fn a_page_whose_parent_is_not_listed_does_not_share_a_top_level_file() {
+        // Its parent (a folder, or a restricted page) is not in the listing,
+        // so it lands at the top, beside a page with the same slug.
+        let pages = vec![page("1002", "Notes?", None), page("1003", "Notes:", Some("9999"))];
+        let placed = plan_paths(&pages, &HashMap::new());
+        assert_ne!(placed["1002"].path, placed["1003"].path);
+        assert_ne!(placed["1002"].sidecar, placed["1003"].sidecar);
+        assert!(!placed["1003"].path.contains('/'), "{}", placed["1003"].path);
     }
 
     #[test]

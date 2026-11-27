@@ -245,6 +245,17 @@ both_flavors!(markers_in_a_clean_page_are_not_pushed, |mut h: Harness| async mov
     assert_eq!(h.mock.page_body("1001").unwrap(), before, "nothing was sent");
 });
 
+both_flavors!(
+    an_orphan_and_a_top_level_page_with_one_slug_get_two_files,
+    |mut h: Harness| async move {
+        h.mock.seed_page("1002", "Notes?", None, "<p>One.</p>");
+        h.mock.seed_page("1003", "Notes:", Some("9999"), "<p>Two, its parent is not listed.</p>");
+        h.pull().await;
+        assert_eq!(h.status("1002"), PageState::Unchanged);
+        assert_eq!(h.status("1003"), PageState::Unchanged);
+    }
+);
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;
