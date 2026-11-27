@@ -110,8 +110,13 @@ impl DcClient {
         if let Some(password) = &user.password {
             body["password"] = json!(password.expose());
         }
-        let created: serde_json::Value =
-            self.http.post_json_sensitive("rest/api/admin/user", &body).await?;
+        let created: ApiResult<serde_json::Value> =
+            self.http.post_json_sensitive("rest/api/admin/user", &body).await;
+        // The password's copy in the request body goes as soon as it is sent.
+        if let Some(serde_json::Value::String(password)) = body.get_mut("password") {
+            zeroize::Zeroize::zeroize(password);
+        }
+        let created = created?;
         Ok(User {
             account_id: None,
             user_key: created["userKey"].as_str().map(str::to_string),

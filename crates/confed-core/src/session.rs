@@ -377,8 +377,11 @@ where
 }
 
 fn keyring_set(account: &str, secret: &Secret) -> std::result::Result<(), keyring::Error> {
-    let (account, secret) = (account.to_string(), secret.expose().to_string());
-    off_runtime(move || keyring::Entry::new(KEYRING_SERVICE, &account)?.set_password(&secret))
+    // The copy the keyring thread takes is a Secret too, wiped when dropped.
+    let (account, secret) = (account.to_string(), Secret::new(secret.expose()));
+    off_runtime(move || {
+        keyring::Entry::new(KEYRING_SERVICE, &account)?.set_password(secret.expose())
+    })
 }
 
 fn keyring_get(account: &str) -> std::result::Result<Secret, keyring::Error> {

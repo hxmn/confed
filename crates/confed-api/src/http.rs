@@ -709,8 +709,11 @@ impl Http {
     ) -> ApiResult<T> {
         let url = self.url(path)?;
         let ctx = format!("{method} {path}");
-        let payload = serde_json::to_vec(body)
-            .map_err(|e| ApiError::Decode { context: ctx.clone(), source: e })?;
+        // A body carrying a password is wiped once sent; this copy at least.
+        let payload = zeroize::Zeroizing::new(
+            serde_json::to_vec(body)
+                .map_err(|e| ApiError::Decode { context: ctx.clone(), source: e })?,
+        );
         // Credentials travel in headers, so a body is safe to show when tracing
         // what was sent — except the few that carry a password themselves.
         let shown = if traced {
@@ -726,7 +729,7 @@ impl Http {
                     // Plugin REST endpoints (Data Center's inline comments) run
                     // Confluence's XSRF check on JSON writes unless told not to.
                     .header("X-Atlassian-Token", "no-check")
-                    .body(payload.clone())
+                    .body(payload.to_vec())
             })
             .await?;
         decode(resp, &ctx).await
