@@ -2796,6 +2796,65 @@ fn assert_no_token(outputs: &[&Output]) {
     }
 }
 
+/// `clone --root` binds the workspace to a subtree: the pages outside it are
+/// never written, by the clone or by a later pull.
+#[tokio::test]
+async fn clone_root_syncs_only_the_subtree() {
+    let server = dc_server().await;
+    let parent = tempfile::tempdir().unwrap();
+    let first = parent.path().join("first");
+    std::fs::create_dir(&first).unwrap();
+    assert_eq!(exit_code(&init(&first, &server)), 0);
+
+    let output = run(confed(
+        parent.path(),
+        &["clone", SPACE, "part", "--from", "first", "--root", CHILD_PAGE, "--json"],
+    ));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "clone");
+    assert_eq!(value["result"]["scope"]["root"], json!(CHILD_PAGE), "{value}");
+    let part = parent.path().join("part");
+    let files = |dir: &Path| -> Vec<String> {
+        walk(dir)
+            .into_iter()
+            .filter(|p| {
+                p.ends_with(".md") && !p.ends_with("CLAUDE.md") && !p.ends_with("AGENTS.md")
+            })
+            .collect()
+    };
+    let pulled = files(&part);
+    assert_eq!(pulled.len(), 1, "only the subtree: {pulled:?}");
+    assert!(pulled[0].ends_with("Onboarding.md"), "{pulled:?}");
+
+    assert_eq!(exit_code(&run(confed(&part, &["pull", "--json"]))), 0);
+    assert_eq!(files(&part).len(), 1, "a later pull keeps to it");
+    let config =
+        envelope(&run(confed(&part, &["config", "--get", "scope_root", "--json"])), "config");
+    assert_eq!(config["result"]["value"], json!(CHILD_PAGE), "{config}");
+
+    // A stored rate is read back too.
+    assert_eq!(exit_code(&run(confed(&part, &["config", "--set", "rate", "2", "--json"]))), 0);
+    let config = envelope(&run(confed(&part, &["config", "--get", "rate", "--json"])), "config");
+    assert_eq!(config["result"]["value"], json!("2"), "{config}");
+}
+
+fn walk(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path.to_string_lossy().to_string());
+        }
+    }
+    out
+}
+
 /// `clone --from` takes the instance, the flavor, the user and the token from a
 /// workspace that already has them, so nothing is typed twice and nothing
 /// prompts.

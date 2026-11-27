@@ -13,6 +13,14 @@
       "required": ["init", "pull"],
       "properties": {
         "init": { "description": "As described by init.schema.json.", "type": "object" },
+        "scope": {
+          "type": "object",
+          "description": "The part of the space the workspace is bound to: `--root` (a page id) and `--label`, null when not given — both null for the whole space. Stored as the `scope_root` and `scope_label` settings.",
+          "properties": {
+            "root": { "type": ["string", "null"] },
+            "label": { "type": ["string", "null"] }
+          }
+        },
         "pull": { "description": "As described by pull.schema.json.", "type": "object" }
       }
     },

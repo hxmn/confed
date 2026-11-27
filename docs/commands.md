@@ -200,6 +200,8 @@ exist with content in it.
 | `--from <WORKSPACE>` | Take the base URL, flavor, user and token from an existing workspace. |
 | `--all` | Clone every space, each into `ROOT/<KEY>`. `ROOT` defaults to the current folder. |
 | `--pull` | With `--all`: pull the spaces already cloned instead of skipping them. |
+| `--root <PAGE>` | Sync only this page and the pages below it — an id, URL or title. Stored as `scope_root`, so later fetches and pulls keep to it; pages outside are never written. |
+| `--label <LABEL>` | Sync only pages carrying this label (with `--root`, the subtree's pages that carry it). Stored as `scope_label`. |
 | `--type <global\|personal>` | With `--all`: which spaces to take. Default `global`, which is every space that is not personal. |
 | `--include <KEY>` | With `--all`: take only the spaces named, of either type. Repeatable. |
 | `--exclude <KEY>` | With `--all`: leave this space out. Repeatable; wins over `--include`. |

@@ -23,6 +23,8 @@ fn meta_key(key: &str) -> Option<&'static str> {
         "flavor" => Some("flavor"),
         "concurrency" => Some("concurrency"),
         "rate" => Some("rate"),
+        "scope_root" => Some("scope_root"),
+        "scope_label" => Some("scope_label"),
         "editor" => Some("editor"),
         "comments.marks" => Some(confed_core::sync::MARKS_MODE_KEY),
         "rules_page_id" => Some(config::RULES_PAGE.key),
@@ -303,6 +305,14 @@ fn validate(ctx: &Context, meta: &str, value: &str, force: bool) -> Result<()> {
                 return Err(ConfedError::usage_with_hint(
                     format!("`{value}` is not a concurrency"),
                     "use a positive whole number of requests at once, such as 4",
+                ));
+            }
+        }
+        "scope_root" => {
+            if !value.is_empty() && !value.chars().all(|c| c.is_ascii_digit()) {
+                return Err(ConfedError::usage_with_hint(
+                    format!("`{value}` is not a page id"),
+                    "give the id of the page whose subtree to sync, or unset it for the whole space",
                 ));
             }
         }

@@ -139,9 +139,40 @@ pub const RULES_PAGE: ValueSpec = ValueSpec {
     secret: false,
 };
 
+/// The page whose subtree is all this workspace syncs (`clone --root`).
+/// Workspace-stored only, like the rules page: it decides what the
+/// workspace holds.
+pub const SCOPE_ROOT: ValueSpec = ValueSpec {
+    name: "page whose subtree this workspace syncs",
+    flag: "",
+    env: "",
+    key: "scope_root",
+    secret: false,
+};
+
+/// The label a page must carry for this workspace to sync it
+/// (`clone --label`).
+pub const SCOPE_LABEL: ValueSpec = ValueSpec {
+    name: "label of the pages this workspace syncs",
+    flag: "",
+    env: "",
+    key: "scope_label",
+    secret: false,
+};
+
 /// Every value `confed config --set` accepts.
-pub const SETTABLE: &[ValueSpec] =
-    &[SPACE, CONCURRENCY, RATE, EDITOR, BASE_URL, FLAVOR, COMMENT_MARKS, RULES_PAGE];
+pub const SETTABLE: &[ValueSpec] = &[
+    SPACE,
+    CONCURRENCY,
+    RATE,
+    EDITOR,
+    BASE_URL,
+    FLAVOR,
+    COMMENT_MARKS,
+    RULES_PAGE,
+    SCOPE_ROOT,
+    SCOPE_LABEL,
+];
 
 /// Asks the user for a value. The CLI supplies a TTY implementation; tests and
 /// non-interactive runs supply [`NoPrompt`].

@@ -125,6 +125,7 @@ pub async fn run(ctx: &mut Context, args: &CloneArgs, input: InitInput) -> Resul
     let init_output = init::initialize(ctx, &args.init, input, &dir).await?;
 
     let client = ctx.build_client()?;
+    let scope = bind_scope(ctx, &client, &space_key, args).await?;
     let engine = ctx.engine(client)?;
     let ws = ctx.workspace_mut()?;
     let _lock = ws.lock()?;
@@ -139,11 +140,49 @@ pub async fn run(ctx: &mut Context, args: &CloneArgs, input: InitInput) -> Resul
     );
 
     Ok(Output::new(
-        json!({ "init": init_output.result, "pull": serde_json::to_value(&pull)? }),
+        json!({ "init": init_output.result, "scope": scope, "pull": serde_json::to_value(&pull)? }),
         human,
     )
     .warn_all(init_output.warnings)
     .warn_all(pull.warnings))
+}
+
+/// Store the part of the space `--root` and `--label` bind the workspace to,
+/// before the first pull: the page named, by id, URL or title.
+async fn bind_scope(
+    ctx: &mut Context,
+    client: &std::sync::Arc<dyn confed_api::ConfluenceClient>,
+    space_key: &str,
+    args: &CloneArgs,
+) -> Result<serde_json::Value> {
+    let root = match &args.root {
+        None => None,
+        Some(page) if !page.is_empty() && page.chars().all(|c| c.is_ascii_digit()) => {
+            Some(page.clone())
+        }
+        Some(page) => match crate::pageref::parse(page) {
+            Some(crate::pageref::ParsedUrl {
+                target: crate::pageref::UrlRef::Page { id, .. },
+                ..
+            }) => Some(id),
+            _ => match client.find_page_by_title(space_key, page).await? {
+                Some(found) => Some(found.id.0),
+                None => {
+                    return Err(ConfedError::NotFound(format!(
+                        "no page titled \"{page}\" in space {space_key}"
+                    )))
+                }
+            },
+        },
+    };
+    let state = ctx.workspace()?.state();
+    if let Some(id) = &root {
+        state.set_meta(confed_core::config::SCOPE_ROOT.key, id)?;
+    }
+    if let Some(label) = &args.label {
+        state.set_meta(confed_core::config::SCOPE_LABEL.key, &label.trim().to_lowercase())?;
+    }
+    Ok(json!({ "root": root, "label": args.label.as_ref().map(|l| l.trim().to_lowercase()) }))
 }
 
 /// What became of one space under `--all`.

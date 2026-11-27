@@ -317,6 +317,16 @@ pub struct CloneArgs {
     #[arg(long = "include", value_name = "KEY", requires = "all")]
     pub include: Vec<String>,
 
+    /// Sync only this page and the pages below it: a page id, URL or title.
+    /// Stored, so later fetches and pulls keep to it.
+    #[arg(long, value_name = "PAGE", conflicts_with = "all")]
+    pub root: Option<String>,
+
+    /// Sync only the pages with this label. Stored, as --root is; with
+    /// --root, the pages of the subtree that carry it.
+    #[arg(long, value_name = "LABEL", conflicts_with = "all")]
+    pub label: Option<String>,
+
     /// With --all: leave this space out. Repeatable.
     #[arg(long = "exclude", value_name = "KEY", requires = "all")]
     pub exclude: Vec<String>,

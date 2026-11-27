@@ -407,6 +407,49 @@ impl SyncEngine {
         Ok(self.fetch_tracking(ws, opts).await?.0)
     }
 
+    /// The ids of the listed pages a scope keeps: the root and everything
+    /// below it, and of those (or of the space) the ones with the label.
+    async fn scoped_ids(
+        &self,
+        scope: &crate::workspace::Scope,
+        summaries: &[confed_api::PageSummary],
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut keep: std::collections::HashSet<String> =
+            summaries.iter().map(|s| s.id.0.clone()).collect();
+        if let Some(root) = &scope.root {
+            let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+            for s in summaries {
+                if let Some(parent) = &s.parent_id {
+                    children.entry(parent.as_str()).or_default().push(s.id.as_str());
+                }
+            }
+            let mut subtree = std::collections::HashSet::new();
+            let mut stack = vec![root.as_str()];
+            while let Some(id) = stack.pop() {
+                if subtree.insert(id.to_string()) {
+                    stack.extend(children.get(id).into_iter().flatten().copied());
+                }
+            }
+            keep.retain(|id| subtree.contains(id));
+        }
+        if let Some(label) = &scope.label {
+            let cql = format!(
+                "space = \"{}\" and type = page and label = \"{}\"",
+                self.space.key,
+                label.replace('"', "\\\"")
+            );
+            let labelled: std::collections::HashSet<String> = self
+                .client
+                .search_cql(&cql, 100_000)
+                .await?
+                .into_iter()
+                .map(|r| r.page_id.0)
+                .collect();
+            keep.retain(|id| labelled.contains(id));
+        }
+        Ok(keep)
+    }
+
     /// [`Self::fetch`], also naming the pages whose attachments and comments
     /// this run read, so a pull that must re-read some does not ask twice.
     pub(super) async fn fetch_tracking(
@@ -435,9 +478,16 @@ impl SyncEngine {
         ];
 
         self.progress.stage("Listing pages", None);
-        let summaries = self.client.list_pages(&self.space).await?;
+        let mut summaries = self.client.list_pages(&self.space).await?;
         let mut live: std::collections::HashSet<String> =
             summaries.iter().map(|s| s.id.0.clone()).collect();
+        // A workspace bound to part of the space records only that part:
+        // the rest of the listing is neither stored nor taken for deleted.
+        let scope = ws.scope()?;
+        if !scope.is_whole_space() {
+            let keep = self.scoped_ids(&scope, &summaries).await?;
+            summaries.retain(|s| keep.contains(&s.id.0));
+        }
 
         // A page missing from one listing is not yet gone: the listing pages
         // through a live collection, and a page trashed earlier in the order

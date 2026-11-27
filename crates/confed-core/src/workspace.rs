@@ -23,6 +23,20 @@ pub struct Workspace {
     pub(crate) convert_cache: std::cell::RefCell<Option<crate::sync::CachedContext>>,
 }
 
+/// What part of its space a workspace syncs: a subtree, pages with a label,
+/// both (pages of the subtree with the label), or — both `None` — all of it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Scope {
+    pub root: Option<String>,
+    pub label: Option<String>,
+}
+
+impl Scope {
+    pub fn is_whole_space(&self) -> bool {
+        self.root.is_none() && self.label.is_none()
+    }
+}
+
 impl Workspace {
     /// Open the workspace rooted at `dir`.
     pub fn open(dir: &Path) -> Result<Self> {
@@ -123,6 +137,17 @@ impl Workspace {
         Ok(self.state.get_meta(crate::config::RULES_PAGE.key)?.filter(|id| !id.is_empty()))
     }
 
+    /// The part of the space this workspace syncs, when it is not all of it.
+    pub fn scope(&self) -> Result<Scope> {
+        let get = |key: &str| -> Result<Option<String>> {
+            Ok(self.state.get_meta(key)?.filter(|v| !v.trim().is_empty()))
+        };
+        Ok(Scope {
+            root: get(crate::config::SCOPE_ROOT.key)?,
+            label: get(crate::config::SCOPE_LABEL.key)?,
+        })
+    }
+
     /// Absolute path of a workspace-relative page path.
     pub fn absolute(&self, relative: &str) -> PathBuf {
         self.root.join(relative)
@@ -144,7 +169,7 @@ impl Workspace {
                     out.insert("space".to_string(), value);
                 }
                 "base_url" | "flavor" | "concurrency" | "rate" | "editor" | "comments.marks"
-                | "rules_page_id" => {
+                | "rules_page_id" | "scope_root" | "scope_label" => {
                     out.insert(key, value);
                 }
                 _ => {}
