@@ -1223,6 +1223,36 @@ pub fn remove(ctx: &mut Context, args: &InstanceRemoveArgs) -> Result<Output> {
                 })
                 .map(|p| format!("\n  - {} ({})", p.path, p.state.as_str()))
                 .collect();
+            let mut dirty = dirty;
+            // Files attached, changed or removed and not pushed are local work
+            // too, which no page's state shows.
+            for record in ws.state().all_pages_meta()? {
+                let sidecar = ws.absolute(&confed_core::paths::sidecar_for(&record.local_path));
+                let recorded = ws.state().page_attachments(&record.page_id)?;
+                let pending = confed_core::attachments::diff_attachments(&sidecar, &recorded)?;
+                if !pending.is_empty() {
+                    dirty.push(format!(
+                        "\n  - {} ({} unpushed)",
+                        record.local_path,
+                        if pending.len() == 1 {
+                            "1 attachment".to_string()
+                        } else {
+                            format!("{} attachments", pending.len())
+                        }
+                    ));
+                }
+            }
+            // A move between spaces that is not finished still needs the
+            // workspace to finish, or to undo.
+            for entry in instance.journal_unfinished()? {
+                let key = |side: &str| entry.plan[side]["key"].as_str().map(str::to_string);
+                if [key("source"), key("dest")].contains(&Some(member.space_key.clone())) {
+                    dirty.push(format!(
+                        "\n  - the unfinished move {} (`confed instance resume` or `abort` it first)",
+                        entry.id
+                    ));
+                }
+            }
             if !dirty.is_empty() {
                 return Err(ConfedError::state_with_hint(
                     format!(

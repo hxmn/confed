@@ -948,6 +948,24 @@ async fn a_dry_run_move_of_an_unpushed_file_moves_nothing() {
     assert!(!draft.exists() && root.path().join("ENG/Draft.md").exists());
 }
 
+/// `instance remove --delete-files` refuses while the workspace holds work no
+/// page state shows: an attachment never pushed.
+#[tokio::test]
+async fn removing_with_files_keeps_a_workspace_with_unpushed_attachments() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+    let sidecar = root.path().join("DOCS/.Team Handbook");
+    std::fs::create_dir_all(&sidecar).unwrap();
+    std::fs::write(sidecar.join("new.png"), b"png").unwrap();
+
+    let out = run(root.path(), &["instance", "remove", "DOCS", "--delete-files", "--json"]);
+    assert_eq!(code(&out), 7, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert!(env["errors"][0]["message"].as_str().unwrap().contains("unpushed"), "{env}");
+    assert!(sidecar.join("new.png").exists());
+    assert!(root.path().join("DOCS/Team Handbook.md").exists());
+}
+
 #[tokio::test]
 async fn a_move_into_a_workspace_that_will_not_open_says_why() {
     let (server, _) = server().await;
