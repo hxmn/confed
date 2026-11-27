@@ -894,6 +894,22 @@ async fn status_reports_every_space_and_one_failing_space_is_exit_8() {
 }
 
 #[tokio::test]
+async fn a_dry_run_move_with_push_first_is_refused_before_any_write() {
+    let (server, confluence) = server().await;
+    let root = instance_root(&server);
+    let file = root.path().join("DOCS/Team Handbook/Onboarding.md");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("{text}\nAn unpushed line.\n")).unwrap();
+
+    let out = run(
+        root.path(),
+        &["instance", "mv", "1002", "ENG:", "--push-first", "-m", "tidy", "--dry-run", "--json"],
+    );
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    assert!(confluence.world().writes.is_empty(), "{:?}", confluence.world().writes);
+}
+
+#[tokio::test]
 async fn a_page_tree_moves_to_another_space_and_both_end_clean() {
     let (server, confluence) = server().await;
     let root = instance_root(&server);

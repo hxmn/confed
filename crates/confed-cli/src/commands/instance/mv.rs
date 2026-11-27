@@ -175,6 +175,15 @@ pub async fn run(
             "a new path names one page; to move several, name the parent they go under",
         ));
     }
+    // `--push-first` writes to the server before the plan is made, which a
+    // dry run promises not to do.
+    if args.push_first && args.dry_run {
+        return Err(ConfedError::usage_with_hint(
+            "--push-first pushes before the move, so it cannot be part of a dry run",
+            "preview the push with `confed push --dry-run` in the source space, or drop \
+             --push-first: the dry run then lists the pages with unpushed edits",
+        ));
+    }
     if args.push_first && args.message.as_deref().is_none_or(str::is_empty) {
         return Err(ConfedError::usage("--push-first needs -m \"why\""));
     }

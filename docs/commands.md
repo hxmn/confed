@@ -1333,7 +1333,7 @@ Everything is checked before anything is written. Both spaces are fetched first,
 every problem is listed together (exit 7, or 2 for bad arguments):
 
 - every page in the subtree, and the new parent, is in sync: no local edits, conflicts,
-  unpushed comment drafts or attachment changes (`--push-first -m …` pushes them first)
+  unpushed comment drafts or attachment changes (`--push-first -m …` pushes them first; it cannot be combined with `--dry-run`)
 - no title is already used in the destination. `--on-conflict suffix` appends
   ` (KEY)`, and `--title-map FILE` takes `{"<page id or title>": "<new title>"}`.
 - the page is not a home page. A subtree holding the source's rules page needs `--yes`.
