@@ -331,7 +331,6 @@ async fn init_creates_the_workspace_and_reports_it_in_the_envelope() {
     assert!(!stderr(&output).contains("pat-token"), "the token leaked into stderr");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn init_over_plain_http_warns_unless_the_server_is_this_machine() {
     // The test server is on 127.0.0.1: loopback, so no warning.
@@ -343,6 +342,7 @@ async fn init_over_plain_http_warns_unless_the_server_is_this_machine() {
     assert!(!value["warnings"].to_string().contains("plain http"), "{value}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_session_database_is_private_to_its_owner() {
     use std::os::unix::fs::PermissionsExt;
