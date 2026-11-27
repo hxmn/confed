@@ -1627,7 +1627,13 @@ impl SyncEngine {
         file.frontmatter.managed = Some(Managed {
             schema: crate::frontmatter::SCHEMA_VERSION,
             page_id: summary.id.0.clone(),
-            space_key: summary.space_key.clone().max(ws.space_key().unwrap_or_default()),
+            // The server's answer names the space, when it does; else this
+            // workspace's. Not the larger of the two strings.
+            space_key: if summary.space_key.is_empty() {
+                ws.space_key().unwrap_or_default()
+            } else {
+                summary.space_key.clone()
+            },
             version: summary.version,
             status: summary.status.as_str().to_string(),
             position: summary.position,
