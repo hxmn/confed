@@ -380,6 +380,25 @@ both_flavors!(a_link_to_a_page_not_pulled_goes_back_as_a_page_link, |mut h: Harn
     assert!(body.contains("<ac:link"), "{body}");
 });
 
+both_flavors!(a_page_one_listing_skipped_is_not_taken_for_deleted, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Kept", None, "<p>Kept.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Other.</p>");
+    h.pull().await;
+
+    h.mock.skip_in_listing("1001", true);
+    let fetch = h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    assert!(fetch.deleted_on_remote.is_empty(), "{:?}", fetch.deleted_on_remote);
+    let pull = h.pull().await;
+    assert!(pull.deleted.is_empty(), "{pull:?}");
+    assert!(h.path("Kept.md").exists());
+
+    // Deleted for real, it goes.
+    h.mock.skip_in_listing("1001", false);
+    h.mock.delete_page_directly("1001");
+    let pull = h.pull().await;
+    assert_eq!(pull.deleted.len(), 1, "{pull:?}");
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

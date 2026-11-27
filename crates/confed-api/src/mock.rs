@@ -44,6 +44,9 @@ struct MockState {
     comment_listings_down: Vec<String>,
     /// Pages whose body cannot be fetched.
     pages_down: Vec<String>,
+    /// Pages the listing skips although they exist, as a page list that
+    /// shifted under its paginator would.
+    skipped_in_listing: Vec<String>,
     /// When each attachment was added or last given a new version.
     attachment_modified: HashMap<String, SystemTime>,
     /// Pages whose attachments were listed, in order.
@@ -436,6 +439,17 @@ impl MockClient {
         }
     }
 
+    /// Leave `page_id` out of the page listing while `skipped`, though it
+    /// still exists: what a paginated listing that shifted between two
+    /// requests returns.
+    pub fn skip_in_listing(&self, page_id: &str, skipped: bool) {
+        let mut state = self.state.lock().expect("mock poisoned");
+        state.skipped_in_listing.retain(|p| p != page_id);
+        if skipped {
+            state.skipped_in_listing.push(page_id.to_string());
+        }
+    }
+
     /// Bring back a page deleted with [`Self::delete_page_directly`], as
     /// restoring it from the trash would: same version, same body.
     pub fn restore_page_directly(&self, id: &str) {
@@ -759,6 +773,7 @@ impl ConfluenceClient for MockClient {
             .pages
             .values()
             .filter(|p| !p.deleted && p.summary.space_key == space.key)
+            .filter(|p| !state.skipped_in_listing.contains(&p.summary.id.0))
             .map(|p| p.summary.clone())
             .collect();
         pages.sort_by(|a, b| a.id.0.cmp(&b.id.0));

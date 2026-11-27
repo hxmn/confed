@@ -427,7 +427,45 @@ impl SyncEngine {
 
         self.progress.stage("Listing pages", None);
         let summaries = self.client.list_pages(&self.space).await?;
-        let live: Vec<String> = summaries.iter().map(|s| s.id.0.clone()).collect();
+        let mut live: std::collections::HashSet<String> =
+            summaries.iter().map(|s| s.id.0.clone()).collect();
+
+        // A page missing from one listing is not yet gone: the listing pages
+        // through a live collection, and a page trashed earlier in the order
+        // between two requests shifts the rest, so one is skipped. Each such
+        // page — there are few — is asked for by itself, and only one the
+        // server says is gone is marked deleted.
+        let vanished: Vec<String> = state
+            .remote_index()?
+            .into_iter()
+            .filter(|r| !r.deleted && !live.contains(&r.page_id))
+            .map(|r| r.page_id)
+            .collect();
+        for page_id in vanished {
+            let gone = match self.client.get_page(&PageId::new(&page_id), BodyFormat::Storage).await
+            {
+                Ok(page) => {
+                    matches!(
+                        page.summary.status,
+                        confed_api::PageStatus::Trashed | confed_api::PageStatus::Deleted
+                    ) || (!page.summary.space_key.is_empty()
+                        && page.summary.space_key != self.space.key)
+                }
+                Err(confed_api::ApiError::NotFound(_)) => true,
+                // Not known to be gone; the next fetch asks again.
+                Err(e) => {
+                    tracing::debug!(
+                        target: "confed::sync",
+                        page = %page_id, error = %e,
+                        "a page missing from the listing could not be looked up"
+                    );
+                    false
+                }
+            };
+            if !gone {
+                live.insert(page_id);
+            }
+        }
 
         // What the listing says about every page goes in as one write: a
         // first fetch of a large space is thousands of rows, and a fetch
