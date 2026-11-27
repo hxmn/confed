@@ -358,6 +358,14 @@ impl Http {
         // Ids go into paths as they are; one that is `..`, or holds it, would
         // name another endpoint of the same server, with the credential.
         let route = path.split(['?', '#']).next().unwrap_or("");
+        // `Url::join` also takes `\` for a separator and drops tabs and line
+        // breaks, so `1001\..\..` or `.\t.` would climb all the same: such a
+        // path is refused outright.
+        if route.contains(|c: char| c == '\\' || c.is_control()) {
+            return Err(ApiError::Url(format!(
+                "{path:?}: a path with a backslash or a control character"
+            )));
+        }
         if route.split('/').any(|segment| {
             let segment = segment.to_ascii_lowercase().replace("%2e", ".");
             segment == "." || segment == ".."
@@ -1097,6 +1105,17 @@ mod tests {
         }
         assert!(http.url("rest/api/content/1001?expand=a..b").is_ok(), "dots in a query are fine");
         assert!(http.url("download/attachments/1001/v1.2.png").is_ok());
+    }
+
+    #[test]
+    fn a_backslash_or_a_control_character_cannot_climb_out_of_a_route() {
+        let http = Http::new("https://wiki.example.test/confluence", Auth::None, 4).unwrap();
+        for path in
+            ["rest/api/content/1001\\..\\..\\..\\admin/users", "rest/api/content/.\t./.\t./x"]
+        {
+            assert!(http.url(path).is_err(), "{path:?} was accepted");
+        }
+        assert!(http.url("rest/api/content/1001").is_ok());
     }
 
     #[test]
