@@ -322,8 +322,8 @@ impl Instance {
 
     /// The member whose directory holds `path`, if any.
     pub fn member_for_path(&self, path: &Path) -> Result<Option<Member>> {
-        let root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let root = canonicalize_existing(&self.root);
+        let path = canonicalize_existing(path);
         let Ok(relative) = path.strip_prefix(&root) else { return Ok(None) };
         let relative = relative.to_string_lossy().replace('\\', "/");
         Ok(self
@@ -518,9 +518,51 @@ pub fn ensure_gitignore(root: &Path) -> Result<Vec<String>> {
     Ok(missing)
 }
 
+/// `path` canonicalized as far as it exists, with the rest appended as given.
+///
+/// A path that does not exist yet — the destination of a move — cannot be
+/// canonicalized itself, and comparing it as typed with a canonical root
+/// fails where the two differ in form: `/var` against `/private/var` on
+/// macOS, a verbatim `\\?\` prefix on Windows.
+pub fn canonicalize_existing(path: &Path) -> std::path::PathBuf {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            return missing.iter().rev().fold(canonical, |acc, part| acc.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As on macOS, where the temporary directory is reached through a
+    /// symlink: a path that does not exist yet still lands under the
+    /// canonical root.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_not_there_yet_is_canonicalized_through_its_existing_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("ENG")).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+
+        let typed = dir.path().join("link/ENG/Engineering Home/Policies.md");
+        let canonical = canonicalize_existing(&typed);
+        assert_eq!(
+            canonical,
+            real.canonicalize().unwrap().join("ENG/Engineering Home/Policies.md")
+        );
+    }
 
     fn root() -> (tempfile::TempDir, Instance) {
         let dir = tempfile::tempdir().unwrap();

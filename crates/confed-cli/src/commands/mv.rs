@@ -214,14 +214,8 @@ fn refuse_other_space(ctx: &Context, source: &str, destination: &str) -> Result<
             if member.space_key.eq_ignore_ascii_case(&own) {
                 return Ok(());
             }
-            let dir = instance.member_dir(&member);
-            let dir = dir.canonicalize().unwrap_or(dir);
-            let parent =
-                absolute.parent().map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
-            let absolute = match (parent, absolute.file_name()) {
-                (Some(parent), Some(name)) => parent.join(name),
-                _ => absolute,
-            };
+            let dir = confed_core::instance::canonicalize_existing(&instance.member_dir(&member));
+            let absolute = confed_core::instance::canonicalize_existing(&absolute);
             let rest = absolute
                 .strip_prefix(&dir)
                 .map(|p| p.to_string_lossy().replace('\\', "/"))
