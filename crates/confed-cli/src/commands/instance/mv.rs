@@ -185,7 +185,7 @@ pub async fn run(
         ));
     }
     if let [Found::LocalOnly { member, path }] = sources.as_slice() {
-        return move_local_file(&instance, member, path, &dest);
+        return move_local_file(ctx, &instance, member, path, &dest, args.dry_run);
     }
     let mut root_ids = Vec::new();
     for (source, reference) in sources.iter().zip(named) {
@@ -674,10 +674,12 @@ async fn placement(
 /// A file that was never pushed is just a file: it moves like one, into the
 /// destination's tree, and the next push there creates it.
 fn move_local_file(
+    ctx: &Context,
     instance: &Instance,
     member: &Member,
     path: &str,
     dest: &Found,
+    dry_run: bool,
 ) -> Result<Output> {
     let src = instance.open_workspace(member)?;
     let dest_member = dest.member().clone();
@@ -710,6 +712,40 @@ fn move_local_file(
             dest_member.space_key
         )));
     }
+    let report = |dry_run: bool| {
+        json!({
+            "local_only": true,
+            "dry_run": dry_run,
+            "moved": [{
+                "page_id": null,
+                "from": { "space": member.space_key, "path": path },
+                "to": { "space": dest_member.space_key, "path": target },
+            }],
+            "links_rewritten": [],
+            "warnings": [],
+            "journal_id": null,
+        })
+    };
+    let what = format!("{}:{path} -> {}:{target}", member.space_key, dest_member.space_key);
+    if dry_run {
+        return Ok(Output::new(
+            report(true),
+            format!("Would move {what} (a new page, only on disk). Nothing was changed.\n"),
+        ));
+    }
+    // Asked like any other move: the file, its children's folder and its
+    // sidecar change workspace.
+    if !ctx.global.yes {
+        if !ctx.is_interactive() {
+            return Err(ConfedError::usage_with_hint(
+                format!("moving {what} moves files between workspaces; confed asks first"),
+                "review it with --dry-run, then pass --yes",
+            ));
+        }
+        if !crate::prompt::confirm(&format!("Move {what}?"), false)? {
+            return Ok(Output::new(json!({ "cancelled": true }), "Cancelled.\n"));
+        }
+    }
     for (from, to) in [
         (path.to_string(), target.clone()),
         (paths::children_dir(path), paths::children_dir(&target)),
@@ -738,21 +774,8 @@ fn move_local_file(
         confed_core::sync::prune_empty_dirs(src.root(), &src.root().join(dir));
     }
     Ok(Output::new(
-        json!({
-            "local_only": true,
-            "moved": [{
-                "page_id": null,
-                "from": { "space": member.space_key, "path": path },
-                "to": { "space": dest_member.space_key, "path": target },
-            }],
-            "links_rewritten": [],
-            "warnings": [],
-            "journal_id": null,
-        }),
-        format!(
-            "Moved {}:{path} -> {}:{target} (a new page: `confed -C {} push` creates it)\n",
-            member.space_key, dest_member.space_key, dest_member.dir
-        ),
+        report(false),
+        format!("Moved {what} (a new page: `confed -C {} push` creates it)\n", dest_member.dir),
     ))
 }
 

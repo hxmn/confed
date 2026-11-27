@@ -894,6 +894,30 @@ async fn status_reports_every_space_and_one_failing_space_is_exit_8() {
 }
 
 #[tokio::test]
+async fn a_dry_run_move_of_an_unpushed_file_moves_nothing() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+    let draft = root.path().join("DOCS/Team Handbook/Draft.md");
+    std::fs::write(&draft, "---\ntitle: Draft\n---\n\nNot pushed yet.\n").unwrap();
+    let src = "DOCS:Team Handbook/Draft.md";
+
+    let out = run(root.path(), &["instance", "mv", src, "ENG:", "--dry-run", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert_eq!(env["result"]["dry_run"], json!(true), "{env}");
+    assert!(draft.exists(), "a dry run moves nothing");
+    assert!(!root.path().join("ENG/Draft.md").exists());
+
+    // A real run asks; unattended, only --yes answers.
+    let out = run(root.path(), &["instance", "mv", src, "ENG:", "--json"]);
+    assert_eq!(code(&out), 2, "{}", stderr(&out));
+    assert!(draft.exists());
+    let out = run(root.path(), &["instance", "mv", src, "ENG:", "--yes", "--json"]);
+    assert_eq!(code(&out), 0, "{}", stderr(&out));
+    assert!(!draft.exists() && root.path().join("ENG/Draft.md").exists());
+}
+
+#[tokio::test]
 async fn a_move_into_a_workspace_that_will_not_open_says_why() {
     let (server, _) = server().await;
     let root = instance_root(&server);
