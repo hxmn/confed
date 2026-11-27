@@ -7,6 +7,10 @@ on:
   # releasing or publishing anything: to try this workflow before a tag.
   workflow_dispatch:
 
+# Jobs that need more say so.
+permissions:
+  contents: read
+
 jobs:
   # What CI checks, again for the tagged commit itself: nothing irrevocable
   # happens unless it passes.
@@ -14,9 +18,21 @@ jobs:
     name: tests and package check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Before the GitHub release is made, not only before the publish.
+      - name: The tag names the version in Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "confed") | .version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME, but Cargo.toml says $version" >&2
+            exit 1
+          fi
       - run: cargo test --locked --workspace
       - run: cargo publish --locked --workspace --dry-run
 
@@ -40,9 +56,10 @@ jobs:
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - run: cargo build --locked --release -p confed --target ${{ matrix.target }}
       - name: Package
@@ -66,7 +83,7 @@ jobs:
             shasum -a 256 "$archive" > "$archive.sha256"
           fi
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.target }}
           path: |
@@ -84,8 +101,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -110,7 +127,7 @@ jobs:
             echo "::warning::not built:$missing"
             printf '\n> Not built for this release:%s\n' "$missing" >> notes.md
           fi
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           body_path: notes.md
           files: dist/*
@@ -132,8 +149,10 @@ jobs:
       # short-lived crates.io token; no secret is stored in the repository.
       id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: stable
       - name: The tag names the version being published
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
@@ -142,7 +161,7 @@ jobs:
             echo "tag $GITHUB_REF_NAME, but Cargo.toml says $version" >&2
             exit 1
           fi
-      - uses: rust-lang/crates-io-auth-action@v1
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
         id: auth
       # Publishes all eight crates, each after those it depends on, each
       # verified by building it from its own package first.

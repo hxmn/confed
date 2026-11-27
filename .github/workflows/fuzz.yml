@@ -7,6 +7,9 @@ on:
     - cron: "17 3 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   fuzz:
     name: fuzz ${{ matrix.target }}
@@ -16,8 +19,10 @@ jobs:
       matrix:
         target: [storage, markdown]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly
       - run: cargo install cargo-fuzz --locked
       - name: Fuzz
         working-directory: crates/confed-converter
@@ -31,7 +36,7 @@ jobs:
           cargo fuzz run ${{ matrix.target }} "fuzz/corpus/${{ matrix.target }}" "$seeds" \
             -- -max_total_time=600
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: crash-${{ matrix.target }}
           path: crates/confed-converter/fuzz/artifacts
