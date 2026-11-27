@@ -70,14 +70,17 @@ pub fn run(ctx: &mut Context, args: &StatusArgs) -> Result<Output> {
 }
 
 pub async fn run_with_fetch(ctx: &mut Context, args: &StatusArgs) -> Result<Output> {
+    let mut stale = Vec::new();
     if args.fetch {
         let client = ctx.build_client()?;
         let engine = ctx.engine(client)?;
         let ws = ctx.workspace_mut()?;
-        engine.fetch(ws, &Default::default()).await?;
+        // A fetch writes the state: one at a time, as every command that does.
+        let _lock = ws.lock()?;
+        stale = engine.fetch(ws, &Default::default()).await?.staleness_warnings();
     }
     let scan = worktree::scan(ctx.workspace()?)?;
-    render(ctx, args, scan)
+    Ok(render(ctx, args, scan)?.warn_all(stale))
 }
 
 fn render(ctx: &Context, args: &StatusArgs, scan: Scan) -> Result<Output> {

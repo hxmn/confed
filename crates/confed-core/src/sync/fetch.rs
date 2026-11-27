@@ -115,6 +115,27 @@ impl FetchOutcome {
         ))
     }
 
+    /// What a command that fetches first — `status --fetch`, `diff --remote`
+    /// — must say for what it then shows not to pass for current: pages that
+    /// could not be read, a fetch cut short, and the checks above.
+    pub fn staleness_warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.interrupted {
+            out.push("the fetch was stopped part-way; what is shown is partly older".to_string());
+        }
+        if !self.failed.is_empty() {
+            let names: Vec<&str> = self.failed.iter().map(|f| f.title.as_str()).collect();
+            out.push(format!(
+                "{} could not be read from the server, and {} shown as of the last fetch: {}",
+                if self.failed.len() == 1 { "1 page" } else { "some pages" },
+                if self.failed.len() == 1 { "is" } else { "are" },
+                names.join(", ")
+            ));
+        }
+        out.extend(self.check_warnings());
+        out
+    }
+
     /// Both of the above, for whoever reports a fetch.
     pub fn check_warnings(&self) -> Vec<String> {
         self.attachment_check_warning().into_iter().chain(self.comment_check_warning()).collect()

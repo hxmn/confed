@@ -1301,6 +1301,46 @@ async fn an_old_version_is_shown_compared_and_restored() {
     assert_eq!(pushed["result"]["push"]["pushed"].as_array().map(Vec::len), Some(1), "{pushed}");
 }
 
+/// `status --fetch` says when what it shows is partly older than the fetch:
+/// a page whose new version could not be read.
+#[tokio::test]
+async fn status_fetch_warns_about_a_page_it_could_not_read() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+
+    // The listing now has a newer version of the root, which will not load.
+    Mock::given(method("GET"))
+        .and(path("/rest/api/content"))
+        .and(query_param("spaceKey", SPACE))
+        .and(query_param("type", "page"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                summary(ROOT_PAGE, "Team Handbook", None, 4),
+                summary(CHILD_PAGE, "Onboarding", Some(ROOT_PAGE), 1),
+            ],
+            "start": 0, "limit": 100, "size": 2, "_links": {}
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{ROOT_PAGE}")))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let output = run(confed_authed(dir.path(), &["status", "--fetch", "--json"]));
+    let value = envelope(&output, "status");
+    let warnings = value["warnings"].to_string();
+    assert!(
+        warnings.contains("could not be read") && warnings.contains("Team Handbook"),
+        "{value}"
+    );
+}
+
 #[tokio::test]
 async fn version_reports_the_compatibility_contract_and_the_release_notes() {
     // Deliberately not a workspace: an agent must be able to ask what confed is

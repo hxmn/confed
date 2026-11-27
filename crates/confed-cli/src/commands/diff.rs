@@ -53,14 +53,16 @@ pub async fn run_remote(ctx: &mut Context, args: &DiffArgs) -> Result<Output> {
         let diffs = against_version(ctx, args, number).await?;
         return render(ctx, args, diffs);
     }
+    let mut stale = Vec::new();
     if args.remote {
         let client = ctx.build_client()?;
         let engine = ctx.engine(client)?;
         let ws = ctx.workspace_mut()?;
-        engine.fetch(ws, &Default::default()).await?;
+        let _lock = ws.lock()?;
+        stale = engine.fetch(ws, &Default::default()).await?.staleness_warnings();
     }
     let diffs = collect(ctx, args, args.remote)?;
-    render(ctx, args, diffs)
+    Ok(render(ctx, args, diffs)?.warn_all(stale))
 }
 
 /// `diff <page> --version N`: the file against that version on the server.
