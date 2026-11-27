@@ -185,6 +185,100 @@ pub fn selection_error(
 }
 
 impl SyncEngine {
+    /// Post one page's comment drafts and resolve requests, rewriting its
+    /// sidecar after each so a failure part-way posts nothing twice.
+    async fn push_page_comments(
+        &self,
+        ws: &mut Workspace,
+        record: &PageRecord,
+        page_id: &PageId,
+        path: &std::path::Path,
+        sidecar: &mut comments::Sidecar,
+        work: &mut CommentWork,
+    ) -> Result<()> {
+        while let Some(index) = sidecar.comments.iter().position(|c| c.is_draft()) {
+            let draft = sidecar.comments[index].clone();
+            let storage = confed_converter::markdown_to_storage(
+                &draft.body,
+                &comment_convert_options(ws, &record.local_path)?,
+            )?;
+            let posted = match &draft.anchor {
+                Some(anchor) if draft.kind == comments::SidecarKind::Inline => {
+                    self.require_inline_create()?;
+                    let occurrence = anchor.match_index.map(|i| i + 1);
+                    let page = self.client.get_page(page_id, BodyFormat::Storage).await?;
+                    let local = local_body(ws, &record.local_path);
+                    let selection = server_selection(
+                        &page.body_storage,
+                        &anchor.text,
+                        occurrence,
+                        local.as_deref(),
+                        &record.local_path,
+                    )?;
+                    let posted =
+                        self.client.add_inline_comment(page_id, &selection, &storage).await?;
+                    ws.state().upsert_comment(&comment_record(&record.page_id, &posted))?;
+                    self.adopt_comment_version(ws, &record.page_id, &posted).await?;
+                    posted
+                }
+                _ => {
+                    let parent = draft.reply_to.as_deref().map(confed_api::CommentId::new);
+                    let parent_is_inline = parent.as_ref().is_some_and(|p| {
+                        ws.state().page_comments(&record.page_id).is_ok_and(|all| {
+                            all.iter().any(|c| c.comment_id == p.0 && c.kind == "inline")
+                        })
+                    });
+                    let posted = match &parent {
+                        // Inline threads are one level deep: a reply to a
+                        // reply goes to the thread, as the web UI does it.
+                        Some(parent) if parent_is_inline => {
+                            let root = thread_root(ws, &record.page_id, parent)?;
+                            self.client.add_inline_reply(page_id, &root, &storage).await?
+                        }
+                        _ => {
+                            self.client
+                                .add_footer_comment(page_id, &storage, parent.as_ref())
+                                .await?
+                        }
+                    };
+                    ws.state().upsert_comment(&comment_record(&record.page_id, &posted))?;
+                    posted
+                }
+            };
+            if posted.parent_comment_id.is_some() {
+                work.replies.push(posted.id.0);
+            } else {
+                work.added.push(posted.id.0);
+            }
+            // Posted: out of the sidecar now, so a failure later in this
+            // push cannot post it twice on the retry.
+            sidecar.comments.remove(index);
+            self.rewrite_sidecar(ws, record, path, sidecar)?;
+        }
+
+        while let Some(id) = sidecar.resolve_requests.first().cloned() {
+            if !self.client.capabilities().comment_resolve {
+                return Err(ConfedError::Unsupported(format!(
+                    "resolving comments is not available on Confluence {}",
+                    self.client.flavor()
+                )));
+            }
+            self.client.resolve_comment(&confed_api::CommentId::new(&id)).await?;
+            if let Some(mut c) =
+                ws.state().page_comments(&record.page_id)?.into_iter().find(|c| c.comment_id == id)
+            {
+                c.resolved = true;
+                ws.state().upsert_comment(&c)?;
+            }
+            work.resolved.push(id.clone());
+            sidecar.resolve_requests.remove(0);
+            self.rewrite_sidecar(ws, record, path, sidecar)?;
+        }
+        // The resolved threads' marks leave the body.
+        sync_marks(ws, &record.page_id, &record.local_path)?;
+        Ok(())
+    }
+
     pub(super) async fn push_comments(
         &self,
         ws: &mut Workspace,
@@ -209,89 +303,17 @@ impl SyncEngine {
                 continue;
             }
 
-            while let Some(index) = sidecar.comments.iter().position(|c| c.is_draft()) {
-                let draft = sidecar.comments[index].clone();
-                let storage = confed_converter::markdown_to_storage(
-                    &draft.body,
-                    &comment_convert_options(ws, &record.local_path)?,
-                )?;
-                let posted = match &draft.anchor {
-                    Some(anchor) if draft.kind == comments::SidecarKind::Inline => {
-                        self.require_inline_create()?;
-                        let occurrence = anchor.match_index.map(|i| i + 1);
-                        let page = self.client.get_page(&page_id, BodyFormat::Storage).await?;
-                        let local = local_body(ws, &record.local_path);
-                        let selection = server_selection(
-                            &page.body_storage,
-                            &anchor.text,
-                            occurrence,
-                            local.as_deref(),
-                            &record.local_path,
-                        )?;
-                        let posted =
-                            self.client.add_inline_comment(&page_id, &selection, &storage).await?;
-                        ws.state().upsert_comment(&comment_record(&record.page_id, &posted))?;
-                        self.adopt_comment_version(ws, &record.page_id, &posted).await?;
-                        posted
-                    }
-                    _ => {
-                        let parent = draft.reply_to.as_deref().map(confed_api::CommentId::new);
-                        let parent_is_inline = parent.as_ref().is_some_and(|p| {
-                            ws.state().page_comments(&record.page_id).is_ok_and(|all| {
-                                all.iter().any(|c| c.comment_id == p.0 && c.kind == "inline")
-                            })
-                        });
-                        let posted = match &parent {
-                            // Inline threads are one level deep: a reply to a
-                            // reply goes to the thread, as the web UI does it.
-                            Some(parent) if parent_is_inline => {
-                                let root = thread_root(ws, &record.page_id, parent)?;
-                                self.client.add_inline_reply(&page_id, &root, &storage).await?
-                            }
-                            _ => {
-                                self.client
-                                    .add_footer_comment(&page_id, &storage, parent.as_ref())
-                                    .await?
-                            }
-                        };
-                        ws.state().upsert_comment(&comment_record(&record.page_id, &posted))?;
-                        posted
-                    }
-                };
-                if posted.parent_comment_id.is_some() {
-                    work.replies.push(posted.id.0);
-                } else {
-                    work.added.push(posted.id.0);
-                }
-                // Posted: out of the sidecar now, so a failure later in this
-                // push cannot post it twice on the retry.
-                sidecar.comments.remove(index);
-                self.rewrite_sidecar(ws, &record, &path, &sidecar)?;
+            // One page's failure is reported with the others', not raised:
+            // what this push already sent must still reach the caller.
+            if let Err(e) =
+                self.push_page_comments(ws, &record, &page_id, &path, &mut sidecar, &mut work).await
+            {
+                work.failed.push(FailedPage {
+                    page_id: record.page_id.clone(),
+                    title: record.title.clone(),
+                    error: e.to_string(),
+                });
             }
-
-            while let Some(id) = sidecar.resolve_requests.first().cloned() {
-                if !self.client.capabilities().comment_resolve {
-                    return Err(ConfedError::Unsupported(format!(
-                        "resolving comments is not available on Confluence {}",
-                        self.client.flavor()
-                    )));
-                }
-                self.client.resolve_comment(&confed_api::CommentId::new(&id)).await?;
-                if let Some(mut c) = ws
-                    .state()
-                    .page_comments(&record.page_id)?
-                    .into_iter()
-                    .find(|c| c.comment_id == id)
-                {
-                    c.resolved = true;
-                    ws.state().upsert_comment(&c)?;
-                }
-                work.resolved.push(id.clone());
-                sidecar.resolve_requests.remove(0);
-                self.rewrite_sidecar(ws, &record, &path, &sidecar)?;
-            }
-            // The resolved threads' marks leave the body.
-            sync_marks(ws, &record.page_id, &record.local_path)?;
         }
 
         // Page files confed does not track (a page removed with `confed rm`

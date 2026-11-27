@@ -756,47 +756,68 @@ impl SyncEngine {
     ) -> Result<Vec<confed_api::Attachment>> {
         let mut uploaded = Vec::new();
         for op in ops {
-            let page_id = PageId::new(&op.page_id);
-            let sidecar = ws.absolute(&paths::sidecar_for(&op.path));
-            let file = sidecar.join(&op.filename);
-
-            match op.kind {
-                AttachmentOpKind::Upload | AttachmentOpKind::Reupload => {
-                    let existing = op.attachment_id.as_deref().map(confed_api::AttachmentId::new);
-                    let attachment =
-                        self.client.upload_attachment(&page_id, &file, existing.as_ref()).await?;
-
-                    ws.state().upsert_attachment(&AttachmentRecord {
-                        attachment_id: attachment.id.0.clone(),
-                        page_id: op.page_id.clone(),
-                        filename: attachment.filename.clone(),
-                        media_type: attachment.media_type.clone(),
-                        file_size: attachments::file_size(&file),
-                        version: attachment.version,
-                        sha256: attachments::file_sha256(&file).ok(),
-                        downloaded: true,
-                    })?;
-                    outcome.attachments_uploaded.push(op.file.clone());
-                    uploaded.push(attachment);
-                }
-                // Deleting an attachment removes content from the server, so it
-                // follows the same explicit opt-in as deleting a page — and is
-                // reported as skipped rather than dropped on the floor.
-                AttachmentOpKind::Delete => {
-                    let Some(attachment_id) = &op.attachment_id else { continue };
-                    if !opts.deletes_attachments() {
-                        outcome.skipped.push(blocked_attachment(op));
-                        continue;
-                    }
-                    self.client
-                        .delete_attachment(&confed_api::AttachmentId::new(attachment_id))
-                        .await?;
-                    ws.state().delete_attachment(attachment_id)?;
-                    outcome.attachments_deleted.push(op.file.clone());
-                }
+            // One file's failure is reported with the pages', not raised: what
+            // this push already sent must still reach the caller.
+            match self.push_attachment(ws, opts, op, outcome).await {
+                Ok(Some(attachment)) => uploaded.push(attachment),
+                Ok(None) => {}
+                Err(e) => outcome.failed.push(FailedPage {
+                    page_id: op.page_id.clone(),
+                    title: op.path.clone(),
+                    error: format!("{}: {e}", op.file),
+                }),
             }
         }
         Ok(uploaded)
+    }
+
+    async fn push_attachment(
+        &self,
+        ws: &mut Workspace,
+        opts: &PushOptions,
+        op: &AttachmentOp,
+        outcome: &mut PushOutcome,
+    ) -> Result<Option<confed_api::Attachment>> {
+        let page_id = PageId::new(&op.page_id);
+        let sidecar = ws.absolute(&paths::sidecar_for(&op.path));
+        let file = sidecar.join(&op.filename);
+
+        match op.kind {
+            AttachmentOpKind::Upload | AttachmentOpKind::Reupload => {
+                let existing = op.attachment_id.as_deref().map(confed_api::AttachmentId::new);
+                let attachment =
+                    self.client.upload_attachment(&page_id, &file, existing.as_ref()).await?;
+
+                ws.state().upsert_attachment(&AttachmentRecord {
+                    attachment_id: attachment.id.0.clone(),
+                    page_id: op.page_id.clone(),
+                    filename: attachment.filename.clone(),
+                    media_type: attachment.media_type.clone(),
+                    file_size: attachments::file_size(&file),
+                    version: attachment.version,
+                    sha256: attachments::file_sha256(&file).ok(),
+                    downloaded: true,
+                })?;
+                outcome.attachments_uploaded.push(op.file.clone());
+                Ok(Some(attachment))
+            }
+            // Deleting an attachment removes content from the server, so it
+            // follows the same explicit opt-in as deleting a page — and is
+            // reported as skipped rather than dropped on the floor.
+            AttachmentOpKind::Delete => {
+                let Some(attachment_id) = &op.attachment_id else { return Ok(None) };
+                if !opts.deletes_attachments() {
+                    outcome.skipped.push(blocked_attachment(op));
+                    return Ok(None);
+                }
+                self.client
+                    .delete_attachment(&confed_api::AttachmentId::new(attachment_id))
+                    .await?;
+                ws.state().delete_attachment(attachment_id)?;
+                outcome.attachments_deleted.push(op.file.clone());
+                Ok(None)
+            }
+        }
     }
 
     /// List the attachments of every page this push wrote to, and bring what

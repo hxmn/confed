@@ -712,6 +712,24 @@ both_flavors!(a_comment_draft_is_posted_on_push, |mut h: Harness| async move {
     assert!(posted.iter().any(|c| c.body_storage.contains("Reviewed for Q3")));
 });
 
+both_flavors!(a_failing_comment_draft_does_not_hide_what_was_pushed, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Edited", None, "<p>Body.</p>");
+    h.mock.seed_page("1002", "Discussed", None, "<p>Body.</p>");
+    h.pull().await;
+    h.write("Edited.md", &h.read("Edited.md").replace("Body.", "Body, edited."));
+    std::fs::create_dir_all(h.path(".Discussed")).unwrap();
+    h.write(
+        ".Discussed/comments.md",
+        "# Comments — Discussed\n\n<!-- confed:new anchor=\"text that is not on the page\" -->\nA note.\n",
+    );
+
+    let outcome = h.push().await;
+    assert_eq!(outcome.pushed.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.failed.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.failed[0].page_id, "1002");
+    assert!(h.mock.page_body("1001").unwrap().contains("Body, edited."));
+});
+
 both_flavors!(an_interrupted_fetch_resumes_where_it_stopped, |mut h: Harness| async move {
     for i in 0..5 {
         h.mock.seed_page(&format!("100{i}"), &format!("Page {i}"), None, "<p>Body.</p>");
