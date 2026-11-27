@@ -165,16 +165,16 @@ pub fn emit(
     }
 
     if !output.human.is_empty() {
-        print(output.human.trim_end());
+        print(&terminal_safe(output.human.trim_end()));
     }
     let mut stderr = std::io::stderr();
     for warning in &output.warnings {
-        let _ = writeln!(stderr, "warning: {warning}");
+        let _ = writeln!(stderr, "warning: {}", terminal_safe(warning));
     }
     for error in &output.errors {
-        let _ = writeln!(stderr, "error: {}", error.message);
+        let _ = writeln!(stderr, "error: {}", terminal_safe(&error.message));
         if let Some(hint) = &error.hint {
-            let _ = writeln!(stderr, "hint: {hint}");
+            let _ = writeln!(stderr, "hint: {}", terminal_safe(hint));
         }
     }
 }
@@ -202,10 +202,51 @@ pub fn emit_error(command: &str, error: &ConfedError, json_mode: bool, duration_
     }
 
     let mut stderr = std::io::stderr();
-    let _ = writeln!(stderr, "error: {}", entry.message);
+    let _ = writeln!(stderr, "error: {}", terminal_safe(&entry.message));
     if let Some(hint) = entry.hint {
-        let _ = writeln!(stderr, "hint: {hint}");
+        let _ = writeln!(stderr, "hint: {}", terminal_safe(&hint));
     }
+}
+
+/// `text` fit for a terminal: a title or comment from the server can hold
+/// control characters — an escape sequence that clears the screen, a
+/// bidirectional override that reverses what follows — and they are shown
+/// escaped (`\u{1b}`), not obeyed. The colours confed itself writes (SGR
+/// sequences, `ESC [ … m`), newlines and tabs pass. `--json` is not touched.
+pub fn terminal_safe(text: &str) -> std::borrow::Cow<'_, str> {
+    let unsafe_char = |c: char| {
+        (c.is_control() && c != '\n' && c != '\t')
+            || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}')
+    };
+    if !text.chars().any(unsafe_char) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '\u{1b}' {
+            // Ours: ESC [ digits/semicolons m.
+            let rest = &text[i + 1..];
+            if let Some(params) = rest.strip_prefix('[') {
+                let len = params
+                    .find(|c: char| !(c.is_ascii_digit() || c == ';'))
+                    .unwrap_or(params.len());
+                if params[len..].starts_with('m') {
+                    out.push_str(&text[i..i + 2 + len + 1]);
+                    for _ in 0..len + 2 {
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
+        }
+        if unsafe_char(c) {
+            out.push_str(&c.escape_unicode().to_string());
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
 }
 
 /// The part of an envelope `--select` names.
@@ -453,6 +494,17 @@ pub fn plural(count: usize, singular: &str, plural: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_text_cannot_drive_the_terminal() {
+        let title = "Plan\u{1b}[2J\u{202e}txt.exe";
+        let shown = terminal_safe(title);
+        assert!(!shown.contains('\u{1b}') && !shown.contains('\u{202e}'), "{shown}");
+        assert!(shown.contains("\\u{1b}[2J") && shown.contains("\\u{202e}"), "{shown}");
+        // confed's own colours, newlines and tabs pass.
+        let ours = "\u{1b}[1;32mok\u{1b}[0m\n\tnext";
+        assert_eq!(terminal_safe(ours), ours);
+    }
 
     #[test]
     fn styles_are_inert_when_disabled() {
