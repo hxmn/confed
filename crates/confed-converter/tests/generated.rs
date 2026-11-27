@@ -260,3 +260,157 @@ fn collapse_spaces(text: &str) -> String {
     }
     out
 }
+
+// ------------------------------------------------- from storage, edited ---
+//
+// The round trips above start from Markdown, which only produces what the
+// generator writes. These start from storage as Confluence writes it, with
+// the shapes that once went wrong on an edit: emphasis against punctuation,
+// a panel whose body is one bold paragraph, a bullet that starts with `[x]`,
+// a heading that ends in `#`. An edit regenerates a block from its Markdown,
+// so each block's Markdown must convert back to the same text in the same
+// elements.
+
+/// Text as Confluence stores it, with the edges that matter.
+fn edge_text() -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop_oneof![
+            4 => "[a-z]{1,6}",
+            1 => Just("Note:".to_string()),
+            1 => Just("(bar)".to_string()),
+            1 => Just("注意：".to_string()),
+            1 => Just("请阅读".to_string()),
+            1 => Just("Фраза".to_string()),
+            1 => Just("x, y".to_string()),
+        ],
+        1..4,
+    )
+    .prop_map(|parts| parts.join(" "))
+}
+
+/// A run of inline content: text and emphasis, touching or not.
+fn edge_inline() -> impl Strategy<Value = String> {
+    prop::collection::vec(
+        prop_oneof![
+            3 => edge_text(),
+            2 => edge_text().prop_map(|t| format!("<strong>{t}</strong>")),
+            2 => edge_text().prop_map(|t| format!("<em>{t}</em>")),
+            1 => edge_text().prop_map(|t| format!("<code>{t}</code>")),
+        ],
+        1..4,
+    )
+    .prop_map(|parts| parts.concat())
+}
+
+fn edge_block() -> impl Strategy<Value = String> {
+    prop_oneof![
+        4 => edge_inline().prop_map(|t| format!("<p>{t}</p>")),
+        2 => (1u8..=4, edge_text(), any::<bool>()).prop_map(|(l, t, hash)| {
+            let t = if hash { format!("{t} #") } else { t };
+            format!("<h{l}>{t}</h{l}>")
+        }),
+        2 => (prop::collection::vec(edge_inline(), 1..3), any::<bool>()).prop_map(|(items, boxed)| {
+            let items: String = items
+                .iter()
+                .enumerate()
+                .map(|(i, t)| if boxed && i == 0 { format!("<li>[x] {t}</li>") } else { format!("<li>{t}</li>") })
+                .collect();
+            format!("<ul>{items}</ul>")
+        }),
+        1 => prop::collection::vec(edge_inline(), 1..3)
+            .prop_map(|items| format!("<ol>{}</ol>", items.iter().map(|t| format!("<li>{t}</li>")).collect::<String>())),
+        1 => (edge_text(), any::<bool>()).prop_map(|(t, titled)| {
+            let title = if titled { "<ac:parameter ac:name=\"title\">Heads up</ac:parameter>" } else { "" };
+            format!(
+                "<ac:structured-macro ac:name=\"info\">{title}<ac:rich-text-body><p><strong>{t}</strong></p></ac:rich-text-body></ac:structured-macro>"
+            )
+        }),
+        1 => (edge_text(), edge_inline(), edge_inline()).prop_map(|(h, a, b)| format!(
+            "<table><tbody><tr><th><p>{h}</p></th><th><p>{h}</p></th></tr><tr><td><p>{a}</p></td><td><p>{b}</p></td></tr></tbody></table>"
+        )),
+    ]
+}
+
+/// The text and the elements of storage, without what is not content:
+/// attributes other than a macro's or parameter's name, whitespace, and the
+/// spellings Markdown normalizes (`ac:schema-version`, `<b>` for `<strong>`).
+fn shape(storage: &str) -> String {
+    let mut out = String::new();
+    let mut rest = storage;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('>') else { break };
+        let tag = &rest[open + 1..open + close];
+        let (slash, tag_body) = match tag.strip_prefix('/') {
+            Some(rest) => ("/", rest),
+            None => ("", tag),
+        };
+        let name: String = format!(
+            "{slash}{}",
+            tag_body.chars().take_while(|c| !c.is_whitespace() && *c != '/').collect::<String>()
+        );
+        let named = tag.split("ac:name=\"").nth(1).and_then(|r| r.split('"').next());
+        let closing = tag.ends_with('/');
+        out.push('<');
+        out.push_str(&name);
+        if let Some(n) = named {
+            out.push_str(&format!(" {n}"));
+        }
+        if closing {
+            out.push('/');
+        }
+        out.push('>');
+        rest = &rest[open + close + 1..];
+    }
+    out.push_str(rest);
+    // Two runs of the same emphasis side by side read as one, and are merged.
+    let mut out = collapse_spaces(&out).replace("> ", ">").replace(" <", "<");
+    for tag in ["strong", "em", "code"] {
+        out = out.replace(&format!("</{tag}><{tag}>"), "");
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// Every block of storage Confluence writes, once its Markdown is
+    /// regenerated — what an edit to it does — keeps its text in the same
+    /// elements.
+    #[test]
+    fn an_edited_block_keeps_its_text_and_its_elements(block in edge_block()) {
+        let c = storage_to_markdown(&block, &opts()).unwrap();
+        let back = markdown_to_storage(&c.markdown, &opts()).unwrap();
+        prop_assert_eq!(shape(&back), shape(&block), "markdown:\n{}", c.markdown);
+    }
+
+    /// The same through a real patch: one block of a page edited, the others
+    /// copied as they were.
+    #[test]
+    fn editing_one_block_keeps_the_others_byte_for_byte(
+        blocks in prop::collection::vec(edge_block(), 2..5),
+        which in any::<prop::sample::Index>(),
+    ) {
+        let storage = blocks.concat();
+        let c = storage_to_markdown(&storage, &opts()).unwrap();
+        let edit = which.index(c.block_map.blocks.len());
+        let (start, end) = c.block_map.blocks[edit].md_span;
+        let lines: Vec<&str> = c.markdown.split_inclusive('\n').collect();
+        // The edit adds a word at the end of the block's first line.
+        let mut edited = String::new();
+        for (i, line) in lines.iter().enumerate() {
+            if i == start && start < end && !line.trim().is_empty() && !line.starts_with("```") {
+                edited.push_str(&format!("{} zz\n", line.trim_end_matches('\n')));
+            } else {
+                edited.push_str(line);
+            }
+        }
+        let out = markdown_to_storage_patched(&storage, &c.block_map, &c.markdown, &edited, &opts()).unwrap();
+        for (i, block) in c.block_map.blocks.iter().enumerate() {
+            if i != edit {
+                let raw = &storage[block.storage_span.0..block.storage_span.1];
+                prop_assert!(out.contains(raw), "block {} changed:\n{}\n--- out ---\n{}", i, raw, out);
+            }
+        }
+    }
+}
