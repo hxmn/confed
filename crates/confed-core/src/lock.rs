@@ -30,7 +30,19 @@ impl WorkspaceLock {
             OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path);
         let mut file =
             opened.map_err(|e| ConfedError::io(format!("opening {}", path.display()), e))?;
-        match file.try_lock() {
+        // A process another thread is spawning holds a copy of the descriptor
+        // until it execs, and with it the lock this process just let go.
+        // That lasts an instant, so a lock that is taken is tried a few more
+        // times before another confed is blamed for it.
+        let mut attempt = file.try_lock();
+        for _ in 0..10 {
+            if !matches!(attempt, Err(TryLockError::WouldBlock)) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            attempt = file.try_lock();
+        }
+        match attempt {
             Ok(()) => {
                 // Who holds it, for the message another run prints. Only a
                 // courtesy: the lock is what counts, not this number.
