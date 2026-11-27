@@ -271,7 +271,8 @@ impl Respond for Confluence {
             .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v == format!("Bearer {TOKEN}"));
+            // A personal access token, or a username with it (Basic).
+            .is_some_and(|v| v == format!("Bearer {TOKEN}") || v.starts_with("Basic "));
         if !authed {
             return error(401, "not authenticated");
         }
@@ -723,6 +724,53 @@ fn read(root: &Path, relative: &str) -> String {
 }
 
 // ------------------------------------------------------------------ tests ---
+
+/// Sharing one credential must not sign a workspace in as somebody else: when
+/// the members hold different accounts, nothing is moved.
+#[tokio::test]
+async fn adopt_moves_no_credential_when_the_workspaces_hold_different_accounts() {
+    let (server, _) = server().await;
+    let root = tempfile::tempdir().unwrap();
+    for (key, user) in [("DOCS", "alice.ng"), ("ENG", "bob.lee")] {
+        let out = run(
+            root.path(),
+            &[
+                "clone",
+                key,
+                "--json",
+                "--base-url",
+                &server.uri(),
+                "--flavor",
+                "dc",
+                "--user",
+                user,
+                "--token",
+                TOKEN,
+                "--credential-store",
+                "sqlite",
+            ],
+        );
+        assert_eq!(code(&out), 0, "clone {key}: {}", stderr(&out));
+    }
+    let out = run(
+        root.path(),
+        &[
+            "instance",
+            "adopt",
+            "--move-credentials",
+            "--user",
+            "alice.ng",
+            "--credential-store",
+            "sqlite",
+            "--json",
+        ],
+    );
+    assert_eq!(code(&out), 7, "{}", stderr(&out));
+    let env = envelope(&out, "instance");
+    assert!(env["errors"][0]["message"].as_str().unwrap().contains("bob.lee"), "{env}");
+    assert!(root.path().join("ENG/.session.db").exists(), "bob's credential stays");
+    assert!(root.path().join("DOCS/.session.db").exists());
+}
 
 #[tokio::test]
 async fn adopt_registers_existing_workspaces_and_shares_their_credential() {

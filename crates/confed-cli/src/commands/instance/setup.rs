@@ -383,6 +383,31 @@ pub async fn adopt(
             }
             other => other.into(),
         })?;
+        // `whoami` vouches for one credential. Every workspace whose own is
+        // removed must have held the same account on the same server, or
+        // sharing would quietly sign it in as somebody else.
+        for f in found.iter().filter(|f| f.has_session) {
+            let Some(own) = Workspace::open(&f.dir)?.session()? else { continue };
+            let same_server = crate::context::same_origin(&own.base_url, &connection.base_url);
+            let same_user = match (&own.username, &connection.username) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                _ => true,
+            };
+            if !same_server || !same_user {
+                return Err(ConfedError::state_with_hint(
+                    format!(
+                        "{}/.session.db holds the credential of {} on {}, not the one being shared \
+                         ({} on {}); nothing was moved",
+                        f.rel,
+                        own.username.as_deref().unwrap_or("a token"),
+                        own.base_url,
+                        connection.username.as_deref().unwrap_or("a token"),
+                        connection.base_url
+                    ),
+                    "adopt without --move-credentials, or move that workspace out of the root first",
+                ));
+            }
+        }
         let session = Session {
             base_url: connection.base_url.clone(),
             flavor: connection.flavor,
