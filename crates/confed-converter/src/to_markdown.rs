@@ -625,9 +625,13 @@ impl Renderer<'_> {
         // written as inline HTML, which passes through whatever is around it.
         let is_punct = |c: char| !c.is_alphanumeric() && !c.is_whitespace();
         let touches = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
-        let refused =
-            (lead.is_empty() && touches(before) && core.chars().next().is_some_and(is_punct))
-                || (trail_len == 0 && touches(after) && core.chars().last().is_some_and(is_punct));
+        // And a delimiter written right after another of the same character
+        // fuses with it into one run — `**a**` then `*b*` reads `**a***b*` —
+        // so emphasis that would touch one is written as HTML too.
+        let fuses = lead.is_empty() && before.is_some_and(|c| open.starts_with(c));
+        let refused = fuses
+            || (lead.is_empty() && touches(before) && core.chars().next().is_some_and(is_punct))
+            || (trail_len == 0 && touches(after) && core.chars().last().is_some_and(is_punct));
         let (open, close) = match (open, refused) {
             ("**", true) => ("<strong>", "</strong>"),
             ("*", true) => ("<em>", "</em>"),
@@ -1628,6 +1632,17 @@ mod user_mention_tests {
         .unwrap();
         assert!(out.starts_with(r#"<ac:structured-macro ac:name="code">"#), "{out}");
         assert!(out.contains("<![CDATA[<p>hi there</p><script>x</script>]]>"), "{out}");
+    }
+
+    #[test]
+    fn emphasis_right_after_emphasis_keeps_both() {
+        let opts = ConvertOptions::default();
+        for storage in
+            ["<p><strong>a</strong><em>(bar)</em></p>", "<p><em>a</em><strong>b</strong></p>"]
+        {
+            let md = crate::storage_to_markdown(storage, &opts).unwrap().markdown;
+            assert_eq!(crate::markdown_to_storage(&md, &opts).unwrap().trim_end(), storage, "{md}");
+        }
     }
 
     #[test]
