@@ -183,6 +183,19 @@ async fn remove(
     filename: &str,
     push: bool,
 ) -> Result<Output> {
+    // A file name, never a path: `../../notes.txt` or an absolute path would
+    // remove a file outside the sidecar.
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || filename.contains(['/', '\\'])
+        || std::path::Path::new(filename).is_absolute()
+    {
+        return Err(ConfedError::usage_with_hint(
+            format!("`{filename}` is not an attachment's file name"),
+            "give the name alone, as `confed attach <page> --list` shows it",
+        ));
+    }
     let recorded = ctx.workspace()?.state().page_attachments(page_id)?;
     let record = recorded.iter().find(|a| a.filename == filename);
     let on_server = record.is_some();

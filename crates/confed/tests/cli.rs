@@ -832,6 +832,14 @@ async fn attach_rm_deletes_on_the_server_or_says_it_did_not() {
     assert_eq!(exit_code(&init(dir.path(), &server)), 0);
     assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
 
+    // A path is not a file name: nothing outside the sidecar can be removed.
+    std::fs::write(dir.path().join("notes.txt"), "keep").unwrap();
+    for name in ["../notes.txt", "/etc/hostname", "..", "a/b.png"] {
+        let output = run(confed_authed(dir.path(), &["attach", ROOT_FILE, "--rm", name]));
+        assert_eq!(exit_code(&output), 2, "{name}: {}", stderr(&output));
+    }
+    assert!(dir.path().join("notes.txt").exists());
+
     // Removing something that is not an attachment is an error, not a success.
     let output = run(confed_authed(dir.path(), &["attach", ROOT_FILE, "--rm", "ghost.png"]));
     assert_ne!(exit_code(&output), 0, "a no-op must not exit 0: {}", stdout(&output));
