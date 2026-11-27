@@ -1237,6 +1237,16 @@ async fn a_refused_move_changes_nothing_and_can_be_aborted() {
     assert_eq!(confluence.world().pages["1002"].space, "DOCS");
     assert!(root.path().join("DOCS/Team Handbook/Onboarding.md").exists());
 
+    // A single-space command in either workspace says the move is unfinished.
+    for key in ["DOCS", "ENG"] {
+        let out = run(&root.path().join(key), &["status", "--json"]);
+        let warnings = envelope(&out, "status")["warnings"].to_string();
+        assert!(
+            warnings.contains("unfinished move") && warnings.contains("instance resume"),
+            "{key}: {warnings}"
+        );
+    }
+
     let out = run(root.path(), &["instance", "abort", "--json"]);
     assert_eq!(code(&out), 0, "{}", stderr(&out));
     let out = run(root.path(), &["instance", "doctor", "--offline", "--json"]);
@@ -1249,6 +1259,8 @@ async fn a_refused_move_changes_nothing_and_can_be_aborted() {
         .unwrap()
         .clone();
     assert_eq!(journal["status"], "pass");
+    let out = run(&root.path().join("DOCS"), &["status", "--json"]);
+    assert!(!envelope(&out, "status")["warnings"].to_string().contains("unfinished move"));
 }
 
 #[tokio::test]

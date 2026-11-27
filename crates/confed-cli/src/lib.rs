@@ -135,11 +135,33 @@ fn run(cli: Cli, views: Views) -> Result<Output> {
 
     let ctx = Context::build(global)?;
     let guide = stale_guide_warning(&ctx, &command);
+    let moving = unfinished_move_warning(&ctx, &command);
     let output = run_in(ctx, command, views)?;
-    Ok(match guide {
-        Some(warning) => output.warn(warning),
-        None => output,
-    })
+    Ok(output.warn_all(guide).warn_all(moving))
+}
+
+/// A workspace that an unfinished move between spaces reads or writes is in
+/// the middle of it: `status`, `pull` and `push` there say so, and how to
+/// finish it, since running them meanwhile is what could strand the move.
+fn unfinished_move_warning(ctx: &Context, command: &Command) -> Option<String> {
+    if !matches!(command, Command::Status(_) | Command::Pull(_) | Command::Push(_)) {
+        return None;
+    }
+    let own = ctx.workspace().ok()?.space_key().ok()?;
+    let instance = ctx.instance().ok()?;
+    let entry = instance.journal_unfinished().ok()?.into_iter().find(|entry| {
+        let key = |side: &str| entry.plan[side]["key"].as_str().map(str::to_string);
+        [key("source"), key("dest")].contains(&Some(own.clone()))
+    })?;
+    Some(format!(
+        "space {own} is part of an unfinished move between spaces ({}, at `{}`): finish it \
+         with `confed instance resume {}` from the instance root, or undo it with `confed \
+         instance abort {}` if the server has not moved anything yet",
+        entry.id,
+        entry.state.as_str(),
+        entry.id,
+        entry.id
+    ))
 }
 
 /// The agent guide (`CLAUDE.md`/`AGENTS.md`) describes the confed that wrote
