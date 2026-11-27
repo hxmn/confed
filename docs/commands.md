@@ -446,6 +446,7 @@ change — and it needs no network at all.
 | `--name-only` | List changed paths only. |
 | `--exit-code` | Exit 10 when there are differences. |
 | `--base` | Also show what the *server* changed since the same base, so both sides of a divergence are visible together. |
+| `--version <N>` | Compare the file with version N of the page on the server instead of its base (one page; `change` is `differs_from_version`). |
 
 ```bash
 confed diff "Team Handbook/Onboarding.md"
@@ -644,6 +645,7 @@ directory is bound to, most recently changed first.
 |---|---|
 | `--limit <N>` | How many versions, or pages, to show. Default 20. |
 | `--local` | Show confed's own sync log instead of the server's history. |
+| `--show <N>` | With a page: print version N of it as Markdown, rendered as its file is. |
 
 For one page the human output marks the version your local file is based on with `*`.
 For the space it prints when, version, author, title and — for pages you have pulled —
@@ -657,6 +659,27 @@ confed log --local                           # every sync confed has made here
 confed log "Team Handbook/Onboarding.md"
 confed log 163842 --limit 5 --json | jq -r '.result.versions[] | "v\(.number) \(.author)"'
 confed log 163842 --local --json | jq -r '.result.entries[] | "\(.ts) \(.op) \(.result)"'
+confed log "Team Handbook/Onboarding.md" --show 4    # what version 4 said
+```
+
+## confed restore
+
+Write an old version of a page into its file — its text and its title — as a local
+change. Nothing is rewritten on the server: `status` shows the page `modified`, `diff`
+shows what goes back, and `push` sends it as a new version. The file stays based on the
+version it was, so a page edited on the server meanwhile merges like any other edit.
+
+| Flag | Meaning |
+|---|---|
+| *(positional)* | The page (path or id). |
+| `--version <N>` | The version to bring back; `confed log <page>` lists them. |
+| `--push` | Push it right away, with the version comment "Restore version N". |
+
+```bash
+confed log "Team Handbook/Onboarding.md"
+confed diff "Team Handbook/Onboarding.md" --version 4
+confed restore "Team Handbook/Onboarding.md" --version 4
+confed restore 163842 --version 4 --push --json
 ```
 
 ## confed search

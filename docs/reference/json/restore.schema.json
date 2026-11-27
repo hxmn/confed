@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/restore.schema.json",
+  "title": "confed restore result",
+  "description": "The `result` of `confed restore <page> --version N --json`: version N of the page written into its file as a local change, on top of the version it is based on; with --push, pushed as a new version.",
+  "type": "object",
+  "required": [
+    "page_id",
+    "path",
+    "version",
+    "from_base_version"
+  ],
+  "properties": {
+    "page_id": {
+      "type": "string"
+    },
+    "path": {
+      "type": "string",
+      "description": "The page's file, written."
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The version brought back."
+    },
+    "from_base_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The version the file was based on, and stays based on until pushed."
+    },
+    "push": {
+      "type": "object",
+      "description": "--push: the push of the restored page, as push.schema.json describes it.",
+      "required": [
+        "pushed",
+        "created",
+        "deleted",
+        "failed",
+        "skipped",
+        "dry_run"
+      ]
+    }
+  }
+}

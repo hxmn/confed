@@ -22,6 +22,7 @@ pub mod mv;
 pub mod new;
 pub mod open;
 pub mod resolve;
+pub mod restore;
 pub mod rm;
 pub mod search;
 pub mod space;

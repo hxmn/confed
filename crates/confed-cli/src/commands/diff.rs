@@ -5,7 +5,7 @@ use crate::cli::DiffArgs;
 use crate::context::Context;
 use crate::output::Output;
 use confed_converter::ConvertOptions;
-use confed_core::error::{ExitCode, Result};
+use confed_core::error::{ConfedError, ExitCode, Result};
 use confed_core::state::PageRecord;
 use confed_core::sync::path_matches;
 use confed_core::worktree;
@@ -49,6 +49,10 @@ pub fn run(ctx: &mut Context, args: &DiffArgs) -> Result<Output> {
 }
 
 pub async fn run_remote(ctx: &mut Context, args: &DiffArgs) -> Result<Output> {
+    if let Some(number) = args.version {
+        let diffs = against_version(ctx, args, number).await?;
+        return render(ctx, args, diffs);
+    }
     if args.remote {
         let client = ctx.build_client()?;
         let engine = ctx.engine(client)?;
@@ -57,6 +61,45 @@ pub async fn run_remote(ctx: &mut Context, args: &DiffArgs) -> Result<Output> {
     }
     let diffs = collect(ctx, args, args.remote)?;
     render(ctx, args, diffs)
+}
+
+/// `diff <page> --version N`: the file against that version on the server.
+async fn against_version(ctx: &mut Context, args: &DiffArgs, number: u32) -> Result<Vec<PageDiff>> {
+    let [page] = args.paths.as_slice() else {
+        return Err(ConfedError::usage_with_hint(
+            "`diff --version` compares one page",
+            "name it: confed diff <page> --version N",
+        ));
+    };
+    let page_id = ctx.resolve_page(page)?;
+    let version = crate::commands::log::fetch_version(ctx, &page_id, number).await?;
+    let ws = ctx.workspace()?;
+    let record = ws
+        .state()
+        .get_page(&page_id)?
+        .ok_or_else(|| ConfedError::NotFound(format!("page {page_id} is not tracked here")))?;
+    let text = std::fs::read_to_string(ws.absolute(&record.local_path))
+        .map_err(|e| ConfedError::io(format!("reading {}", record.local_path), e))?;
+    let file = confed_core::frontmatter::parse(&text, &record.local_path)?;
+    let diff = TextDiff::from_lines(&version.markdown, &file.body);
+    let (additions, deletions) = count_changes(&diff);
+    let title_changed = file.frontmatter.title != version.page.summary.title;
+    if additions == 0 && deletions == 0 && !title_changed {
+        return Ok(Vec::new());
+    }
+    Ok(vec![PageDiff {
+        page_id,
+        path: record.local_path,
+        title: file.frontmatter.title.clone(),
+        change: "differs_from_version",
+        additions,
+        deletions,
+        hunks: if args.name_only || args.stat { Vec::new() } else { build_hunks(&diff) },
+        frontmatter_changes: title_changed.then(|| {
+            json!({ "title": { "from": version.page.summary.title, "to": file.frontmatter.title } })
+        }),
+        remote_hunks: Vec::new(),
+    }])
 }
 
 fn collect(ctx: &Context, args: &DiffArgs, against_remote: bool) -> Result<Vec<PageDiff>> {

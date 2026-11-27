@@ -17,6 +17,10 @@ pub async fn run(ctx: &mut Context, args: &LogArgs) -> Result<Output> {
     if args.local {
         return run_local(ctx, args);
     }
+    if let (Some(page), Some(number)) = (&args.page, args.show) {
+        let page_id = ctx.page_id_arg(page)?;
+        return show_version(ctx, &page_id, number).await;
+    }
     match &args.page {
         Some(page) => {
             let page_id = ctx.page_id_arg(page)?;
@@ -175,6 +179,59 @@ fn local_paths(ctx: &Context) -> Result<HashMap<String, String>> {
         .into_iter()
         .map(|p| (p.page_id, p.local_path))
         .collect())
+}
+
+/// One version of a page as the server keeps it, and as Markdown rendered the
+/// way the page's file is.
+pub(crate) struct Version {
+    pub page: confed_api::Page,
+    pub markdown: String,
+}
+
+/// Read version `number` of `page_id` from the server.
+pub(crate) async fn fetch_version(
+    ctx: &mut Context,
+    page_id: &str,
+    number: u32,
+) -> Result<Version> {
+    let client = ctx.build_client()?;
+    let page = match client.get_page_at_version(&PageId::new(page_id), number).await {
+        Ok(page) => page,
+        Err(confed_api::ApiError::NotFound(_)) => {
+            return Err(ConfedError::NotFound(format!(
+                "page {page_id} has no version {number}; `confed log {page_id}` lists them"
+            )))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    // Rendered as the file is, from where it is, so its links and images
+    // read the same; a page with no file renders from the workspace root.
+    let ws = ctx.workspace()?;
+    let path = ws.state().get_page(page_id)?.map(|p| p.local_path).unwrap_or_default();
+    let opts = confed_core::sync::page_convert_options(ws, &path)?;
+    let markdown = confed_converter::storage_to_markdown(&page.body_storage, &opts)?.markdown;
+    Ok(Version { page, markdown })
+}
+
+/// `log <page> --show N`: that version, as Markdown.
+async fn show_version(ctx: &mut Context, page_id: &str, number: u32) -> Result<Output> {
+    let Version { page, markdown } = fetch_version(ctx, page_id, number).await?;
+    let human = format!(
+        "{}\n\n{}",
+        ctx.style.dim(&format!("{} — version {number}", page.summary.title)),
+        markdown.trim_end()
+    );
+    Ok(Output::new(
+        json!({
+            "page_id": page_id,
+            "version": number,
+            "title": page.summary.title,
+            "author": page.summary.author,
+            "when": page.summary.updated_at,
+            "markdown": markdown,
+        }),
+        human,
+    ))
 }
 
 #[cfg(test)]

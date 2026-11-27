@@ -52,6 +52,7 @@
             "attach",
             "comment",
             "log",
+            "restore",
             "open",
             "search",
             "spaces",

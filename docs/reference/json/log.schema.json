@@ -2,13 +2,27 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/hxmn/confed/blob/main/docs/reference/json/log.schema.json",
   "title": "confed log result",
-  "description": "The `result` of `confed log --json`. With a page it is that page's server version history, or with --local confed's own sync log for it. Without a page it widens to the space this directory is bound to: recent server activity, or with --local the whole workspace's sync log.",
+  "description": "The `result` of `confed log --json`. With a page it is that page's server version history, or with --local confed's own sync log for it, or with --show N that one version as Markdown. Without a page it widens to the space this directory is bound to: recent server activity, or with --local the whole workspace's sync log.",
   "anyOf": [
     { "$ref": "#/$defs/server_history" },
     { "$ref": "#/$defs/space_activity" },
-    { "$ref": "#/$defs/local_history" }
+    { "$ref": "#/$defs/local_history" },
+    { "$ref": "#/$defs/version" }
   ],
   "$defs": {
+    "version": {
+      "type": "object",
+      "description": "`log <page> --show N`: that version of the page, as Markdown rendered the way the page's file is.",
+      "required": ["page_id", "version", "title", "markdown"],
+      "properties": {
+        "page_id": { "type": "string" },
+        "version": { "type": "integer", "minimum": 1 },
+        "title": { "type": "string", "description": "The page's title in that version." },
+        "author": { "type": ["string", "null"] },
+        "when": { "type": ["string", "null"], "description": "RFC 3339 timestamp of the version." },
+        "markdown": { "type": "string" }
+      }
+    },
     "server_history": {
       "type": "object",
       "required": ["page_id", "versions"],

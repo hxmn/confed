@@ -226,7 +226,9 @@ fn run_in(mut ctx: Context, command: Command, views: Views) -> Result<Output> {
     match &command {
         Command::Config(args) => return commands::config::run(&mut ctx, args, views.pick_page),
         Command::Status(args) if !args.fetch => return commands::status::run(&mut ctx, args),
-        Command::Diff(args) if !args.remote => return commands::diff::run(&mut ctx, args),
+        Command::Diff(args) if !args.remote && args.version.is_none() => {
+            return commands::diff::run(&mut ctx, args)
+        }
         Command::Resolve(args) => return commands::resolve::run(&mut ctx, args),
         Command::New(args) if !args.push => return commands::new::run(&mut ctx, args),
         Command::Log(args) if args.local => return commands::log::run_local(&mut ctx, args),
@@ -372,6 +374,7 @@ async fn dispatch(
         Command::Attach(args) => commands::attach::run(&mut ctx, &args).await,
         Command::Comment(args) => commands::comment::run(&mut ctx, &args).await,
         Command::Log(args) => commands::log::run(&mut ctx, &args).await,
+        Command::Restore(args) => commands::restore::run(&mut ctx, &args).await,
         Command::Open(args) => commands::open::run(&mut ctx, &args).await,
         Command::Search(args) => commands::search::run(&mut ctx, &args).await,
         Command::Spaces(args) => commands::spaces::run(&mut ctx, &args).await,

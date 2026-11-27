@@ -164,6 +164,10 @@ pub enum Command {
     /// Version history of a page, or recent activity across the space.
     Log(LogArgs),
 
+    /// Write an old version of a page into its file, as a local change to
+    /// review and push.
+    Restore(RestoreArgs),
+
     /// Open a page in the browser.
     Open(OpenArgs),
 
@@ -243,6 +247,7 @@ impl Command {
             Command::Attach(_) => "attach",
             Command::Comment(_) => "comment",
             Command::Log(_) => "log",
+            Command::Restore(_) => "restore",
             Command::Open(_) => "open",
             Command::Search(_) => "search",
             Command::Spaces(_) => "spaces",
@@ -464,6 +469,8 @@ pub struct TreeArgs {
 }
 
 #[derive(Args, Debug)]
+// `--version N` is this command's own: the version of the page, not confed's.
+#[command(disable_version_flag = true)]
 pub struct DiffArgs {
     /// Paths or globs to diff.
     pub paths: Vec<String>,
@@ -491,6 +498,11 @@ pub struct DiffArgs {
     /// Exit 10 when there are differences.
     #[arg(long)]
     pub exit_code: bool,
+
+    /// Compare the file with this version of the page on the server, not
+    /// with its base. Takes one page.
+    #[arg(long, value_name = "N", conflicts_with_all = ["remote", "base", "storage"])]
+    pub version: Option<u32>,
 }
 
 #[derive(Args, Debug)]
@@ -702,8 +714,28 @@ pub struct LogArgs {
     pub limit: usize,
 
     /// Show confed's local sync log instead of server history.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "show")]
     pub local: bool,
+
+    /// Print this version of the page, as Markdown.
+    #[arg(long, value_name = "N", requires = "page")]
+    pub show: Option<u32>,
+}
+
+#[derive(Args, Debug)]
+// `--version N` is this command's own: the version of the page, not confed's.
+#[command(disable_version_flag = true)]
+pub struct RestoreArgs {
+    /// Page to restore (path or id).
+    pub page: String,
+
+    /// The version to bring back.
+    #[arg(long, value_name = "N")]
+    pub version: u32,
+
+    /// Push the restored page right away, with a version comment naming N.
+    #[arg(long)]
+    pub push: bool,
 }
 
 #[derive(Args, Debug)]

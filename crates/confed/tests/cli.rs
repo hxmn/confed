@@ -1239,6 +1239,68 @@ async fn open_prints_a_url_with_no_credential_at_all() {
     assert!(value["result"]["url"].as_str().unwrap().contains(CHILD_PAGE), "{value}");
 }
 
+/// An old version can be read, compared with the file, and brought back as a
+/// local change — then pushed as a new version.
+#[tokio::test]
+async fn an_old_version_is_shown_compared_and_restored() {
+    let server = dc_server().await;
+    let mut old = summary(ROOT_PAGE, "Team Handbook", None, 2);
+    old["body"] =
+        json!({ "storage": { "value": "<p>The old welcome.</p>", "representation": "storage" } });
+    Mock::given(method("GET"))
+        .and(path(format!("/rest/api/content/{ROOT_PAGE}")))
+        .and(query_param("version", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(old))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+
+    let shown = envelope(
+        &run(confed_authed(dir.path(), &["log", ROOT_FILE, "--show", "2", "--json"])),
+        "log",
+    );
+    assert_eq!(shown["result"]["version"], json!(2));
+    assert!(shown["result"]["markdown"].as_str().unwrap().contains("The old welcome."), "{shown}");
+
+    let output = run(confed_authed(
+        dir.path(),
+        &["diff", ROOT_FILE, "--version", "2", "--exit-code", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 10, "{}", stderr(&output));
+    let diff = envelope(&output, "diff");
+    assert_eq!(diff["result"]["pages"][0]["change"], json!("differs_from_version"), "{diff}");
+
+    let restored =
+        run(confed_authed(dir.path(), &["restore", ROOT_FILE, "--version", "2", "--json"]));
+    assert_eq!(exit_code(&restored), 0, "{}", stderr(&restored));
+    envelope(&restored, "restore");
+    assert!(read(dir.path(), ROOT_FILE).contains("The old welcome."));
+    assert!(
+        read(dir.path(), ROOT_FILE).contains("version: 3"),
+        "still based on the current version"
+    );
+    let status = envelope(&run(confed(dir.path(), &["status", "--json"])), "status");
+    let root = status["result"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["path"] == json!(ROOT_FILE))
+        .unwrap()
+        .clone();
+    assert_eq!(root["state"], json!("modified"), "{root}");
+
+    let pushed = run(confed_authed(
+        dir.path(),
+        &["restore", ROOT_FILE, "--version", "2", "--push", "--json"],
+    ));
+    assert_eq!(exit_code(&pushed), 0, "{}", stderr(&pushed));
+    let pushed = envelope(&pushed, "restore");
+    assert_eq!(pushed["result"]["push"]["pushed"].as_array().map(Vec::len), Some(1), "{pushed}");
+}
+
 #[tokio::test]
 async fn version_reports_the_compatibility_contract_and_the_release_notes() {
     // Deliberately not a workspace: an agent must be able to ask what confed is

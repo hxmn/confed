@@ -18,8 +18,8 @@
         "title": { "type": "string" },
         "change": {
           "type": "string",
-          "description": "`modified` compares base with the working file; `added` is a file with no page yet and `deleted` a tracked page whose file is gone (`page_id` empty for `added`); `differs_from_remote` is what --remote compares.",
-          "enum": ["modified", "added", "deleted", "differs_from_remote"]
+          "description": "`modified` compares base with the working file; `added` is a file with no page yet and `deleted` a tracked page whose file is gone (`page_id` empty for `added`); `differs_from_remote` is what --remote compares, and `differs_from_version` what --version N compares (the file against that version).",
+          "enum": ["modified", "added", "deleted", "differs_from_remote", "differs_from_version"]
         },
         "additions": { "type": "integer", "minimum": 0 },
         "deletions": { "type": "integer", "minimum": 0 },
