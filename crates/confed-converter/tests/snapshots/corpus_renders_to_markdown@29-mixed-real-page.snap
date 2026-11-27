@@ -35,4 +35,6 @@ Owned by [@Dana Whitfield](https://wiki.example.test/people/557058:abcd). Runboo
 
 ---
 
-Last reviewed 2026-05-01.
+```confluence
+<p>Last reviewed <time datetime="2026-05-01"/>.</p>
+```

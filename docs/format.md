@@ -179,6 +179,7 @@ alerts. The full mapping in both directions is tabulated in
 | `expand` | `<details><summary>…</summary>…</details>` |
 | `toc` | `<!-- confed:toc -->` |
 | `status` | its block kept as a ` ```confluence ` fence (the colour has no Markdown form) |
+| dates (`<time>`) | their block kept as a ` ```confluence ` fence (a plain date would go back as text) |
 | images and links to attachments | `![alt](.Page/file.png)` |
 | links to pages in this workspace | relative `.md` links |
 | links to pages elsewhere, users | absolute URLs built from the base URL |

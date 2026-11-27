@@ -532,6 +532,10 @@ impl Renderer<'_> {
                 }
             }
             "time" => {
+                // Shown as its date, but no Markdown spelling goes back as a
+                // date element — the due date of a task — so the block is
+                // kept as it is.
+                self.keep_verbatim = true;
                 if let Some(d) = el.attr_local("datetime") {
                     out.push_str(&escape_md(d));
                 }
@@ -1588,6 +1592,25 @@ mod user_mention_tests {
         .unwrap()
         .markdown;
         assert_eq!(md.trim(), "![](.Page/own.png)");
+    }
+
+    #[test]
+    fn an_edit_beside_a_date_keeps_the_date() {
+        let storage = r#"<p>Due <time datetime="2026-08-14" /> for review</p>"#;
+        let opts = ConvertOptions::default();
+        let base = crate::storage_to_markdown(storage, &opts).unwrap();
+        let edited = base.markdown.replace("review", "sign-off");
+        assert_ne!(edited, base.markdown, "{}", base.markdown);
+        let out = crate::markdown_to_storage_patched(
+            storage,
+            &base.block_map,
+            &base.markdown,
+            &edited,
+            &opts,
+        )
+        .unwrap();
+        assert!(out.contains(r#"<time datetime="2026-08-14" />"#), "{out}");
+        assert!(out.contains("sign-off"), "{out}");
     }
 
     #[test]
