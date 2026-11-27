@@ -138,7 +138,7 @@ pub fn format(src: &str) -> String {
         return src.to_string();
     }
     let mut out = String::with_capacity(src.len() + src.len() / 8);
-    for (i, node) in nodes.iter().filter(|n| !n.is_blank()).enumerate() {
+    for (i, node) in nodes.iter().filter(|n| !is_layout(n)).enumerate() {
         if i > 0 {
             out.push('\n');
         }
@@ -173,7 +173,7 @@ fn breakable(nodes: &[Node], container: bool) -> bool {
         && nodes.iter().all(|n| match n {
             Node::Element(el) => is_block_level(el),
             Node::Comment(_) => true,
-            Node::Text(_) => n.is_blank(),
+            Node::Text(_) => is_layout(n),
             _ => false,
         })
 }
@@ -194,7 +194,7 @@ fn write_node(node: &Node, src: &str, depth: usize, out: &mut String) {
 fn write_element(el: &Element, src: &str, depth: usize, out: &mut String) {
     let (open, close) = tags(el, src);
     out.push_str(open);
-    for child in el.children.iter().filter(|n| !n.is_blank()) {
+    for child in el.children.iter().filter(|n| !is_layout(n)) {
         out.push('\n');
         indent(depth + 1, out);
         write_node(child, src, depth + 1, out);
@@ -216,7 +216,7 @@ fn minify_level(nodes: &[Node], src: &str, container: bool, out: &mut String) {
         }
         return;
     }
-    for node in nodes.iter().filter(|n| !n.is_blank()) {
+    for node in nodes.iter().filter(|n| !is_layout(n)) {
         match node {
             Node::Element(el) => {
                 let (open, close) = tags(el, src);
@@ -249,6 +249,19 @@ fn verbatim(src: &str, (start, end): (usize, usize)) -> &str {
 fn indent(depth: usize, out: &mut String) {
     for _ in 0..depth {
         out.push_str(INDENT);
+    }
+}
+
+/// Whitespace the layout may move: ASCII spaces and line breaks only. A
+/// non-breaking space (`&nbsp;`) between two blocks is content — a gap the
+/// page shows — and is kept where it is.
+fn is_layout(node: &Node) -> bool {
+    match node {
+        // The raw text, not its unescaped form: unescaping reads `&nbsp;` as
+        // a plain space.
+        Node::Text(c) => c.raw.chars().all(|c| c.is_ascii_whitespace()),
+        Node::CData(c) => c.raw.chars().all(|c| c.is_ascii_whitespace()),
+        _ => false,
     }
 }
 
@@ -379,6 +392,14 @@ mod tests {
         ] {
             assert_eq!(minify(&format(src)), minify(src), "{src:?}");
         }
+    }
+
+    #[test]
+    fn a_non_breaking_space_between_blocks_is_kept() {
+        let src = "<ac:layout-cell><p>a</p>&nbsp;<p>b</p></ac:layout-cell>";
+        let out = format(src);
+        assert!(out.contains("&nbsp;"), "{out}");
+        assert_eq!(minify(&out), src);
     }
 
     #[test]
