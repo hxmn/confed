@@ -687,7 +687,13 @@ pub fn patch(
     // Marks keep every line count, so the repair cannot move a block.
     let new_markdown = &marks::normalize_line_starts(new_markdown);
     let new_ranges = mdblock::split_blocks(new_markdown);
-    let base_hashes: Vec<String> = base_map.blocks.iter().map(|b| b.hash.clone()).collect();
+    // From the base Markdown, which the map was just checked against: a map an
+    // older confed recorded holds hashes of another kind.
+    let base_hashes: Vec<String> = base_map
+        .blocks
+        .iter()
+        .map(|b| hash_text(&slice_lines(base_markdown, b.md_span.0, b.md_span.1)))
+        .collect();
     let new_texts: Vec<String> =
         new_ranges.iter().map(|(s, e)| slice_lines(new_markdown, *s, *e)).collect();
     let new_hashes: Vec<String> = new_texts.iter().map(|t| hash_text(t)).collect();
@@ -787,7 +793,9 @@ fn check_map_matches(
             )));
         }
         let text = slice_lines(base_markdown, range.0, range.1);
-        if hash_text(&text) != entry.hash {
+        if hash_text(&text) != entry.hash
+            && crate::blockmap::hash_text_unpadded_legacy(&text) != entry.hash
+        {
             return Err(ConvertError::StaleBlockMap(format!(
                 "block {i}: base Markdown does not match the recorded hash"
             )));

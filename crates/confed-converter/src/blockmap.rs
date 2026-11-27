@@ -159,16 +159,69 @@ pub fn slice_lines(text: &str, start: usize, end: usize) -> String {
 }
 
 pub fn hash_text(text: &str) -> String {
-    let mut hasher = Sha256::new();
     // Inline comment marks are a layer over the content, never content: a
     // block whose only difference is a mark must hash the same, or an untouched
     // paragraph would be regenerated because somebody commented on it.
     let text =
         if text.contains("<!--") { crate::marks::strip(text).body } else { text.to_string() };
+    // A table's column padding is layout, not content: one cell that renders
+    // wider re-pads every row, and that must not make the table — or, through
+    // a stale block map, the whole page — look changed.
+    let text = if text.trim_start().starts_with('|') {
+        text.lines().map(normalize_table_line).collect::<Vec<_>>().join("\n")
+    } else {
+        text
+    };
+    hash_raw(&text)
+}
+
+/// [`hash_text`] as it was before table padding was normalized: what block
+/// maps recorded by an older confed hold.
+pub(crate) fn hash_text_unpadded_legacy(text: &str) -> String {
+    let text =
+        if text.contains("<!--") { crate::marks::strip(text).body } else { text.to_string() };
+    hash_raw(&text)
+}
+
+fn hash_raw(text: &str) -> String {
+    let mut hasher = Sha256::new();
     // Normalize trailing whitespace so cosmetic edits do not look like content
     // changes and force a needless block regeneration.
     hasher.update(text.trim_end().as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// `text` with the padding of its table rows taken out (see
+/// [`normalize_table_line`]); every other line as it is.
+pub fn normalize_table_padding(text: &str) -> String {
+    if !text.lines().any(|l| l.trim_start().starts_with('|')) {
+        return text.to_string();
+    }
+    let mut out: String = text.lines().map(normalize_table_line).collect::<Vec<_>>().join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+/// A table row with its padding taken out: runs of whitespace become one
+/// space, and in the delimiter row runs of `-` become one.
+fn normalize_table_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('|') {
+        return line.to_string();
+    }
+    let collapsed = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
+        let mut out = String::with_capacity(collapsed.len());
+        for c in collapsed.chars().filter(|c| *c != ' ') {
+            if !(c == '-' && out.ends_with('-')) {
+                out.push(c);
+            }
+        }
+        return out;
+    }
+    collapsed
 }
 
 #[cfg(test)]
@@ -237,6 +290,15 @@ mod tests {
     #[test]
     fn hashing_ignores_trailing_whitespace_only() {
         assert_eq!(hash_text("hello\n\n"), hash_text("hello"));
+        assert_eq!(
+            hash_text("| A   | Long header |\n|-----|-------------|\n| 1   | x           |\n"),
+            hash_text("| A | Long header |\n| --- | --- |\n| 1 | x |\n"),
+            "padding is not content"
+        );
+        assert_ne!(
+            hash_text("| A | B |\n|---|---|\n| 1 | x |"),
+            hash_text("| A | B |\n|---|---|\n| 1 | y |")
+        );
         assert_ne!(hash_text("hello"), hash_text("Hello"));
         assert_ne!(hash_text("a\nb"), hash_text("a b"));
     }

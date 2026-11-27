@@ -89,6 +89,13 @@ fn collect(ctx: &Context, args: &DiffArgs, against_remote: bool) -> Result<Vec<P
         // and reports changes the user never made.
         let convert_opts = confed_core::sync::page_convert_options(ws, &local.path)?;
 
+        // The file is what pull wrote: `status` calls it unchanged, and so
+        // does diff. Rendering the base again can come out differently — a
+        // table padded otherwise — and that is not a change anyone made.
+        if !against_remote && !args.base && local.file.matches_hash(&base_record.markdown_hash) {
+            continue;
+        }
+
         let (left_label, left_text) = if against_remote {
             let Some(remote_page) = remote.iter().find(|r| r.page_id == page_id) else { continue };
             let storage = remote_page.storage_body.clone().unwrap_or_default();

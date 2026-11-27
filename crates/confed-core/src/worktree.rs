@@ -291,7 +291,8 @@ pub fn compute_status(
             continue;
         };
 
-        let local_dirty = local.content_hash != base_record.markdown_hash;
+        let local_dirty = local.content_hash != base_record.markdown_hash
+            && !local.file.matches_hash(&base_record.markdown_hash);
         let remote_ahead =
             remote_record.is_some_and(|r| r.version > base_record.version && !r.deleted);
         let remote_deleted = remote_record.is_some_and(|r| r.deleted);

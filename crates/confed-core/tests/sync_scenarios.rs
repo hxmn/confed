@@ -445,6 +445,31 @@ both_flavors!(
     }
 );
 
+both_flavors!(table_padding_is_not_a_change, |mut h: Harness| async move {
+    let table = "<table><tbody><tr><th>Name</th><th>Note</th></tr>\
+                 <tr><td>A</td><td>short</td></tr></tbody></table>";
+    h.mock.seed_page("1001", "Doc", None, &format!("<p>First.</p>{table}<p>Last.</p>"));
+    h.pull().await;
+    let file = h.read("Doc.md");
+    let row = file.lines().find(|l| l.contains("short")).expect("a table row").to_string();
+
+    // Padding only: the same table.
+    let repadded = row.replace(" | ", "     |     ");
+    h.write("Doc.md", &file.replace(&row, &repadded));
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+    assert!(h.push().await.pushed.is_empty());
+
+    // An edit elsewhere patches its own block; the table goes up as it was.
+    let before = h.mock.page_body("1001").unwrap();
+    h.write("Doc.md", &h.read("Doc.md").replace("Last.", "Last, edited."));
+    assert_eq!(h.push().await.pushed.len(), 1);
+    let after = h.mock.page_body("1001").unwrap();
+    let table_of =
+        |body: &str| body[body.find("<table").unwrap()..body.find("</table>").unwrap()].to_string();
+    assert_eq!(table_of(&after), table_of(&before), "{after}");
+    assert!(after.contains("Last, edited."));
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

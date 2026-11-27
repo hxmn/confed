@@ -1706,7 +1706,7 @@ pub async fn transfer(
         let edited_since = dst
             .state()
             .get_page(&page.page_id)?
-            .is_some_and(|record| record.markdown_hash != file.content_hash());
+            .is_some_and(|record| !file.matches_hash(&record.markdown_hash));
         if let Some(managed) = file.frontmatter.managed.as_mut() {
             managed.space_key = plan.dest.key.clone();
         }

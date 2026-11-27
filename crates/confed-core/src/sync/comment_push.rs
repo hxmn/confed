@@ -722,7 +722,7 @@ impl SyncEngine {
         let abs = ws.absolute(&path);
         if let Ok(content) = std::fs::read_to_string(&abs) {
             if let Ok(mut file) = crate::frontmatter::parse(&content, &path) {
-                let untouched = file.content_hash() == base.markdown_hash;
+                let untouched = file.matches_hash(&base.markdown_hash);
                 if let Some(managed) = file.frontmatter.managed.as_mut() {
                     managed.version = page.summary.version;
                     managed.updated = page.summary.updated_at.clone().or(managed.updated.take());

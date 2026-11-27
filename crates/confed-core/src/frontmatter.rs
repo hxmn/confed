@@ -183,7 +183,21 @@ impl MarkdownFile {
     /// Deliberately excludes the `confed:` block so that a version bump written
     /// by push does not make the file look locally modified, and so YAML
     /// formatting noise (quoting, key order, label order) does not either.
+    ///
+    /// A table's column padding is layout, not content, and is taken out
+    /// first: re-padding a table is not an edit.
     pub fn content_hash(&self) -> String {
+        self.hash_with(&confed_converter::normalize_table_padding(&self.body.replace("\r\n", "\n")))
+    }
+
+    /// Is this file's content the one `stored` was taken of? Bases recorded
+    /// before table padding was normalized hold the hash of the body as it
+    /// was, which still counts.
+    pub fn matches_hash(&self, stored: &str) -> bool {
+        self.content_hash() == stored || self.hash_with(&self.body) == stored
+    }
+
+    fn hash_with(&self, body: &str) -> String {
         let fm = &self.frontmatter;
         let mut labels = fm.labels.clone();
         labels.sort();
@@ -204,7 +218,7 @@ impl MarkdownFile {
         );
         hasher.update(b"\0body\0");
         // Normalize line endings and the trailing newline: neither is content.
-        hasher.update(self.body.replace("\r\n", "\n").trim_end().as_bytes());
+        hasher.update(body.replace("\r\n", "\n").trim_end().as_bytes());
         format!("{:x}", hasher.finalize())
     }
 
