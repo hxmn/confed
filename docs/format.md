@@ -411,6 +411,8 @@ paragraph keeps its original bytes, styling and all.
 | `info` vs `note`, and `panel` | all render `> [!NOTE]`; an edited one comes back as `info` | GitHub alerts have no second informational keyword, and a panel has no severity |
 | table styling, column widths, `<colgroup>` | dropped | not expressible in GFM |
 | the table header row | the first row always becomes the GFM header | GFM requires one |
+| a header column (`<th>` in rows after the first) | an edited row comes back with `<td>` | GFM has header cells in the first row only |
+| `noformat` | an edited one comes back as a `code` macro with no language | Markdown has one kind of code fence |
 | `<p>` wrappers in table cells | normalized to one `<p>` per cell | |
 | `ac:task-id` | dropped; the server reassigns it | |
 | `toc` parameters | dropped | the marker comment only records that a TOC was there |
