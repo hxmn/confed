@@ -266,14 +266,19 @@ impl Renderer<'_> {
                 let body = macros::rich_text_body(el)
                     .map(|b| self.render_children_blocks(&b.children))
                     .unwrap_or_default();
-                // A blank line would terminate the HTML block and split this
-                // into three Markdown blocks, so the body is packed tight.
-                let body = squeeze_blank_lines(body.trim());
-                format!(
-                    "<details><summary>{}</summary>\n{}\n</details>",
-                    dom::escape_text(&title),
-                    body
-                )
+                // Written the GitHub way, its blocks apart: paragraphs packed
+                // tight would fuse on the way back. A `<details>` is one block
+                // whatever blank lines it holds (see `mdblock::groups`).
+                let body = body.trim();
+                if body.is_empty() {
+                    format!("<details><summary>{}</summary>\n</details>", dom::escape_text(&title))
+                } else {
+                    format!(
+                        "<details><summary>{}</summary>\n\n{}\n\n</details>",
+                        dom::escape_text(&title),
+                        body
+                    )
+                }
             }
             "toc" => TOC_MARKER.to_string(),
             "status" => {
@@ -1020,10 +1025,6 @@ fn merge_adjacent_emphasis(nodes: &[Node]) -> Option<Vec<Node>> {
     Some(out)
 }
 
-fn squeeze_blank_lines(text: &str) -> String {
-    text.split('\n').filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join("\n")
-}
-
 /// A heading is one line: its hard breaks (`\` before a newline) and plain
 /// newlines become spaces. Every other backslash is an escape the inline
 /// renderer wrote on purpose, and stays.
@@ -1328,7 +1329,28 @@ mod tests {
         let out = md(
             r#"<ac:structured-macro ac:name="expand"><ac:parameter ac:name="title">More</ac:parameter><ac:rich-text-body><p>hidden</p></ac:rich-text-body></ac:structured-macro>"#,
         );
-        assert_eq!(out, "<details><summary>More</summary>\nhidden\n</details>\n");
+        assert_eq!(out, "<details><summary>More</summary>\n\nhidden\n\n</details>\n");
+    }
+
+    #[test]
+    fn an_expands_blocks_stay_apart_through_an_edit() {
+        let storage = r#"<ac:structured-macro ac:name="expand"><ac:parameter ac:name="title">More</ac:parameter><ac:rich-text-body><p>one</p><p>two</p><ul><li>x</li></ul><p>three</p></ac:rich-text-body></ac:structured-macro>"#;
+        let opts = ConvertOptions::default();
+        let base = crate::storage_to_markdown(storage, &opts).unwrap();
+        assert_eq!(base.block_map.blocks.len(), 1, "{}", base.markdown);
+        let edited = base.markdown.replace("one", "ONE");
+        let out = crate::markdown_to_storage_patched(
+            storage,
+            &base.block_map,
+            &base.markdown,
+            &edited,
+            &opts,
+        )
+        .unwrap();
+        assert!(
+            out.contains("<ac:rich-text-body><p>ONE</p><p>two</p><ul><li>x</li></ul><p>three</p></ac:rich-text-body>"),
+            "{out}"
+        );
     }
 
     #[test]

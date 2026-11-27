@@ -69,10 +69,11 @@ fn generate_at(
     let mut out = String::new();
     // Checked block by block, so a failure names the Markdown line that
     // caused it rather than a byte offset into storage nobody has seen.
-    for block in root.children() {
+    for group in mdblock::groups(root, &markdown) {
+        let block = group[0];
         // Generating recurses through the block; one nested past what any page
         // needs would overflow the stack, so it is refused first.
-        if depth_of(block) > dom::MAX_DEPTH {
+        if group.iter().any(|b| depth_of(b) > dom::MAX_DEPTH) {
             let line = block.data.borrow().sourcepos.start.line + line_offset;
             return Err(ConvertError::Generate(format!(
                 "line {line}: this block nests more than {} levels deep (quotes, lists or \
@@ -81,7 +82,12 @@ fn generate_at(
             )));
         }
         let start = out.len();
-        g.block(block, &mut out)?;
+        if group.len() > 1 {
+            // A `<details>` with blank lines inside: one expand.
+            g.html_block(mdblock::group_text(&group, &markdown).trim_end(), &mut out)?;
+        } else {
+            g.block(block, &mut out)?;
+        }
         if let Err(detail) = dom::check_well_formed(&out[start..]) {
             let line = block.data.borrow().sourcepos.start.line + line_offset;
             return Err(ConvertError::Generate(format!(
@@ -1195,6 +1201,19 @@ mod tests {
         assert_eq!(
             generate("[the runbook](runbook.md)\n", &opts).unwrap(),
             r#"<p><ac:link><ri:page ri:content-title="Runbook" /><ac:plain-text-link-body><![CDATA[the runbook]]></ac:plain-text-link-body></ac:link></p>"#
+        );
+    }
+
+    #[test]
+    fn details_written_the_github_way_is_one_expand() {
+        let out = gen("<details><summary>More</summary>\n\npara one\n\n</details>\n");
+        assert_eq!(
+            out,
+            concat!(
+                r#"<ac:structured-macro ac:name="expand" ac:schema-version="1">"#,
+                r#"<ac:parameter ac:name="title">More</ac:parameter>"#,
+                "<ac:rich-text-body><p>para one</p></ac:rich-text-body></ac:structured-macro>"
+            )
         );
     }
 

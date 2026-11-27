@@ -408,7 +408,6 @@ paragraph keeps its original bytes, styling and all.
 | the table header row | the first row always becomes the GFM header | GFM requires one |
 | `<p>` wrappers in table cells | normalized to one `<p>` per cell | |
 | `ac:task-id` | dropped; the server reassigns it | |
-| blank lines inside an `expand` body | removed | a blank line would split one storage block into three Markdown blocks and break the block map |
 | `toc` parameters | dropped | the marker comment only records that a TOC was there |
 | source pretty-printing and whitespace | not reproduced for regenerated blocks | untouched blocks keep theirs exactly |
 
