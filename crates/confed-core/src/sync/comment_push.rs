@@ -184,6 +184,25 @@ pub fn selection_error(
 }
 
 impl SyncEngine {
+    /// The comment a lost post left on the page: same parent, same body, and
+    /// not one this workspace already knows.
+    async fn find_lost_comment(
+        &self,
+        ws: &Workspace,
+        page_id: &PageId,
+        draft: &comments::SidecarComment,
+        storage: &str,
+    ) -> Result<Option<Comment>> {
+        let known: Vec<String> =
+            ws.state().page_comments(page_id.as_str())?.into_iter().map(|c| c.comment_id).collect();
+        let listed = self.client.list_comments(page_id).await?;
+        Ok(listed.into_iter().find(|c| {
+            !known.contains(&c.id.0)
+                && c.body_storage.trim() == storage.trim()
+                && c.parent_comment_id.as_ref().map(|p| p.0.as_str()) == draft.reply_to.as_deref()
+        }))
+    }
+
     /// Post one page's comment drafts and resolve requests, rewriting its
     /// sidecar after each so a failure part-way posts nothing twice.
     async fn push_page_comments(
@@ -201,6 +220,30 @@ impl SyncEngine {
                 &draft.body,
                 &comment_convert_options(ws, &record.local_path)?,
             )?;
+            // A post whose answer was lost may have reached the server: the
+            // attempt is journaled first, and a draft whose attempt is on record
+            // is looked for on the page before it is posted again — as a page
+            // create is.
+            let journal = format!(
+                "pending_comment:{}:{}",
+                record.page_id,
+                hash_str(&format!("{}\u{0}{storage}", draft.reply_to.as_deref().unwrap_or("")))
+            );
+            if ws.state().get_meta(&journal)?.is_some() {
+                if let Some(found) = self.find_lost_comment(ws, page_id, &draft, &storage).await? {
+                    ws.state().upsert_comment(&comment_record(&record.page_id, &found))?;
+                    if found.parent_comment_id.is_some() {
+                        work.replies.push(found.id.0);
+                    } else {
+                        work.added.push(found.id.0);
+                    }
+                    sidecar.comments.remove(index);
+                    self.rewrite_sidecar(ws, record, path, sidecar)?;
+                    ws.state().delete_meta(&journal)?;
+                    continue;
+                }
+            }
+            ws.state().set_meta(&journal, &crate::state::now())?;
             let posted = match &draft.anchor {
                 Some(anchor) if draft.kind == comments::SidecarKind::Inline => {
                     self.require_inline_create()?;
@@ -251,6 +294,7 @@ impl SyncEngine {
             }
             // Posted: out of the sidecar now, so a failure later in this
             // push cannot post it twice on the retry.
+            ws.state().delete_meta(&journal)?;
             sidecar.comments.remove(index);
             self.rewrite_sidecar(ws, record, path, sidecar)?;
         }

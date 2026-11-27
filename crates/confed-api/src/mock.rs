@@ -84,6 +84,8 @@ struct MockState {
     /// Whether a create is stored and its answer then lost, as when a
     /// gateway times out after Confluence took the request.
     lose_create_answers: bool,
+    /// Whether a new comment is stored but its answer lost.
+    lose_comment_answers: bool,
     /// Whether a create fails with a network error before the page is
     /// stored: a request that never reached the server.
     drop_creates: bool,
@@ -439,6 +441,12 @@ impl MockClient {
     /// answer creates normally again.
     pub fn lose_create_answers(&self, lose: bool) {
         self.state.lock().expect("mock poisoned").lose_create_answers = lose;
+    }
+
+    /// Store new comments but answer with a gateway timeout, as when the
+    /// answer to a post is lost on the way back.
+    pub fn lose_comment_answers(&self, lose: bool) {
+        self.state.lock().expect("mock poisoned").lose_comment_answers = lose;
     }
 
     /// Refuse every label added, or accept them again.
@@ -1263,6 +1271,11 @@ impl ConfluenceClient for MockClient {
         let mut state = self.state.lock().expect("mock poisoned");
         state.comment_modified.insert(comment.id.0.clone(), SystemTime::now());
         state.comments.push(comment.clone());
+        if state.lose_comment_answers {
+            return Err(ApiError::network(
+                "POST comment: HTTP 504 from a gateway in front of Confluence",
+            ));
+        }
         Ok(comment)
     }
 

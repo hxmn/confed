@@ -1137,6 +1137,28 @@ both_flavors!(a_failing_comment_draft_does_not_hide_what_was_pushed, |mut h: Har
     assert!(h.mock.page_body("1001").unwrap().contains("Body, edited."));
 });
 
+both_flavors!(a_comment_whose_answer_was_lost_is_not_posted_twice, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Discussed", None, "<p>Body.</p>");
+    h.mock.seed_comment("1001", "<p>Existing thread.</p>", confed_api::CommentKind::Footer);
+    h.pull().await;
+    let mut sidecar = h.read(".Discussed/comments.md");
+    sidecar.push_str("\n<!-- confed:new -->\nReviewed for Q3.\n");
+    h.write(".Discussed/comments.md", &sidecar);
+
+    // Posted, but the answer never comes back.
+    h.mock.lose_comment_answers(true);
+    let first = h.push().await;
+    assert_eq!(first.failed.len(), 1, "{first:?}");
+    h.mock.lose_comment_answers(false);
+
+    let second = h.push().await;
+    assert_eq!(second.comments_added.len(), 1, "the lost post is found: {second:?}");
+    let posted = h.engine.client().list_comments(&confed_api::PageId::new("1001")).await.unwrap();
+    let copies = posted.iter().filter(|c| c.body_storage.contains("Reviewed for Q3")).count();
+    assert_eq!(copies, 1, "posted once, not twice");
+    assert!(!h.read(".Discussed/comments.md").contains("confed:new"), "the draft is gone");
+});
+
 both_flavors!(an_interrupted_fetch_resumes_where_it_stopped, |mut h: Harness| async move {
     for i in 0..5 {
         h.mock.seed_page(&format!("100{i}"), &format!("Page {i}"), None, "<p>Body.</p>");
