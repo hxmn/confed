@@ -357,7 +357,7 @@ and comment drafts.
 | Flag | Meaning |
 |---|---|
 | *(positional)* | Paths or globs to push. Default is everything with local changes. |
-| `--dry-run`, `--preview` | Show exactly what would be sent, without sending it. |
+| `--dry-run`, `--preview` | Show exactly what would be sent, without sending it — and, under `losses`, each edited block whose base holds what Markdown cannot spell (a coloured span, column widths), which regenerating it drops. |
 | `--interactive` | Confirm each page before uploading. Requires a terminal; exits 2 without one. |
 | `-m`, `--message <TEXT>` | Version comment recorded on the server. |
 | `--allow-delete` | Actually delete pages and attachments on the server that were deleted locally. |

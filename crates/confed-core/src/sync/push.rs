@@ -209,9 +209,23 @@ pub struct PushOutcome {
     /// would — regenerated whole rather than patched block by block.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// A dry run's blocks that the edit regenerates and that hold what their
+    /// Markdown cannot spell — a coloured span, column widths — which the push
+    /// would drop. One entry per block.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub losses: Vec<BlockLoss>,
     /// Everything above, once per page: what happened to it, its files
     /// included. Filled in last, from the lists above, which stay as they are.
     pub pages: Vec<PageReport>,
+}
+
+/// One regenerated block, and what it will lose.
+#[derive(Clone, Debug, Serialize)]
+pub struct BlockLoss {
+    pub path: String,
+    /// 1-based line of the block in the page's file.
+    pub line: usize,
+    pub what: Vec<String>,
 }
 
 /// What a push did — or, in a dry run, would do — to one page.
@@ -730,6 +744,28 @@ impl SyncEngine {
                 let convert_opts = page_convert_options(ws, &op.path)?;
                 self.warn_orphans(ws, &base, &op.path, &file, &convert_opts)?;
                 let _ = self.build_storage(&base, &file.marked_body(), &convert_opts);
+                // What the blocks this edit regenerates hold that Markdown
+                // cannot carry: said before it is lost, not found on the page.
+                if let Ok(base_md) =
+                    confed_converter::storage_to_markdown(&base.storage_body, &convert_opts)
+                {
+                    let losses = confed_converter::patch_losses(
+                        &base.storage_body,
+                        &base_md.block_map,
+                        &base_md.markdown,
+                        &file.marked_body(),
+                    )
+                    .unwrap_or_default();
+                    // Lines of the file before its body: the frontmatter.
+                    let head = crate::frontmatter::split(&text)
+                        .map(|(_, body)| text[..text.len() - body.len()].lines().count())
+                        .unwrap_or(0);
+                    outcome.losses.extend(losses.into_iter().map(|loss| BlockLoss {
+                        path: op.path.clone(),
+                        line: head + loss.line,
+                        what: loss.what,
+                    }));
+                }
             }
             outcome.warnings.extend(self.take_notes());
             for op in &plan.ops {

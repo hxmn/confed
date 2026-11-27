@@ -366,6 +366,13 @@ pub mod push {
             let _ = writeln!(human, "{}", preview.storage);
         }
 
+        if !outcome.losses.is_empty() {
+            let _ =
+                writeln!(human, "\n{}", style.yellow("Regenerating these edited blocks drops:"));
+            for loss in &outcome.losses {
+                let _ = writeln!(human, "  {}:{}: {}", loss.path, loss.line, loss.what.join(", "));
+            }
+        }
         let total = outcome.created.len() + outcome.pushed.len() + outcome.deleted.len();
         let files = outcome.attachments_uploaded.len() + outcome.attachments_deleted.len();
         let comment_work = outcome.comments_added.len()

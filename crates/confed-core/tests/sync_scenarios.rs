@@ -673,6 +673,38 @@ both_flavors!(a_title_changed_on_both_sides_is_a_warning, |mut h: Harness| async
     );
 });
 
+both_flavors!(a_dry_run_names_what_an_edit_will_lose, |mut h: Harness| async move {
+    h.mock.seed_page(
+        "1001",
+        "Doc",
+        None,
+        r#"<p>A <span style="color: red">coloured</span> word.</p><p>Plain.</p>"#,
+    );
+    h.pull().await;
+    h.write("Doc.md", &h.read("Doc.md").replace("word.", "word, edited."));
+    let dry = h
+        .engine
+        .push(&mut h.ws, &PushOptions { dry_run: true, ..Default::default() })
+        .await
+        .unwrap();
+    assert_eq!(dry.losses.len(), 1, "{:?}", dry.losses);
+    assert_eq!(dry.losses[0].what, ["text colour or font"]);
+    let line = h.read("Doc.md").lines().position(|l| l.contains("edited")).unwrap() + 1;
+    assert_eq!(dry.losses[0].line, line);
+
+    // An edit to the plain paragraph loses nothing.
+    h.write(
+        "Doc.md",
+        &h.read("Doc.md").replace("word, edited.", "word.").replace("Plain.", "Plain, edited."),
+    );
+    let dry = h
+        .engine
+        .push(&mut h.ws, &PushOptions { dry_run: true, ..Default::default() })
+        .await
+        .unwrap();
+    assert!(dry.losses.is_empty(), "{:?}", dry.losses);
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

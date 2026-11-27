@@ -43,6 +43,7 @@ pub use blockmap::{normalize_table_padding, BlockEntry, BlockKind, BlockMap, Sid
 pub use dom::MAX_DEPTH;
 pub use error::{ConvertError, ConvertResult};
 pub use marks::{Mark, MarkId, MarkIssue, PlacedMark, Stripped};
+pub use to_storage::{patch_losses, Loss};
 
 use std::collections::HashMap;
 

@@ -785,6 +785,96 @@ pub fn patch(
     Ok(body)
 }
 
+/// What regenerating a block will drop, for one block an edit regenerates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Loss {
+    /// 1-based line of the edited block in the new Markdown.
+    pub line: usize,
+    /// What its base storage holds that Markdown has no spelling for, each
+    /// named once: `text colour or font`, `styling on <td>`, `column widths`…
+    pub what: Vec<String>,
+}
+
+/// The blocks a patch from `base_markdown` to `new_markdown` will regenerate,
+/// with what each one's base storage holds that the regenerated block will
+/// not: what `push --dry-run` warns of. Blocks copied verbatim lose nothing,
+/// and a block whose base has nothing lossy is not listed.
+pub fn patch_losses(
+    base_storage: &str,
+    base_map: &BlockMap,
+    base_markdown: &str,
+    new_markdown: &str,
+) -> ConvertResult<Vec<Loss>> {
+    check_map_matches(base_storage, base_map, base_markdown)?;
+    let new_markdown = &marks::normalize_line_starts(new_markdown);
+    let new_ranges = mdblock::split_blocks(new_markdown);
+    let base_hashes: Vec<String> = base_map
+        .blocks
+        .iter()
+        .map(|b| hash_text(&slice_lines(base_markdown, b.md_span.0, b.md_span.1)))
+        .collect();
+    let new_hashes: Vec<String> =
+        new_ranges.iter().map(|(s, e)| hash_text(&slice_lines(new_markdown, *s, *e))).collect();
+    let mut out = Vec::new();
+    for op in capture_diff_slices(Algorithm::Myers, &base_hashes, &new_hashes) {
+        let DiffOp::Replace { old_index, old_len, new_index, .. } = op else { continue };
+        let mut what: Vec<String> = Vec::new();
+        for block in &base_map.blocks[old_index..old_index + old_len] {
+            let raw = &base_storage[block.storage_span.0..block.storage_span.1];
+            for loss in lossy_in(raw) {
+                if !what.contains(&loss) {
+                    what.push(loss);
+                }
+            }
+        }
+        if !what.is_empty() {
+            let line = new_ranges.get(new_index).map_or(1, |r| r.0 + 1);
+            out.push(Loss { line, what });
+        }
+    }
+    Ok(out)
+}
+
+/// What in a piece of storage the Markdown cannot carry back (see the
+/// lossiness table in `docs/format.md`).
+fn lossy_in(raw: &str) -> Vec<String> {
+    fn walk(nodes: &[dom::Node], out: &mut Vec<String>) {
+        for node in nodes {
+            let Some(el) = node.as_element() else { continue };
+            let name = el.local();
+            let styled = el.attr("style").is_some() || el.attr("class").is_some();
+            let loss = match name {
+                "span" | "font" if styled || name == "font" => {
+                    Some("text colour or font".to_string())
+                }
+                "colgroup" | "col" => Some("column widths".to_string()),
+                "table" if !el.attrs.is_empty() => Some("table layout or width".to_string()),
+                "p" | "td" | "th" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li"
+                | "ul" | "ol"
+                    if el.attr("style").is_some() =>
+                {
+                    Some(format!("styling on <{name}>"))
+                }
+                _ => None,
+            };
+            if let Some(loss) = loss {
+                if !out.contains(&loss) {
+                    out.push(loss);
+                }
+            }
+            walk(&el.children, out);
+        }
+    }
+    let mut out = Vec::new();
+    if let Ok(nodes) = dom::parse_fragment(raw) {
+        walk(&nodes, &mut out);
+    }
+    if raw.contains("&nbsp;") || raw.contains('\u{a0}') {
+        out.push("non-breaking spaces".to_string());
+    }
+    out
+}
+
 fn self_generate(
     new_texts: &[String],
     new_ranges: &[(usize, usize)],

@@ -96,6 +96,19 @@
           }
         },
         "dry_run": { "type": "boolean" },
+        "losses": {
+          "type": "array",
+          "description": "--dry-run: each block the edit regenerates whose base holds what Markdown cannot spell, and that the push would drop. Absent when none.",
+          "items": {
+            "type": "object",
+            "required": ["path", "line", "what"],
+            "properties": {
+              "path": { "type": "string" },
+              "line": { "type": "integer", "minimum": 1, "description": "The block's first line in the page's file." },
+              "what": { "type": "array", "items": { "type": "string" }, "description": "`text colour or font`, `column widths`, `table layout or width`, `styling on <p>`, `non-breaking spaces`." }
+            }
+          }
+        },
         "pages": {
           "type": "array",
           "description": "The same, once per page, sorted by path: what happened to it — or, in a dry run, would — its files included. A script that wants one page's story reads this instead of joining the lists above, which stay.",
