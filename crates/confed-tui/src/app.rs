@@ -601,12 +601,30 @@ impl App {
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
         let spawned =
             std::thread::Builder::new().name(format!("confed-tui-{label}")).spawn(move || {
+                // A cancel asks the engine to stop at its next page boundary,
+                // as Ctrl-C does in the CLI. Dropping the work instead could
+                // land between a page's request and its base record, leaving
+                // the page pushed with nothing here knowing it.
                 let outcome = runtime.block_on(async {
-                    tokio::select! {
-                        result = run_work(&engine, &mut ws, work) => {
-                            result.map_err(|e| e.to_string())
+                    let work = run_work(&engine, &mut ws, work);
+                    tokio::pin!(work);
+                    let mut cancel_rx = cancel_rx;
+                    let mut asked = false;
+                    let result = loop {
+                        tokio::select! {
+                            result = &mut work => break result,
+                            _ = &mut cancel_rx, if !asked => {
+                                confed_core::interrupt::request();
+                                asked = true;
+                            }
                         }
-                        _ = cancel_rx => Ok(format!("Cancelled {label}.")),
+                    };
+                    if asked {
+                        confed_core::interrupt::clear();
+                    }
+                    match result {
+                        Ok(_) if asked => Ok(format!("Stopped {label} between pages.")),
+                        other => other.map_err(|e| e.to_string()),
                     }
                 });
                 let _ = tx.send(Finished { ws, outcome });
@@ -628,8 +646,8 @@ impl App {
         });
     }
 
-    /// Ask the operation to stop at its next await point. Whatever it already
-    /// wrote stays written — the engine's own steps are individually atomic.
+    /// Ask the operation to stop at its next page boundary. Whatever it
+    /// already did stays done and recorded.
     fn cancel_job(&mut self) {
         if let Some(job) = &mut self.job {
             if let Some(cancel) = job.cancel.take() {
@@ -965,6 +983,23 @@ mod tests {
         assert!(body.contains("Original text"), "untouched content survives: {body}");
         assert_eq!(harness.mock.page_version("1001"), Some(2));
         assert_eq!(harness.state_of("Runbook.md"), PageState::Unchanged);
+    }
+
+    /// Cancelling a running push stops it between pages: whatever reached the
+    /// server is recorded here too, and the stop request does not outlive it.
+    #[test]
+    fn cancelling_a_running_push_leaves_the_base_where_the_server_is() {
+        let mut harness = Harness::new();
+        harness.edit("Runbook.md", "\nA new paragraph.\n");
+        harness.select("Runbook.md");
+        harness.press(KeyCode::Char('P'));
+        harness.press(KeyCode::Enter);
+        harness.app.cancel_job();
+        harness.settle();
+
+        let base = harness.app.ws.as_ref().unwrap().state().get_page("1001").unwrap().unwrap();
+        assert_eq!(Some(base.version), harness.mock.page_version("1001"), "{}", harness.app.status);
+        assert!(!confed_core::interrupt::requested(), "the stop request is cleared");
     }
 
     #[test]
