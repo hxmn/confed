@@ -132,6 +132,15 @@
           "type": "array",
           "description": "Which aspects of the page change.",
           "items": { "type": "string", "enum": ["body", "title", "labels", "parent", "delete"] }
+        },
+        "parent": {
+          "type": "object",
+          "description": "Under `created` in a --dry-run: the page it would be created under. Both null for the top of the space; `parent_id` null with a `parent_title` for a parent this same push creates.",
+          "required": ["parent_id", "parent_title"],
+          "properties": {
+            "parent_id": { "type": ["string", "null"] },
+            "parent_title": { "type": ["string", "null"] }
+          }
         }
       }
     },

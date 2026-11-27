@@ -81,6 +81,17 @@ pub struct PageChange {
     /// changed (the page's text and its version are as they were).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ops: Vec<String>,
+    /// For a page a `push --dry-run` would create: where. `None` elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentRef>,
+}
+
+/// The parent a new page would be created under.
+#[derive(Clone, Debug, Serialize)]
+pub struct ParentRef {
+    /// `None` for the top of the space.
+    pub parent_id: Option<String>,
+    pub parent_title: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -602,6 +613,7 @@ impl SyncEngine {
                     from_version: base_record.map(|b| b.version),
                     to_version: None,
                     ops: Vec::new(),
+                    parent: None,
                 });
             }
             if !opts.dry_run {
@@ -622,6 +634,7 @@ impl SyncEngine {
                 from_version: base_record.map(|b| b.version),
                 to_version: None,
                 ops: Vec::new(),
+                parent: None,
             });
             return Ok(());
         }
@@ -755,6 +768,7 @@ impl SyncEngine {
                 from_version: base_record.map(|b| b.version),
                 to_version: Some(remote_page.version),
                 ops: Vec::new(),
+                parent: None,
             });
         }
 
@@ -861,6 +875,7 @@ impl SyncEngine {
                     from_version: Some(record.version),
                     to_version: Some(record.version),
                     ops,
+                    parent: None,
                 });
             }
         }
@@ -1000,6 +1015,7 @@ impl SyncEngine {
             from_version,
             to_version: Some(remote.version),
             ops: Vec::new(),
+            parent: None,
         })
     }
 
@@ -1226,6 +1242,7 @@ impl SyncEngine {
                 from_version: Some(base_record.version),
                 to_version: Some(remote.version),
                 ops: Vec::new(),
+                parent: None,
             },
             conflicted,
         ))

@@ -756,8 +756,19 @@ both_flavors!(a_new_local_file_is_created_on_the_server, |mut h: Harness| async 
         PageState::LocalNew
     );
 
+    // The dry run says where it goes.
+    let dry = h
+        .engine
+        .push(&mut h.ws, &PushOptions { dry_run: true, ..Default::default() })
+        .await
+        .unwrap();
+    let parent = dry.created[0].parent.as_ref().expect("a parent is named");
+    assert_eq!(parent.parent_id.as_deref(), Some("1001"));
+    assert_eq!(parent.parent_title.as_deref(), Some("Parent"));
+
     let outcome = h.push().await;
     assert_eq!(outcome.created.len(), 1);
+    assert!(outcome.created[0].parent.is_none(), "only the dry run names it");
     let page_id = &outcome.created[0].page_id;
     assert!(h.mock.page_exists(page_id));
     assert!(h.mock.page_body(page_id).unwrap().contains("Brand new content"));

@@ -630,6 +630,11 @@ impl SyncEngine {
                     from_version: op.base_version,
                     to_version: op.base_version.map(|v| v + 1),
                     ops: op.ops.clone(),
+                    // A page to be created has nothing else to review but
+                    // where it goes.
+                    parent: (op.kind == PushKind::Create)
+                        .then(|| self.planned_parent(ws, &op.path))
+                        .transpose()?,
                 };
                 match op.kind {
                     PushKind::Create => outcome.created.push(change),
@@ -957,6 +962,7 @@ impl SyncEngine {
                     from_version: op.base_version,
                     to_version: None,
                     ops: op.ops.clone(),
+                    parent: None,
                 }))
             }
             PushKind::Create => {
@@ -996,6 +1002,7 @@ impl SyncEngine {
                         from_version: None,
                         to_version: Some(page.summary.version),
                         ops: op.ops.clone(),
+                        parent: None,
                     }));
                 }
 
@@ -1058,6 +1065,7 @@ impl SyncEngine {
                     from_version: None,
                     to_version: Some(created.summary.version),
                     ops: op.ops.clone(),
+                    parent: None,
                 }))
             }
             PushKind::Update => {
@@ -1171,6 +1179,7 @@ impl SyncEngine {
                     from_version: Some(base_record.version),
                     to_version: Some(updated.summary.version),
                     ops: op.ops.clone(),
+                    parent: None,
                 }))
             }
         }
@@ -1338,6 +1347,38 @@ impl SyncEngine {
             }
         }
         Ok(())
+    }
+
+    /// Where a page a dry run would create goes: its `parent_id`, else the
+    /// page of the folder it is in — tracked, or itself still to be created
+    /// (then only its title is known) — else the top of the space.
+    fn planned_parent(&self, ws: &Workspace, path: &str) -> Result<ParentRef> {
+        let file = std::fs::read_to_string(ws.absolute(path))
+            .ok()
+            .and_then(|text| crate::frontmatter::parse(&text, path).ok());
+        let title_of = |id: &str| -> Result<Option<String>> {
+            Ok(match ws.state().get_page(id)? {
+                Some(page) => Some(page.title),
+                None => ws.state().get_remote(id)?.map(|r| r.title),
+            })
+        };
+        if let Some(id) = file.as_ref().and_then(|f| f.frontmatter.parent_id.clone()) {
+            return Ok(ParentRef { parent_title: title_of(&id)?, parent_id: Some(id) });
+        }
+        let Some((dir, _)) = path.rsplit_once('/') else {
+            return Ok(ParentRef { parent_id: None, parent_title: None });
+        };
+        let parent_path = format!("{dir}.md");
+        if let Some(record) = ws.state().get_page_by_path(&parent_path)? {
+            return Ok(ParentRef {
+                parent_id: Some(record.page_id),
+                parent_title: Some(record.title),
+            });
+        }
+        let new_parent = std::fs::read_to_string(ws.absolute(&parent_path))
+            .ok()
+            .and_then(|text| crate::frontmatter::parse(&text, &parent_path).ok());
+        Ok(ParentRef { parent_id: None, parent_title: new_parent.map(|f| f.frontmatter.title) })
     }
 
     fn note(&self, note: String) {
