@@ -804,7 +804,7 @@ pub fn patch(
                         out.push_str(&base_storage[end..gap_end.max(end)]);
                     }
                     None => {
-                        self_generate(&new_texts, &new_ranges, new_index, new_len, opts, &mut out)?
+                        self_generate(&new_texts, &new_ranges, new_index, new_len, opts, &mut out)?;
                     }
                 }
             }
