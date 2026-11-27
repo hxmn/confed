@@ -100,7 +100,12 @@ pub struct MockClient {
     /// Whether a Data Center inline comment saves a new page version. 9.5.4
     /// wraps the marker in place; the switch exercises servers that do not.
     inline_bumps_version: Arc<std::sync::atomic::AtomicBool>,
+    /// Run when a call whose name starts with the key is made — something a
+    /// test needs to happen in the middle of an operation.
+    hooks: Arc<Mutex<Vec<(String, Hook)>>>,
 }
+
+type Hook = Arc<dyn Fn() + Send + Sync>;
 
 impl MockClient {
     pub fn new(flavor: Flavor) -> Self {
@@ -128,6 +133,7 @@ impl MockClient {
             },
             next_id: Arc::new(AtomicU64::new(1000)),
             inline_bumps_version: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            hooks: Arc::default(),
             user: User {
                 user_key: Some("ff8081".into()),
                 account_id: Some("acc-1".into()),
@@ -148,7 +154,29 @@ impl MockClient {
     }
 
     fn record(&self, call: impl Into<String>) {
-        self.state.lock().expect("mock poisoned").calls.push(call.into());
+        let call = call.into();
+        self.state.lock().expect("mock poisoned").calls.push(call.clone());
+        self.fire(&call);
+    }
+
+    /// Run `hook` whenever a call named `prefix…` is made (`update_page:1001`,
+    /// `list_attachments:1002`), before the call does its work.
+    pub fn on_call(&self, prefix: &str, hook: impl Fn() + Send + Sync + 'static) {
+        self.hooks.lock().expect("mock poisoned").push((prefix.to_string(), Arc::new(hook)));
+    }
+
+    fn fire(&self, call: &str) {
+        let hooks: Vec<Hook> = self
+            .hooks
+            .lock()
+            .expect("mock poisoned")
+            .iter()
+            .filter(|(prefix, _)| call.starts_with(prefix.as_str()))
+            .map(|(_, hook)| hook.clone())
+            .collect();
+        for hook in hooks {
+            hook();
+        }
     }
 
     /// Every mutating call made so far, e.g. `update_page:1001`.
@@ -1042,6 +1070,7 @@ impl ConfluenceClient for MockClient {
     }
 
     async fn list_attachments(&self, id: &PageId) -> ApiResult<Vec<Attachment>> {
+        self.fire(&format!("list_attachments:{id}"));
         let mut state = self.state.lock().expect("mock poisoned");
         state.attachment_listings.push(id.0.clone());
         if state.attachment_listings_down.contains(&id.0) {
@@ -1058,6 +1087,7 @@ impl ConfluenceClient for MockClient {
     }
 
     async fn download_attachment(&self, attachment: &Attachment, dest: &Path) -> ApiResult<u64> {
+        self.fire(&format!("download_attachment:{}", attachment.page_id));
         let bytes = {
             let state = self.state.lock().expect("mock poisoned");
             if state.downloads_down.contains(&attachment.filename) {

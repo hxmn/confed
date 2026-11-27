@@ -1387,7 +1387,22 @@ impl SyncEngine {
 
         // The id goes into the file first. Everything after it can fail and
         // be redone; a page the file does not name would be created again.
-        write_atomic(&ws.absolute(path), &file.render()?)?;
+        //
+        // The file is read again first: one saved while the request was out
+        // is a newer edit, not what was sent. It keeps its text and gets only
+        // the managed block, and the base stays what was sent, so the page
+        // reads as modified and the edit goes up with the next push.
+        let on_disk = std::fs::read_to_string(ws.absolute(path))
+            .ok()
+            .and_then(|text| crate::frontmatter::parse(&text, path).ok())
+            .filter(|now| !now.matches_hash(&local.content_hash()));
+        match on_disk {
+            Some(mut newer) => {
+                newer.frontmatter.managed = file.frontmatter.managed.clone();
+                write_atomic(&ws.absolute(path), &newer.render()?)?;
+            }
+            None => write_atomic(&ws.absolute(path), &file.render()?)?,
+        }
         let mut recorded = file;
         if let Some(labels) = server_labels {
             recorded.frontmatter.labels = labels.to_vec();

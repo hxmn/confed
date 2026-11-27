@@ -632,6 +632,33 @@ impl SyncEngine {
             return Ok(());
         }
 
+        // The statuses were scanned before this pull fetched and downloaded
+        // what it needed, which can take minutes. A file saved meanwhile is
+        // local work the plan never saw: it is left as it is, and the next
+        // pull treats it as the local change it is.
+        // A page that moves is left to the rename logic below: its old and new
+        // paths may be other pages' in this same pull.
+        let stays = base_record.is_none_or(|b| b.local_path == placement.path)
+            && local.is_none_or(|l| l.path == placement.path);
+        if stays && !(opts.force || opts.reset || opts.dry_run) {
+            let path = placement.path.as_str();
+            let now = std::fs::read_to_string(ws.absolute(path))
+                .ok()
+                .and_then(|text| crate::frontmatter::parse(&text, path).ok());
+            let changed = match (local, &now) {
+                (Some(scanned), Some(now)) => !now.matches_hash(&scanned.content_hash),
+                (Some(_), None) => false,
+                (None, now) => now.is_some() && matches!(action, PullAction::Create),
+            };
+            if changed {
+                outcome.warnings.push(format!(
+                    "{path}: saved while this pull ran, so it was not overwritten; pull again to \
+                     bring in the server's version"
+                ));
+                return Ok(());
+            }
+        }
+
         // A page renamed on the server moves its file, and its sidecar goes
         // ahead of it: the attachments and unsent comment work in it are
         // then where everything below looks for them, and a pull cut short

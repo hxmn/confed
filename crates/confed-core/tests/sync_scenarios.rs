@@ -514,6 +514,57 @@ both_flavors!(a_stale_block_map_still_patches_only_the_edited_block, |mut h: Har
     assert!(push.warnings.is_empty(), "patched, so nothing to warn about: {:?}", push.warnings);
 });
 
+both_flavors!(a_file_saved_while_push_runs_is_kept, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Doc", None, "<p>First.</p><p>Second.</p>");
+    h.pull().await;
+    h.write("Doc.md", &h.read("Doc.md").replace("First.", "First, pushed."));
+    // Saved by an editor while the update is out.
+    let path = h.path("Doc.md");
+    h.mock.on_call("update_page:1001", move || {
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("Second.", "Second, saved meanwhile.")).unwrap();
+    });
+    assert_eq!(h.push().await.pushed.len(), 1);
+    let file = h.read("Doc.md");
+    assert!(file.contains("Second, saved meanwhile."), "{file}");
+    assert!(file.contains("version: 2"), "the managed block follows the push: {file}");
+    assert_eq!(h.status("1001"), PageState::Modified, "the newer edit is still owed");
+});
+
+both_flavors!(a_file_saved_while_pull_runs_is_not_overwritten, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Doc", None, "<p>Doc.</p>");
+    h.mock.seed_page("1002", "Other", None, "<p>Other.</p>");
+    h.pull().await;
+    h.mock.remote_edit("1001", "<p>Doc, edited on the server.</p>");
+    h.mock.remote_edit("1002", "<p>Other, edited on the server.</p>");
+    // Something for the pull to download after writing each page.
+    h.mock.attach_directly("1001", "a.txt", b"a");
+    h.mock.attach_directly("1002", "b.txt", b"b");
+    // Saved once the pull has written the first page and is reading its
+    // attachments — after the scan, before the second page is written.
+    let paths = [h.path("Doc.md"), h.path("Other.md")];
+    let hook_paths = paths.clone();
+    h.mock.on_call("download_attachment:", move || {
+        let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap_or_default();
+        for (a, b) in [(0, 1), (1, 0)] {
+            let (done, open) = (read(&hook_paths[a]), read(&hook_paths[b]));
+            if done.contains("server") && !open.contains("server") && !open.contains("meanwhile") {
+                let saved = open.replacen(".\n", ", saved meanwhile.\n", 1);
+                let _ = std::fs::write(&hook_paths[b], saved);
+            }
+        }
+    });
+    let pull = h.pull().await;
+    let saved: Vec<String> = paths
+        .iter()
+        .map(|p| std::fs::read_to_string(p).unwrap())
+        .filter(|t| t.contains("saved meanwhile"))
+        .collect();
+    assert_eq!(saved.len(), 1, "one file was saved during the pull and kept");
+    assert!(!saved[0].contains("server"), "{}", saved[0]);
+    assert_eq!(pull.warnings.len(), 1, "{:?}", pull.warnings);
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;
