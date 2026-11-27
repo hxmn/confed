@@ -1019,10 +1019,12 @@ impl ConfluenceClient for MockClient {
         if state.refuse_labels {
             return Err(ApiError::Auth(format!("POST labels of {id}: HTTP 403")));
         }
+        // As the servers do: a label name is stored lowercase.
+        let label = label.to_lowercase();
         if let Some(page) = state.pages.get_mut(id.as_str()) {
             let labels = page.summary.labels.get_or_insert_with(Vec::new);
-            if !labels.iter().any(|l| l == label) {
-                labels.push(label.to_string());
+            if !labels.contains(&label) {
+                labels.push(label);
             }
         }
         Ok(())

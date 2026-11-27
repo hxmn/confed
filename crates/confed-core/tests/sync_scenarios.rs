@@ -470,6 +470,22 @@ both_flavors!(table_padding_is_not_a_change, |mut h: Harness| async move {
     assert!(after.contains("Last, edited."));
 });
 
+both_flavors!(a_label_that_only_changes_case_is_no_change, |mut h: Harness| async move {
+    use confed_api::{ConfluenceClient, PageId};
+    h.mock.seed_page("1001", "Guide", None, "<p>Guide.</p>");
+    h.mock.add_label(&PageId::new("1001"), "guide").await.unwrap();
+    h.mock.remote_edit("1001", "<p>Guide.</p>");
+    h.pull().await;
+    let file = h.read("Guide.md");
+    assert!(file.contains("- guide"), "{file}");
+    h.write("Guide.md", &file.replace("- guide", "- Guide"));
+
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+    let calls = h.mock.mutating_calls().len();
+    assert!(h.push().await.pushed.is_empty());
+    assert_eq!(h.mock.mutating_calls().len(), calls, "nothing was sent");
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

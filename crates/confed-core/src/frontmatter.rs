@@ -330,7 +330,9 @@ pub fn parse(content: &str, path: &str) -> Result<MarkdownFile> {
         Some(Value::Sequence(seq)) => seq
             .into_iter()
             .map(|v| match v {
-                Value::String(s) => Ok(s),
+                // Confluence keeps label names lowercase: `Guide` is the
+                // label `guide`, and comparing as written would remove it.
+                Value::String(s) => Ok(s.trim().to_lowercase()),
                 other => Err(ConfedError::state(format!(
                     "{path}: labels must be strings, found {other:?}"
                 ))),
