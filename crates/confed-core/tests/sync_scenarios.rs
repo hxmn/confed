@@ -655,6 +655,24 @@ both_flavors!(
     }
 );
 
+both_flavors!(a_title_changed_on_both_sides_is_a_warning, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Doc", None, "<p>First.</p><p>Second.</p>");
+    h.pull().await;
+    h.write(
+        "Doc.md",
+        &h.read("Doc.md").replace("title: Doc", "title: Ours").replace("Second.", "Second, ours."),
+    );
+    h.mock.rename_page("1001", "Theirs");
+    h.mock.remote_edit("1001", "<p>First, theirs.</p><p>Second.</p>");
+    let pull = h.pull().await;
+    assert_eq!(pull.merged.len(), 1, "{pull:?}");
+    assert!(
+        pull.warnings.iter().any(|w| w.contains("\"Ours\"") && w.contains("\"Theirs\"")),
+        "{:?}",
+        pull.warnings
+    );
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

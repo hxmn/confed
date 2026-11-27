@@ -1493,13 +1493,13 @@ impl SyncEngine {
         Ok(ParentRef { parent_id: None, parent_title: new_parent.map(|f| f.frontmatter.title) })
     }
 
-    fn note(&self, note: String) {
+    pub(super) fn note(&self, note: String) {
         if let Ok(mut notes) = self.notes.lock() {
             notes.push(note);
         }
     }
 
-    fn take_notes(&self) -> Vec<String> {
+    pub(super) fn take_notes(&self) -> Vec<String> {
         self.notes.lock().map(|mut n| std::mem::take(&mut *n)).unwrap_or_default()
     }
 

@@ -416,6 +416,7 @@ impl SyncEngine {
         if !outcome.interrupted {
             self.warn_missing_comment_attachments(ws, opts, &view, &mut outcome)?;
         }
+        outcome.warnings.extend(self.take_notes());
 
         self.progress.finish();
         Ok(outcome)
@@ -1169,6 +1170,11 @@ impl SyncEngine {
                     target: "confed::sync",
                     page = %remote.page_id, %ours, %theirs, "title changed on both sides"
                 );
+                self.note(format!(
+                    "{}: the title was changed here (\"{ours}\") and on the server \
+                     (\"{theirs}\"); the merge kept yours, and pushing it renames the page",
+                    placement.path
+                ));
                 ours
             }
         };
@@ -1187,6 +1193,11 @@ impl SyncEngine {
                     target: "confed::sync",
                     page = %remote.page_id, ?ours, ?theirs, "parent changed on both sides"
                 );
+                self.note(format!(
+                    "{}: the page was moved here and on the server; the merge kept your \
+                     parent, and pushing it moves the page there",
+                    placement.path
+                ));
                 ours
             }
         };
