@@ -703,6 +703,44 @@ async fn attaching_a_file_from_its_own_sidecar_keeps_its_bytes() {
     );
 }
 
+/// The `--push` shortcuts report a request the server refused as `confed push`
+/// does: a non-zero exit and an entry in `errors`.
+#[tokio::test]
+async fn push_shortcuts_fail_when_the_server_refuses() {
+    let server = dc_server().await;
+    for (verb, route) in [
+        ("DELETE", format!("/rest/api/content/{CHILD_PAGE}")),
+        ("POST", "/rest/api/content".to_string()),
+        ("POST", format!("/rest/api/content/{ROOT_PAGE}/child/attachment")),
+    ] {
+        Mock::given(method(verb))
+            .and(path(route))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(json!({ "statusCode": 400, "message": "refused" })),
+            )
+            .mount(&server)
+            .await;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let file = dir.path().join("diagram.png");
+    std::fs::write(&file, b"png").unwrap();
+
+    for (command, args) in [
+        ("rm", vec!["rm", CHILD_FILE, "--push", "--yes", "--json"]),
+        ("new", vec!["new", "Team Handbook/Fresh", "--push", "--json"]),
+        ("attach", vec!["attach", ROOT_FILE, file.to_str().unwrap(), "--push", "--json"]),
+    ] {
+        let output = run(confed_authed(dir.path(), &args));
+        assert_ne!(exit_code(&output), 0, "{command}: {}", stdout(&output));
+        let value = envelope(&output, command);
+        assert_eq!(value["confed"]["ok"], json!(false), "{command}: {value}");
+        assert!(!value["errors"].as_array().unwrap().is_empty(), "{command}: {value}");
+    }
+}
+
 /// `attach --rm` must never report a removal it did not make. With `--push` it
 /// deletes on the server; without it, it says the deletion is only staged.
 #[tokio::test]

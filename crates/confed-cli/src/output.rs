@@ -41,6 +41,36 @@ impl Output {
         self
     }
 
+    /// What a `--push` shortcut's push did not do, as `confed push` reports
+    /// it: each failure an error and exit 8, each page or file held back an
+    /// error and exit 4. A shortcut that exits 0 over a refused request reads
+    /// as done.
+    pub fn with_push_outcome(mut self, outcome: &confed_core::sync::PushOutcome) -> Self {
+        for failed in &outcome.failed {
+            let what = if failed.title.is_empty() { &failed.page_id } else { &failed.title };
+            self.errors.push(ErrorEntry {
+                code: ExitCode::Partial.name(),
+                kind: None,
+                message: format!("{what}: {}", failed.error),
+                hint: None,
+            });
+        }
+        for skipped in &outcome.skipped {
+            self.errors.push(ErrorEntry {
+                code: ExitCode::Conflict.name(),
+                kind: None,
+                message: format!("{}: {}", skipped.path, skipped.reason),
+                hint: None,
+            });
+        }
+        if !outcome.failed.is_empty() {
+            self.exit = ExitCode::Partial;
+        } else if !outcome.skipped.is_empty() && self.exit == ExitCode::Ok {
+            self.exit = ExitCode::Conflict;
+        }
+        self
+    }
+
     #[allow(dead_code)]
     pub fn empty() -> Self {
         Self::new(json!({}), String::new())

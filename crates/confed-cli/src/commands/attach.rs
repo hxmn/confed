@@ -87,6 +87,7 @@ pub async fn run(ctx: &mut Context, args: &AttachArgs) -> Result<Output> {
             )
             .await?;
         result["push"] = serde_json::to_value(&outcome)?;
+        return Ok(Output::new(result, human).with_push_outcome(&outcome));
     }
     Ok(Output::new(result, human))
 }

@@ -111,5 +111,5 @@ pub async fn run_and_push(ctx: &mut Context, args: &RmArgs) -> Result<Output> {
     let _ = writeln!(human, "Deleted {} page(s) on the server.", outcome.deleted.len());
     output_json["removed"] = json!(removed);
     output_json["push"] = serde_json::to_value(&outcome)?;
-    Ok(Output::new(output_json, human))
+    Ok(Output::new(output_json, human).with_push_outcome(&outcome))
 }

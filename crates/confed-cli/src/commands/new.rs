@@ -64,7 +64,8 @@ pub async fn run_and_push(ctx: &mut Context, args: &NewArgs) -> Result<Output> {
     Ok(Output::new(
         json!({ "created": created.result, "push": serde_json::to_value(&outcome)? }),
         human,
-    ))
+    )
+    .with_push_outcome(&outcome))
 }
 
 /// Build the file without writing it, so tests can inspect the scaffold.
