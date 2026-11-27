@@ -2904,6 +2904,22 @@ async fn comments_are_edited_and_deleted_on_the_server() {
     let orphans = confed_core::sync::orphan_markers(&h.ws, "1001").unwrap();
     assert_eq!(orphans, vec![("marker-1".to_string(), "first week checklist".to_string())]);
 
+    // prune-markers takes it out, keeping the text, as one new version.
+    let dry = h.engine.prune_markers(&mut h.ws, "1001", true, None).await.unwrap();
+    assert_eq!(dry, orphans);
+    assert!(h.mock.page_body("1001").unwrap().contains("marker-1"), "a dry run changes nothing");
+    let version = h.mock.page_version("1001").unwrap();
+    let pruned = h.engine.prune_markers(&mut h.ws, "1001", false, None).await.unwrap();
+    assert_eq!(pruned, orphans);
+    let body = h.mock.page_body("1001").unwrap();
+    assert!(
+        !body.contains("inline-comment-marker") && body.contains("first week checklist"),
+        "{body}"
+    );
+    assert_eq!(h.mock.page_version("1001"), Some(version + 1));
+    assert!(confed_core::sync::orphan_markers(&h.ws, "1001").unwrap().is_empty());
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+
     let err = h.engine.delete_comment(&mut h.ws, "999").await.unwrap_err();
     assert_eq!(err.exit_code(), confed_core::error::ExitCode::NotFound);
 }

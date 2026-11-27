@@ -682,7 +682,8 @@ fn render_in(base_url: &str, flavor: Flavor, space_key: &str, instance: Option<&
              or as a new page version; confed takes that change in, so the page stays \
              `unchanged`. Page (footer) comments can be added, replied to, edited and deleted, \
              but not resolved — `comment resolve` on one exits 9, and `--all` skips them. \
-             Deleting an inline comment leaves its marker in the page (`orphan_markers`). \
+             Deleting an inline comment leaves its marker in the page (`orphan_markers`); \
+             `confed comment prune-markers <page>` removes such markers, keeping their text. \
              Data Center's inline-comment API rejects mentions and page links in a new \
              comment, so confed creates it without them and adds them right after through \
              the content API — still one comment, one notification; if that second step \

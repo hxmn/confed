@@ -666,6 +666,72 @@ impl SyncEngine {
         Ok(added)
     }
 
+    /// Take the inline-comment markers no comment claims — left behind by
+    /// deleted comments, which Data Center does not unwrap — out of a page,
+    /// keeping their text, as one new version. Returns them as `(ref, text)`.
+    ///
+    /// The page must be as the server has it: a newer version on the server
+    /// is pulled first, so nobody's edit is overwritten.
+    pub async fn prune_markers(
+        &self,
+        ws: &mut Workspace,
+        page_id: &str,
+        dry_run: bool,
+        message: Option<String>,
+    ) -> Result<Vec<(String, String)>> {
+        let base = ws
+            .state()
+            .get_page(page_id)?
+            .ok_or_else(|| ConfedError::NotFound(format!("page {page_id} is not tracked here")))?;
+        let page = self.client.get_page(&PageId::new(page_id), BodyFormat::Storage).await?;
+        if page.summary.version != base.version {
+            return Err(ConfedError::state_with_hint(
+                format!(
+                    "{} is at version {} on the server, {} here",
+                    base.local_path, page.summary.version, base.version
+                ),
+                "run `confed pull` on the page first",
+            ));
+        }
+        let known: Vec<String> = ws
+            .state()
+            .page_comments(page_id)?
+            .iter()
+            .filter_map(|c| c.anchor.as_deref())
+            .filter_map(|a| serde_json::from_str::<confed_api::InlineAnchor>(a).ok())
+            .filter_map(|a| a.marker_ref)
+            .collect();
+        let orphans: Vec<(String, String)> =
+            confed_converter::selection::marker_refs(&page.body_storage)?
+                .into_iter()
+                .filter(|(r, _)| !known.contains(r))
+                .collect();
+        if orphans.is_empty() || dry_run {
+            return Ok(orphans);
+        }
+        let mut storage = page.body_storage.clone();
+        for (marker, _) in &orphans {
+            storage = confed_converter::selection::strip_marker(&storage, marker)?;
+        }
+        let updated = self
+            .client
+            .update_page(
+                &PageId::new(page_id),
+                &PageUpdate {
+                    title: page.summary.title.clone(),
+                    body_storage: Some(storage),
+                    version: base.version + 1,
+                    parent_id: None,
+                    status: None,
+                    message: message
+                        .or_else(|| Some("confed: remove orphan comment markers".into())),
+                },
+            )
+            .await?;
+        self.adopt_body(ws, &base, &updated).await?;
+        Ok(orphans)
+    }
+
     /// Bring the base up to date with the marker a new inline comment put
     /// into the server's body.
     ///
@@ -707,6 +773,15 @@ impl SyncEngine {
             }
         }
 
+        self.adopt_body(ws, &base, &page).await
+    }
+
+    /// Make `page`, as the server now has it, the base of `base`'s page —
+    /// re-rendering the file when it carries no local edits.
+    async fn adopt_body(&self, ws: &mut Workspace, base: &PageRecord, page: &Page) -> Result<()> {
+        let page_id = base.page_id.as_str();
+        let path = base.local_path.clone();
+        let opts = page_convert_options(ws, &path)?;
         let converted = confed_converter::storage_to_markdown(&page.body_storage, &opts)?;
         let mut updated = base.clone();
         updated.storage_body = page.body_storage.clone();

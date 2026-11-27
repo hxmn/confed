@@ -45,7 +45,38 @@ pub async fn run(ctx: &mut Context, command: &CommentCommand) -> Result<Output> 
         }
         CommentCommand::Edit { comment_id, body } => edit_comment(ctx, comment_id, body).await,
         CommentCommand::Rm { comment_ids } => remove(ctx, comment_ids).await,
+        CommentCommand::PruneMarkers { page, dry_run, message } => {
+            prune_markers(ctx, page, *dry_run, message.clone()).await
+        }
     }
+}
+
+/// `comment prune-markers`: the orphan markers of a page, taken out.
+async fn prune_markers(
+    ctx: &mut Context,
+    page: &str,
+    dry_run: bool,
+    message: Option<String>,
+) -> Result<Output> {
+    let page_id = ctx.resolve_page(page)?;
+    let client = ctx.build_client()?;
+    let engine = ctx.engine(client)?;
+    let ws = ctx.workspace_mut()?;
+    let _lock = ws.lock()?;
+    let pruned = engine.prune_markers(ws, &page_id, dry_run, message).await?;
+    let mut human = String::new();
+    for (marker, text) in &pruned {
+        let verb = if dry_run { "would remove" } else { "removed" };
+        let _ = writeln!(human, "  {verb} marker {marker} around \"{text}\"");
+    }
+    if pruned.is_empty() {
+        human.push_str("No orphan markers on this page.\n");
+    } else if dry_run {
+        human.push_str("Dry run — nothing was changed.\n");
+    }
+    let markers: Vec<serde_json::Value> =
+        pruned.iter().map(|(r, text)| json!({ "ref": r, "text": text })).collect();
+    Ok(Output::new(json!({ "page_id": page_id, "dry_run": dry_run, "removed": markers }), human))
 }
 
 /// Push the comment work of `pages` now — nothing else: no page edits, no

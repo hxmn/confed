@@ -593,6 +593,7 @@ immediately.
 | `comment resolve <COMMENT_ID>...` | `--all <PAGE>`, `--push` (on Data Center, inline threads only) |
 | `comment edit <COMMENT_ID>` | `-m`, `--body <TEXT>` (required); applied on the server at once |
 | `comment rm <COMMENT_ID>...` | global `--yes` to skip the question; deletes on the server at once, replies included |
+| `comment prune-markers <page>` | `--dry-run`, `-m`; removes the `orphan_markers` from the page, keeping their text, as one new version (pull first if the server has a newer one) |
 
 `list --json` gives each comment `resolved` and `thread_resolved` (a reply carries its
 thread's status) and the page's `orphan_markers`: inline markers no comment claims.

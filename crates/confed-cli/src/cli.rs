@@ -674,6 +674,17 @@ pub enum CommentCommand {
         #[arg(required = true, num_args = 1.., value_parser = comment_id)]
         comment_ids: Vec<String>,
     },
+    /// Remove the inline-comment markers no comment claims — left in the page
+    /// by deleted comments — keeping their text, as one new page version.
+    PruneMarkers {
+        page: String,
+        /// List the markers that would go, and change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Version comment recorded on the server.
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
