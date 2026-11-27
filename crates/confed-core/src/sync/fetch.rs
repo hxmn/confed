@@ -1071,8 +1071,22 @@ impl SyncEngine {
                 continue;
             }
             // One name, one file: a server that lists a name twice is not
-            // followed into storing two.
-            if after.iter().any(|a| a.filename == attachment.filename) {
+            // followed into storing two — nor, where file names ignore case,
+            // two names that differ only in it.
+            let same_file = |a: &AttachmentRecord| {
+                a.filename == attachment.filename
+                    || (!attachments::NAMES_ARE_CASE_SENSITIVE
+                        && a.filename.to_lowercase() == attachment.filename.to_lowercase())
+            };
+            if after.iter().any(same_file) {
+                if !after.iter().any(|a| a.filename == attachment.filename) {
+                    tracing::warn!(
+                        target: "confed::sync",
+                        page = %id, name = %attachment.filename,
+                        "another attachment of this page differs from this one only in case, \
+                         which this system's files cannot tell apart; it is left out"
+                    );
+                }
                 continue;
             }
             let same = before.iter().find(|b| b.attachment_id == attachment.id.0);

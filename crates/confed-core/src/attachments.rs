@@ -29,7 +29,30 @@ pub fn is_storable(name: &str) -> bool {
         && name != crate::comments::COMMENTS_FILENAME
         && name != crate::paths::STORAGE_FILENAME
         && !is_partial(name)
+        && (!cfg!(windows) || windows_allows(name))
 }
+
+/// Can Windows keep a file of this name? Not with `<>:"|?*` or a control
+/// character in it, a trailing dot or space, or a device name (`CON`,
+/// `aux.txt`).
+pub fn windows_allows(name: &str) -> bool {
+    if name.chars().any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control())
+        || name.ends_with(['.', ' '])
+    {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name).trim_end().to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit()
+            && stem.as_bytes()[3] != b'0');
+    !device
+}
+
+/// Whether this system's files tell `A.png` from `a.png`: not on Windows or
+/// macOS (by default), where two such attachments would be one file.
+pub const NAMES_ARE_CASE_SENSITIVE: bool = !cfg!(any(windows, target_os = "macos"));
 
 /// Delete stale partial downloads left in a sidecar directory by an interrupted
 /// pull. Returns how many went. Unreadable entries are left alone.
@@ -239,6 +262,17 @@ mod tests {
             ".video.webm.confed-part",
         ] {
             assert!(!is_storable(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn names_windows_cannot_keep_are_known() {
+        for name in ["a:b.png", "what?.txt", "CON", "aux.txt", "com1.log", "trailing.", "trailing "]
+        {
+            assert!(!windows_allows(name), "{name:?}");
+        }
+        for name in ["diagram.png", "con-call.txt", "COM0.txt", "Фото.jpg"] {
+            assert!(windows_allows(name), "{name:?}");
         }
     }
 
