@@ -611,11 +611,12 @@ impl SyncEngine {
                 else {
                     continue;
                 };
-                let (Ok(file), Some(base)) =
+                let (Ok(mut file), Some(base)) =
                     (crate::frontmatter::parse(&text, &op.path), ws.state().get_page(page_id)?)
                 else {
                     continue;
                 };
+                self.drop_foreign_marks(ws, page_id, &op.path, &mut file)?;
                 let convert_opts = page_convert_options(ws, &op.path)?;
                 let _ = self.build_storage(&base, &file.marked_body(), &convert_opts);
             }
@@ -1070,6 +1071,8 @@ impl SyncEngine {
                     .ok_or_else(|| ConfedError::state(format!("{path}: no base record")))?;
 
                 let convert_opts = page_convert_options(ws, &path)?;
+                let mut file = file;
+                self.drop_foreign_marks(ws, &page_id, &path, &mut file)?;
                 // The marked body: a regenerated block keeps its inline comment
                 // markers, so an edit next to a thread does not orphan it.
                 let body_storage = if op.ops.iter().any(|o| o == "body") {
@@ -1258,6 +1261,46 @@ impl SyncEngine {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Take out of `file` the comment marks whose comment is not this page's —
+    /// carried in with text pasted from another page — and say so. Uploaded,
+    /// they would anchor nothing here, or the other page's thread.
+    fn drop_foreign_marks(
+        &self,
+        ws: &Workspace,
+        page_id: &str,
+        path: &str,
+        file: &mut MarkdownFile,
+    ) -> Result<()> {
+        let own: std::collections::HashSet<String> =
+            ws.state().page_comments(page_id)?.into_iter().map(|c| c.comment_id).collect();
+        let mut foreign: Vec<String> = file
+            .marks
+            .iter()
+            .filter_map(|m| match &m.id {
+                MarkId::Comment(id) if !own.contains(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        if foreign.is_empty() {
+            return Ok(());
+        }
+        foreign.sort();
+        foreign.dedup();
+        file.marks.retain(|m| !matches!(&m.id, MarkId::Comment(id) if foreign.contains(id)));
+        let one = foreign.len() == 1;
+        self.note(format!(
+            "{path}: the comment mark{} {} belong{} to no comment of this page — text pasted \
+             from another page brings its marks along — so {} not uploaded; the next pull \
+             takes {} out of the file",
+            if one { "" } else { "s" },
+            foreign.iter().map(|id| format!("`c {id}`")).collect::<Vec<_>>().join(", "),
+            if one { "s" } else { "" },
+            if one { "it is" } else { "they are" },
+            if one { "it" } else { "them" },
+        ));
+        Ok(())
     }
 
     fn note(&self, note: String) {

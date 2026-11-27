@@ -565,6 +565,31 @@ both_flavors!(a_file_saved_while_pull_runs_is_not_overwritten, |mut h: Harness| 
     assert_eq!(pull.warnings.len(), 1, "{:?}", pull.warnings);
 });
 
+both_flavors!(
+    a_comment_mark_pasted_from_another_page_is_reported_and_left_out,
+    |mut h: Harness| async move {
+        h.mock.seed_page("1002", "B", None, "<p>First.</p><p>Second.</p>");
+        h.pull().await;
+        // Text moved here from another page, with the mark of that page's comment.
+        let pasted =
+            "First, with <!--c 77120 Alice: hi-->pasted text<!--/c 77120--> from elsewhere.";
+        h.write("B.md", &h.read("B.md").replace("First.", pasted));
+
+        let dry = h
+            .engine
+            .push(&mut h.ws, &PushOptions { dry_run: true, ..Default::default() })
+            .await
+            .unwrap();
+        assert!(dry.warnings.iter().any(|w| w.contains("c 77120")), "{:?}", dry.warnings);
+
+        let push = h.push().await;
+        assert_eq!(push.pushed.len(), 1, "{push:?}");
+        assert!(push.warnings.iter().any(|w| w.contains("c 77120")), "{:?}", push.warnings);
+        let body = h.mock.page_body("1002").unwrap();
+        assert!(!body.contains("77120") && body.contains("pasted text"), "{body}");
+    }
+);
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

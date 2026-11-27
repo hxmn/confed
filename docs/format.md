@@ -361,6 +361,9 @@ checklist<!--/c 77120--> before Friday.
   untouched paragraph is never regenerated because it carries a mark, and no mark can
   leak into Confluence. Deleting a mark changes nothing: the next pull puts it back from
   what the server knows. Resolution stays explicit (`confed:resolve` in the sidecar).
+- A mark belongs to its page. One carried into another page with pasted text names a
+  comment that page does not have: push leaves it out of what it uploads and says so in
+  its warnings (in `--dry-run` too), and the next pull takes it out of the file.
 - A mark cannot open at the very start of a line — CommonMark would read `<!--` there as
   an HTML block — so confed starts it one character in when it has to. The comment's
   real anchor is unaffected.
