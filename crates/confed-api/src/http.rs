@@ -976,14 +976,29 @@ async fn watch_upload(
 }
 
 async fn decode<T: DeserializeOwned>(resp: reqwest::Response, context: &str) -> ApiResult<T> {
+    let html = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("text/html"));
     let text = resp.text().await?;
     if text.trim().is_empty() {
         // Some endpoints answer 204; let unit-ish targets succeed.
         return serde_json::from_str("null")
             .map_err(|e| ApiError::Decode { context: context.to_string(), source: e });
     }
-    serde_json::from_str(&text)
-        .map_err(|e| ApiError::Decode { context: context.to_string(), source: e })
+    serde_json::from_str(&text).map_err(|e| {
+        // A web page where the API was asked: almost always a single sign-on
+        // proxy's sign-in page, which a JSON parse error would only hide.
+        if html || text.trim_start().starts_with('<') {
+            ApiError::Auth(format!(
+                "{context}: a web page came back instead of the API's answer — usually a \
+                 sign-in page in front of Confluence, which this credential does not get past"
+            ))
+        } else {
+            ApiError::Decode { context: context.to_string(), source: e }
+        }
+    })
 }
 
 fn parse_retry_after(resp: &reqwest::Response) -> Option<Duration> {

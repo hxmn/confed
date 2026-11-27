@@ -373,7 +373,7 @@ pub async fn connect(ctx: &Context, input: &InitInput) -> Result<Connected> {
     let client = ctx.client_for(flavor, &input.base_url, build_auth(input, auth_method))?;
 
     let user = client.whoami().await.map_err(|e| match e {
-        confed_api::ApiError::Auth(msg) => {
+        confed_api::ApiError::Auth(msg) | confed_api::ApiError::Forbidden(msg) => {
             ConfedError::Auth(format!("could not authenticate against {}: {msg}", input.base_url))
         }
         other => other.into(),

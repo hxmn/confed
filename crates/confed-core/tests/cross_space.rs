@@ -387,7 +387,7 @@ async fn restrictions_and_permissions_are_reported_before_anything_moves() {
 async fn a_server_that_refuses_the_move_leaves_everything_as_it_was() {
     let mut h = Harness::new().await;
     for (status, code) in
-        [(403, confed_core::ExitCode::Auth), (409, confed_core::ExitCode::Conflict)]
+        [(403, confed_core::ExitCode::State), (409, confed_core::ExitCode::Conflict)]
     {
         h.mock.refuse_moves(Some(status));
         let mut plan = h.plan(&h.request("1002", "2002")).await.unwrap();

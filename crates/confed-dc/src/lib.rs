@@ -504,7 +504,7 @@ fn judge_web_move(answer: &confed_api::WebAnswer, flavor: Flavor) -> ApiResult<(
             flavor,
             "move a page (neither rest/api/content/{id}/move nor pages/movepage.action answers)",
         )),
-        403 => Err(ApiError::Auth(
+        403 => Err(ApiError::Forbidden(
             "pages/movepage.action: HTTP 403: you may not move this page there".into(),
         )),
         status => Err(ApiError::Server { status, body: "pages/movepage.action".into() }),

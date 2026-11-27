@@ -565,7 +565,14 @@ impl ConfluenceClient for CloudClient {
         match self.http.put_json::<_, serde_json::Value>(&path, &json!({ "resolved": true })).await
         {
             Ok(_) => Ok(()),
-            Err(e) if matches!(e, ApiError::Auth(_) | ApiError::NotFound(_)) => Err(e),
+            Err(e)
+                if matches!(
+                    e,
+                    ApiError::Auth(_) | ApiError::Forbidden(_) | ApiError::NotFound(_)
+                ) =>
+            {
+                Err(e)
+            }
             Err(_) => {
                 // Some tenants insist on the full update payload (version + body).
                 let current: v2::Comment =

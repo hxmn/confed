@@ -58,7 +58,7 @@ pub async fn detect_flavor(base_url: &str, auth: Auth) -> ApiResult<Flavor> {
     ] {
         match http.get_json::<serde_json::Value>(path, &[]).await {
             Ok(_) => return Ok(flavor),
-            Err(ApiError::Auth(_)) => return Ok(flavor),
+            Err(ApiError::Auth(_) | ApiError::Forbidden(_)) => return Ok(flavor),
             Err(_) => continue,
         }
     }

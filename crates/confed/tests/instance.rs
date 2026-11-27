@@ -1228,8 +1228,10 @@ async fn a_refused_move_changes_nothing_and_can_be_aborted() {
 
     let src = "DOCS:Team Handbook/Onboarding.md";
     let out = run(root.path(), &["instance", "mv", src, "ENG:", "-y", "--json"]);
-    assert_eq!(code(&out), 3, "{}", stderr(&out));
+    // A permission, not the credential: 7, as every `no_permission`.
+    assert_eq!(code(&out), 7, "{}", stderr(&out));
     let env = envelope(&out, "instance");
+    assert_eq!(env["errors"][0]["kind"], json!("no_permission"), "{env}");
     let message = env["errors"][0]["message"].as_str().unwrap();
     assert!(message.contains("HTTP 403") && message.contains("permission"), "{message}");
     assert_eq!(confluence.world().pages["1002"].space, "DOCS");

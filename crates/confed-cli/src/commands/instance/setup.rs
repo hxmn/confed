@@ -375,10 +375,12 @@ pub async fn adopt(
     if let Some(connection) = connection {
         let client = connection.client(ctx)?;
         let user = client.whoami().await.map_err(|e| match e {
-            confed_api::ApiError::Auth(m) => ConfedError::Auth(format!(
+            confed_api::ApiError::Auth(m) | confed_api::ApiError::Forbidden(m) => {
+                ConfedError::Auth(format!(
                 "the credential from {} does not authenticate against {} ({m}); nothing was moved",
                 connection.source, connection.base_url
-            )),
+            ))
+            }
             other => other.into(),
         })?;
         let session = Session {
@@ -852,10 +854,12 @@ pub async fn clone(
     let client = connection.client(ctx)?;
     // One check up front: a rejected credential fails before any folder exists.
     client.whoami().await.map_err(|e| match e {
-        confed_api::ApiError::Auth(m) => ConfedError::Auth(format!(
-            "could not authenticate against {} with {}: {m}",
-            connection.base_url, connection.source
-        )),
+        confed_api::ApiError::Auth(m) | confed_api::ApiError::Forbidden(m) => {
+            ConfedError::Auth(format!(
+                "could not authenticate against {} with {}: {m}",
+                connection.base_url, connection.source
+            ))
+        }
         other => other.into(),
     })?;
 

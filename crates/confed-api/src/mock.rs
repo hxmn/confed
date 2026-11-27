@@ -1017,7 +1017,7 @@ impl ConfluenceClient for MockClient {
         self.record(format!("add_label:{id}:{label}"));
         let mut state = self.state.lock().expect("mock poisoned");
         if state.refuse_labels {
-            return Err(ApiError::Auth(format!("POST labels of {id}: HTTP 403")));
+            return Err(ApiError::Forbidden(format!("POST labels of {id}: HTTP 403")));
         }
         // As the servers do: a label name is stored lowercase.
         let label = label.to_lowercase();

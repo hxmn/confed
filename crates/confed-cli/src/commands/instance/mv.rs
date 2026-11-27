@@ -556,6 +556,10 @@ fn with_resume_hint(e: ConfedError, id: &str) -> ConfedError {
             ConfedError::State { message, hint: Some(next) }
         }
         ConfedError::Usage { message, .. } => ConfedError::Usage { message, hint: Some(next) },
+        // A named refusal keeps its name and exit code.
+        ConfedError::Refused { kind, exit, message, .. } => {
+            ConfedError::Refused { kind, exit, message, hint: Some(next) }
+        }
         other => {
             let code = other.exit_code();
             let message = other.to_string();

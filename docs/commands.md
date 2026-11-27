@@ -125,11 +125,11 @@ quietly rather than failing.
 | 0 | `OK` | Success, including "nothing to do". |
 | 1 | `ERROR` | Unexpected or internal failure: I/O, SQLite, a conversion bug. Also `doctor` with a failing check. |
 | 2 | `USAGE` | Bad arguments, or a required value that could not be resolved without prompting. |
-| 3 | `AUTH` | The server rejected the credentials (401/403). |
+| 3 | `AUTH` | The server rejected the credentials (401), or a sign-in page answered instead of the API. |
 | 4 | `CONFLICT` | A version conflict, or an unresolved merge conflict. |
 | 5 | `NETWORK` | Connectivity, TLS, timeout, or rate limiting that survived the retries. |
 | 6 | `NOT_FOUND` | No such page, space, attachment, or comment. |
-| 7 | `STATE` | A local precondition failed: not a workspace, local edits would be clobbered, tool-managed frontmatter was edited, the lock is held, `.session.db` is too permissive. Also a refusal as things stand on the server: a space key that is taken, no permission to create spaces. |
+| 7 | `STATE` | A local precondition failed: not a workspace, local edits would be clobbered, tool-managed frontmatter was edited, the lock is held, `.session.db` is too permissive. Also a refusal as things stand on the server: a space key that is taken, and any permission the server refused (403, `kind` `no_permission`): a restricted page, a missing space permission. |
 | 8 | `PARTIAL` | Some operations succeeded and some failed; the details are in `result`. |
 | 9 | `UNSUPPORTED` | The operation does not exist on this Confluence flavor or release: a Data Center older than an `admin` command needs, creating a user on Cloud, `--role` on a site without space roles. |
 | 10 | `DIFFERENCES` | Differences exist. Only ever produced by `--exit-code`, and deliberately outside the error range. |

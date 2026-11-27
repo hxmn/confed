@@ -757,7 +757,7 @@ async fn a_401_maps_to_an_auth_error() {
 }
 
 #[tokio::test]
-async fn a_403_also_maps_to_an_auth_error() {
+async fn a_403_is_a_permission_naming_the_page_not_a_bad_credential() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/confluence/rest/api/content/1001"))
@@ -767,7 +767,25 @@ async fn a_403_also_maps_to_an_auth_error() {
 
     let err =
         client(&server).get_page(&PageId::new("1001"), BodyFormat::Storage).await.unwrap_err();
-    assert!(matches!(err, ApiError::Auth(_)), "got {err:?}");
+    assert!(matches!(&err, ApiError::Forbidden(m) if m.contains("1001")), "got {err:?}");
+}
+
+#[tokio::test]
+async fn a_sign_in_page_instead_of_the_api_is_named_as_one() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/1001"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_string("<!DOCTYPE html><html><body>Sign in</body></html>"),
+        )
+        .mount(&server)
+        .await;
+
+    let err =
+        client(&server).get_page(&PageId::new("1001"), BodyFormat::Storage).await.unwrap_err();
+    assert!(err.to_string().contains("a web page came back"), "got {err:?}");
 }
 
 #[tokio::test]
@@ -1393,7 +1411,7 @@ async fn a_refused_move_keeps_its_meaning() {
     for (status, check) in [
         (
             403,
-            (|e: &ApiError| matches!(e, ApiError::Auth(m) if m.contains("403")))
+            (|e: &ApiError| matches!(e, ApiError::Forbidden(m) if m.contains("403")))
                 as fn(&ApiError) -> bool,
         ),
         (404, |e: &ApiError| matches!(e, ApiError::NotFound(_))),

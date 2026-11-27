@@ -829,7 +829,7 @@ binary: reading them needs no network access and no repository checkout.
 | 4 | conflict | run `confed pull`, resolve, then push |
 | 5 | network | retry later |
 | 6 | not found | check the page path or id |
-| 7 | local state problem, or refused as things stand | dirty files, tampered frontmatter, lock held; a taken space key, or no permission to create spaces (`errors[].kind` says which) |
+| 7 | local state problem, or refused as things stand | dirty files, tampered frontmatter, lock held; a taken space key, or no permission to create spaces — or any other permission the server refused, `no_permission` (`errors[].kind` says which) |
 | 8 | partial success | inspect `result` and `errors` in the JSON |
 | 9 | unsupported on this server | e.g. resolving a page comment on Data Center, or a server without the inline-comment API |
 | 10 | differences exist | only from `--exit-code` |

@@ -1493,11 +1493,16 @@ async fn move_error(
     e: ApiError,
 ) -> ConfedError {
     match e {
-        ApiError::Auth(message) if message.contains("403") => ConfedError::Auth(format!(
-            "the server refused to move page {root} to space {} (HTTP 403): you need permission \
-             to remove the pages from {} and to add pages in {}",
-            plan.dest.key, plan.source.key, plan.dest.key
-        )),
+        ApiError::Forbidden(_) => ConfedError::refused(
+            "no_permission",
+            crate::error::ExitCode::State,
+            format!(
+                "the server refused to move page {root} to space {} (HTTP 403): you need \
+                 permission to remove the pages from {} and to add pages in {}",
+                plan.dest.key, plan.source.key, plan.dest.key
+            ),
+            None,
+        ),
         ApiError::NotFound(message) => {
             // Gone pages, or a server without the endpoint?
             let root = client.get_page(&PageId::new(root), BodyFormat::Storage).await;

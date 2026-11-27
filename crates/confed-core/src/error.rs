@@ -233,6 +233,18 @@ impl From<ApiError> for ConfedError {
     fn from(e: ApiError) -> Self {
         match e {
             ApiError::Auth(m) => ConfedError::Auth(m),
+            // Signed in, and refused: a permission, not the credential, so
+            // `confed init` is no help (7, as every `no_permission`).
+            ApiError::Forbidden(m) => ConfedError::refused(
+                "no_permission",
+                ExitCode::State,
+                m,
+                Some(
+                    "the credential works, but lacks the permission for this page or operation: \
+                     ask a space administrator"
+                        .into(),
+                ),
+            ),
             ApiError::Network { message, .. } => ConfedError::Network(message),
             ApiError::RateLimited(m) => ConfedError::Network(m),
             ApiError::NotFound(m) => ConfedError::NotFound(m),
@@ -282,6 +294,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_403_is_a_permission_and_does_not_send_the_user_to_init() {
+        let err = ConfedError::from(ApiError::Forbidden("GET content/1001: HTTP 403".into()));
+        assert_eq!(err.kind(), Some("no_permission"));
+        assert!(err.to_string().contains("1001"), "{err}");
+        assert!(!err.hint().unwrap_or_default().contains("confed init"), "{err:?}");
+    }
+
+    #[test]
     fn exit_codes_match_the_documented_table() {
         assert_eq!(ExitCode::Ok.as_i32(), 0);
         assert_eq!(ExitCode::Error.as_i32(), 1);
@@ -301,6 +321,7 @@ mod tests {
         let cases: Vec<(ConfedError, ExitCode)> = vec![
             (ConfedError::usage("x"), ExitCode::Usage),
             (ConfedError::Auth("x".into()), ExitCode::Auth),
+            (ConfedError::from(ApiError::Forbidden("page 1001: HTTP 403".into())), ExitCode::State),
             (ConfedError::Conflict("x".into()), ExitCode::Conflict),
             (ConfedError::Network("x".into()), ExitCode::Network),
             (ConfedError::NotFound("x".into()), ExitCode::NotFound),

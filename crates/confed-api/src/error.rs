@@ -6,9 +6,14 @@ pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
 #[derive(Debug, Error)]
 pub enum ApiError {
-    /// 401/403: bad or insufficient credentials.
+    /// 401: the credential itself was refused.
     #[error("authentication failed: {0}")]
     Auth(String),
+
+    /// 403: the credential is fine, but may not do this — a restricted page,
+    /// a missing space permission.
+    #[error("permission denied: {0}")]
+    Forbidden(String),
 
     /// Transport failure, TLS problem, timeout, or retries exhausted.
     /// `message` already names the causes, for whoever prints only it;
@@ -68,7 +73,8 @@ impl ApiError {
     /// Classify a non-success HTTP response.
     pub fn from_status(status: u16, body: String, context: &str) -> Self {
         match status {
-            401 | 403 => ApiError::Auth(format!("{context}: HTTP {status}: {}", truncate(&body))),
+            401 => ApiError::Auth(format!("{context}: HTTP {status}: {}", truncate(&body))),
+            403 => ApiError::Forbidden(format!("{context}: HTTP {status}: {}", truncate(&body))),
             404 => ApiError::NotFound(format!("{context}: {}", truncate(&body))),
             // Confluence answers some writes to deleted content with a 400 that
             // says so, rather than a 404.
