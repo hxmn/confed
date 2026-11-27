@@ -1,0 +1,20 @@
+# Routine dependency updates, weekly: one pull request per ecosystem carrying
+# the minor and patch updates together, and majors on their own. The actions
+# are pinned to commit SHAs (with the version in a comment), which Dependabot
+# moves along with the comment.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      crates:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
