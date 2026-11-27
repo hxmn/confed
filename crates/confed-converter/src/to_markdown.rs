@@ -618,6 +618,7 @@ impl Renderer<'_> {
 
     fn render_image(&mut self, el: &Element) -> String {
         let alt = el.attr_local("alt").or_else(|| el.attr_local("title")).unwrap_or("").to_string();
+        self.keep_if_elsewhere(el);
         let src = el
             .child_elements()
             .find_map(|c| match c.local() {
@@ -627,6 +628,20 @@ impl Renderer<'_> {
             })
             .unwrap_or_default();
         md_image(&alt, &src)
+    }
+
+    /// A file attached to another page — an `ri:attachment` with the page
+    /// (or blog post) it hangs off inside it — has no place in this page's
+    /// sidecar: written as a sidecar path it would go back as this page's
+    /// attachment, and break. Its block is kept as it is.
+    fn keep_if_elsewhere(&mut self, el: &Element) {
+        let elsewhere = el
+            .child_elements()
+            .filter(|c| c.local() == "attachment")
+            .any(|a| a.child_elements().next().is_some());
+        if elsewhere {
+            self.keep_verbatim = true;
+        }
     }
 
     fn attachment_path(&self, filename: &str) -> String {
@@ -698,6 +713,7 @@ impl Renderer<'_> {
                 }
             }
             Some(t) if t.local() == "attachment" => {
+                self.keep_if_elsewhere(el);
                 let file = t.attr_local("filename").unwrap_or("").to_string();
                 if !label_from_body {
                     label = escape_md(&file);
@@ -1528,6 +1544,28 @@ mod user_mention_tests {
         // Where Markdown can say it, it still does.
         let md = crate::storage_to_markdown("<p><strong>Note:</strong> text</p>", &opts).unwrap();
         assert_eq!(md.markdown.trim(), "**Note:** text");
+    }
+
+    #[test]
+    fn a_file_attached_to_another_page_keeps_its_block() {
+        let opts = ConvertOptions { attachment_dir: ".Page".into(), ..Default::default() };
+        for storage in [
+            r#"<p><ac:image><ri:attachment ri:filename="chart.png"><ri:page ri:content-title="Team Handbook"/></ri:attachment></ac:image> caption</p>"#,
+            r#"<p><ac:link><ri:attachment ri:filename="plan.pdf"><ri:page ri:content-title="Team Handbook"/></ri:attachment></ac:link> here</p>"#,
+        ] {
+            let md = crate::storage_to_markdown(storage, &opts).unwrap().markdown;
+            assert!(md.contains("```confluence"), "{md}");
+            let back = crate::markdown_to_storage(&md, &opts).unwrap();
+            assert!(back.contains(r#"<ri:page ri:content-title="Team Handbook""#), "{back}");
+        }
+        // This page's own file is a sidecar path, as before.
+        let md = crate::storage_to_markdown(
+            r#"<p><ac:image><ri:attachment ri:filename="own.png"/></ac:image></p>"#,
+            &opts,
+        )
+        .unwrap()
+        .markdown;
+        assert_eq!(md.trim(), "![](.Page/own.png)");
     }
 
     #[test]
