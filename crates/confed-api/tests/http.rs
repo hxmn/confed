@@ -52,7 +52,35 @@ async fn a_gateway_error_is_retried_only_for_requests_safe_to_repeat() {
     assert_eq!(requests_to(&server, "/rest/api/content").await, 3, "the read was retried");
 }
 
-/// A 429 means nothing was done, so even a create is sent again.
+/// A gateway gave up on a DELETE that Confluence carried out: the retry finds
+/// the page gone, which is the delete done, not a failure.
+#[tokio::test]
+async fn a_delete_retried_after_a_gateway_error_and_found_gone_succeeded() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/rest/api/content/1001"))
+        .respond_with(ResponseTemplate::new(504))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/rest/api/content/1001"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("no such page"))
+        .mount(&server)
+        .await;
+    http(&server).delete("rest/api/content/1001").await.expect("deleted by the first attempt");
+
+    // A 404 at the first attempt is still a 404.
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("no such page"))
+        .mount(&server)
+        .await;
+    let err = http(&server).delete("rest/api/content/1001").await.unwrap_err();
+    assert!(matches!(err, ApiError::NotFound(_)), "{err:?}");
+}
+
+/// A 429 means nothing was done, so even a create is sent again./// A 429 means nothing was done, so even a create is sent again.
 #[tokio::test]
 async fn a_rate_limited_create_is_sent_again() {
     let server = MockServer::start().await;

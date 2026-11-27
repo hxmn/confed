@@ -451,6 +451,7 @@ impl Http {
     {
         let _permit = self.sem.acquire().await.expect("semaphore closed");
         let mut attempt = 0u32;
+        let mut gateway_failed = false;
         loop {
             // Bind first: an `if let` keeps its scrutinee's temporaries alive for the
             // whole block, and a `MutexGuard` held across an await makes the returned
@@ -488,6 +489,16 @@ impl Http {
                     // the gateway may have given up while Confluence went on to
                     // do the work — so only a request safe to repeat is.
                     let retriable = code == 429 || (idempotent && matches!(code, 502..=504));
+                    if matches!(code, 502..=504) {
+                        gateway_failed = true;
+                    }
+                    // A DELETE sent again after a gateway gave up on the first
+                    // may find what it deletes already gone: the first did
+                    // reach Confluence. That is the delete done, not a 404.
+                    if code == 404 && gateway_failed && context.starts_with("DELETE ") {
+                        debug!(target: "confed::http", context, "already deleted by the earlier attempt");
+                        return Ok(resp);
+                    }
                     if !retriable || attempt + 1 >= self.policy.max_attempts {
                         let body = resp.text().await.unwrap_or_default();
                         debug!(target: "confed::http", context, status = code, body = %body, "error response");
