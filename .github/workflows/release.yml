@@ -57,6 +57,11 @@ jobs:
           # on Apple silicon.
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          # Static, for hosts whose glibc is older than the runner's (RHEL 8,
+          # Debian 11, Amazon Linux 2): TLS is rustls and SQLite and zstd are
+          # bundled, so musl leaves nothing dynamic.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
           # `macos-latest` rather than a numbered image: a retired image is
           # refused before any step runs, which once cancelled every release.
           - { os: macos-latest, target: x86_64-apple-darwin }
@@ -68,7 +73,15 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+      - name: musl C compiler, for the bundled SQLite and zstd
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --locked --release -p confed --target ${{ matrix.target }}
+      - name: The static binary runs on an old distribution
+        if: contains(matrix.target, 'musl')
+        run: |
+          docker run --rm -v "$PWD/target/${{ matrix.target }}/release:/bin-under-test:ro" \
+            debian:11 /bin-under-test/confed version
       - name: Package
         shell: bash
         run: |
@@ -126,6 +139,7 @@ jobs:
         run: |
           missing=""
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+                        x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
                         x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc; do
             ls dist/*-"$target".* >/dev/null 2>&1 || missing="$missing $target"
           done

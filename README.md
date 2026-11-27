@@ -141,6 +141,14 @@ $ confed status --json
 
 ## 🚀 Install
 
+Download the archive for your system from the
+[releases](https://github.com/hxmn/confed/releases) page, check it against its
+`.sha256`, and put `confed` on your `PATH`. On Linux, the `*-linux-musl` archives are
+static and run on any distribution; the `*-linux-gnu` ones need a recent glibc (2.34 or
+newer — not RHEL 8, Debian 11 or Amazon Linux 2).
+
+Or build it:
+
 ```bash
 cargo install --git https://github.com/hxmn/confed confed
 ```
