@@ -33,9 +33,17 @@ pub struct Rules {
     /// The page's file, relative to the workspace root.
     pub path: String,
     pub version: u32,
+    /// Who saved that version, and when, as the server says.
+    pub author: Option<String>,
+    pub updated: Option<String>,
     /// The page as last synced with the server, as Markdown.
     pub markdown: String,
 }
+
+/// How much of the rules page is copied into the contract files. An agent
+/// reads them whole at the start of every session; a page past this is cut
+/// short, with a line saying so and where the rest is.
+pub const RULES_MAX_CHARS: usize = 20_000;
 
 /// What [`sync_rules`] found and did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +145,8 @@ pub fn current_rules(ws: &Workspace) -> Result<Option<Rules>> {
         title: record.title,
         path: record.local_path,
         version: record.version,
+        author: record.author,
+        updated: record.updated_at,
         markdown,
     }))
 }
@@ -248,23 +258,39 @@ fn split_rules(content: &str) -> (&str, &str) {
 }
 
 fn rules_block(rules: &Rules) -> String {
-    let Rules { page_id, title, path, version, markdown } = rules;
+    let Rules { page_id, title, path, version, author, updated, markdown } = rules;
     // A page quoting the closing line would end the copy early.
-    let body: Vec<&str> = markdown.trim().lines().filter(|l| l.trim() != RULES_CLOSE).collect();
+    let mut body: String =
+        markdown.trim().lines().filter(|l| l.trim() != RULES_CLOSE).collect::<Vec<_>>().join("\n");
+    if body.chars().count() > RULES_MAX_CHARS {
+        let cut = body.char_indices().nth(RULES_MAX_CHARS).map_or(body.len(), |(i, _)| i);
+        let cut = body[..cut].rfind('\n').unwrap_or(cut);
+        body.truncate(cut);
+        body.push_str(&format!(
+            "\n\n> The rules page is longer than {RULES_MAX_CHARS} characters; the rest is not \
+             copied here. Read it in `{path}`."
+        ));
+    }
+    // Who last changed the rules: an instruction is only as good as its source.
+    let by = match (author.as_deref(), updated.as_deref()) {
+        (Some(a), Some(u)) => format!(", last changed by {a} on {u}"),
+        (Some(a), None) => format!(", last changed by {a}"),
+        (None, Some(u)) => format!(", last changed on {u}"),
+        (None, None) => String::new(),
+    };
     format!(
         "{RULES_OPEN}page_id={page_id} version={version} -->\n\
          # {title}\n\
          \n\
-         > The rules of this space: a copy of the Confluence page `{path}` (version {version}),\n\
+         > The rules of this space: a copy of the Confluence page `{path}` (version {version}{by}),\n\
          > which this workspace names as its `rules_page_id`. Do not edit the copy. To change\n\
          > the rules, edit that page and push it: confed copies it here again on every pull\n\
          > and push.\n\
          \n\
-         {}\n\
+         {body}\n\
          \n\
          {RULES_CLOSE}\n\
-         \n",
-        body.join("\n")
+         \n"
     )
 }
 
@@ -1307,8 +1333,21 @@ mod tests {
             title: "Team rules".into(),
             path: "Team rules.md".into(),
             version: 7,
+            author: Some("Alice Ng".into()),
+            updated: Some("2026-08-01T10:00:00Z".into()),
             markdown: markdown.into(),
         }
+    }
+
+    #[test]
+    fn the_rules_copy_says_who_changed_them_and_is_cut_when_too_long() {
+        let block = rules_block(&rules("Be kind."));
+        assert!(block.contains("last changed by Alice Ng on 2026-08-01T10:00:00Z"), "{block}");
+        let long = "A rule.\n".repeat(RULES_MAX_CHARS / 4);
+        let block = rules_block(&rules(&long));
+        assert!(block.len() < RULES_MAX_CHARS + 2_000, "{}", block.len());
+        assert!(block.contains("the rest is not copied here"), "cut short, and said so");
+        assert!(block.trim_end().ends_with(RULES_CLOSE), "still closed");
     }
 
     /// A workspace bound to DOCS that has pulled one page, "Team rules".
@@ -1366,7 +1405,10 @@ mod tests {
         let rules_at = with.find("Write in plain English.").expect("the rules are in the file");
         let contract_at = with.find("# confed workspace").expect("so is the contract");
         assert!(rules_at < contract_at, "the rules come first");
-        assert!(with.contains("`Team rules.md` (version 7)"), "and say where they came from");
+        assert!(
+            with.contains("`Team rules.md` (version 7, last changed by Alice Ng"),
+            "and say where they came from"
+        );
 
         assert_eq!(with_rules(&with, Some(&rules("Write in plain English."))), with, "idempotent");
         assert_eq!(with_rules(&with, None), plain, "removing them restores the file exactly");
