@@ -56,7 +56,9 @@ Resolution order for every parameter is flag → environment → stored config �
 Pages are addressed by workspace-relative path, by page id *or* by the page's URL
 almost everywhere (`…/spaces/KEY/pages/ID/…`, `…/pages/viewpage.action?pageId=ID`,
 `…/display/KEY/Title`), and where a command takes several it also takes globs: `Handbook/**` matches a subtree, `*.md`
-matches the top level, and a plain prefix such as `Handbook` selects everything under it.
+matches the top level, and a page or a folder — `Handbook`, `Handbook/` or `Handbook.md` —
+selects it and everything under it; `.` selects the current directory. An argument that
+selects no page is an error (exit 6) that names it, in `pull`, `push` and `diff`.
 
 ## Output and JSON
 

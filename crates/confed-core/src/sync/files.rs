@@ -18,16 +18,58 @@ pub fn prune_empty_dirs(root: &Path, dir: &Path) {
     }
 }
 
-/// Glob-ish matching for scope arguments: `*` within a segment, `**` across them.
+/// Does a scope argument select the page file at `path`?
+///
+/// A pattern with `*`, `?`, `[` or `{` is a glob: `*` within a segment, `**`
+/// across them. Anything else names a page or a folder, and selects it with
+/// everything beneath: `Handbook`, `Handbook/` and `Handbook.md` all select
+/// `Handbook.md` and `Handbook/…`. `.` (or an empty argument, which is what
+/// `.` becomes at the workspace root) selects every page.
 pub fn path_matches(pattern: &str, path: &str) -> bool {
     if pattern == path {
         return true;
     }
-    match globset::Glob::new(pattern) {
-        Ok(glob) => glob.compile_matcher().is_match(path),
-        // A plain prefix like `Handbook` selects the subtree.
-        Err(_) => path.starts_with(pattern),
+    if pattern.contains(['*', '?', '[', '{']) {
+        return globset::Glob::new(pattern).is_ok_and(|glob| glob.compile_matcher().is_match(path));
     }
+    let name = pattern.trim_end_matches('/');
+    if name.is_empty() || name == "." {
+        return true;
+    }
+    let stem = name.strip_suffix(".md").unwrap_or(name);
+    path == format!("{stem}.md") || path.starts_with(&format!("{stem}/"))
+}
+
+/// The scope arguments that select none of `pages` (page id, file path):
+/// a typo, or a folder with no page in it. Each command that takes a scope
+/// refuses them rather than doing nothing without a word.
+pub fn unmatched_scope<'a, 'p>(
+    scope: &'a [String],
+    pages: impl IntoIterator<Item = (&'p str, &'p str)> + Clone,
+) -> Vec<&'a str> {
+    scope
+        .iter()
+        .filter(|pattern| {
+            !pages.clone().into_iter().any(|(id, path)| {
+                id == pattern.as_str() || (!path.is_empty() && path_matches(pattern, path))
+            })
+        })
+        .map(String::as_str)
+        .collect()
+}
+
+/// The error for scope arguments that matched nothing: exit 6, naming them.
+pub fn no_page_matches(unmatched: &[&str]) -> ConfedError {
+    let names: Vec<String> = unmatched.iter().map(|s| format!("\"{s}\"")).collect();
+    ConfedError::refused(
+        "no_page_matches",
+        crate::error::ExitCode::NotFound,
+        format!("no page matches {}", names.join(", ")),
+        Some(
+            "name a page file, a folder of pages, a page id or a glob; `confed status` lists them"
+                .into(),
+        ),
+    )
 }
 
 /// What goes in a `storage.xml` sidecar: the page's markup, laid out across

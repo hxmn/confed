@@ -66,6 +66,16 @@ fn collect(ctx: &Context, args: &DiffArgs, against_remote: bool) -> Result<Vec<P
     let remote = ws.state().all_remote()?;
 
     let scope = ctx.workspace_paths(&args.paths);
+    let unmatched = confed_core::sync::unmatched_scope(
+        &scope,
+        files
+            .iter()
+            .map(|f| (f.file.frontmatter.page_id().unwrap_or_default(), f.path.as_str()))
+            .chain(base.iter().map(|b| (b.page_id.as_str(), b.local_path.as_str()))),
+    );
+    if !unmatched.is_empty() {
+        return Err(confed_core::sync::no_page_matches(&unmatched));
+    }
     let mut out = Vec::new();
     for local in &files {
         let Some(page_id) = local.file.frontmatter.page_id() else { continue };

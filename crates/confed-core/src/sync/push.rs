@@ -260,6 +260,14 @@ impl SyncEngine {
         let remote_by_id: HashMap<&str, &RemotePage> =
             remote.iter().map(|r| (r.page_id.as_str(), r)).collect();
 
+        let unmatched = unmatched_scope(
+            &opts.scope,
+            statuses.iter().map(|s| (s.page_id.as_deref().unwrap_or_default(), s.path.as_str())),
+        );
+        if !unmatched.is_empty() {
+            return Err(no_page_matches(&unmatched));
+        }
+
         let mut plan = PushPlan::default();
         for status in &statuses {
             if !opts.scope.is_empty()

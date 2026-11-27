@@ -400,6 +400,37 @@ async fn a_pull_filter_that_matches_nothing_pulls_nothing() {
 }
 
 #[tokio::test]
+async fn a_folder_scope_selects_its_pages_and_a_typo_exits_6() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    let edited = read(dir.path(), CHILD_FILE).replace("checklist", "checklist, edited");
+    std::fs::write(dir.path().join(CHILD_FILE), edited).unwrap();
+
+    let folder = CHILD_FILE.rsplit_once('/').unwrap().0.to_string();
+    for scope in [folder.clone(), format!("{folder}/"), ".".to_string()] {
+        let output = run(confed(dir.path(), &["diff", "--json", &scope]));
+        let value = envelope(&output, "diff");
+        assert!(value.to_string().contains("checklist, edited"), "{scope}: {value}");
+        let output = run(confed_authed(dir.path(), &["push", "--dry-run", "--json", &scope]));
+        assert_eq!(exit_code(&output), 0, "{scope}: {}", stdout(&output));
+        let value = envelope(&output, "push");
+        assert_eq!(value["result"]["pushed"].as_array().map(Vec::len), Some(1), "{scope}: {value}");
+    }
+
+    for args in [
+        &["diff", "--exit-code", "nosuch.md"][..],
+        &["push", "--dry-run", "nosuch.md"],
+        &["pull", "--dry-run", "nosuch.md"],
+    ] {
+        let output = run(confed_authed(dir.path(), args));
+        assert_eq!(exit_code(&output), 6, "{args:?}: {}", stderr(&output));
+        assert!(stderr(&output).contains("nosuch.md"), "{args:?}: {}", stderr(&output));
+    }
+}
+
+#[tokio::test]
 async fn pull_materializes_the_hierarchy_and_status_is_then_clean() {
     let server = dc_server().await;
     let dir = tempfile::tempdir().unwrap();

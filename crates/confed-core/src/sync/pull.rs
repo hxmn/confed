@@ -322,6 +322,22 @@ impl SyncEngine {
         let remote = ws.state().all_remote()?;
         let statuses = worktree::compute_status(&files, &base, &remote);
         let placements = self.plan_placements(&remote, &base);
+        // Page ids are left out of the check: `--label` and `--cql` add the
+        // ids of their hits, and a CQL hit in another space is not this
+        // space's to pull.
+        let paths: Vec<String> =
+            opts.scope.iter().filter(|s| !s.chars().all(|c| c.is_ascii_digit())).cloned().collect();
+        let unmatched = unmatched_scope(
+            &paths,
+            placements
+                .iter()
+                .map(|(id, p)| (id.as_str(), p.path.as_str()))
+                .chain(base.iter().map(|b| (b.page_id.as_str(), b.local_path.as_str())))
+                .chain(remote.iter().map(|r| (r.page_id.as_str(), ""))),
+        );
+        if !unmatched.is_empty() {
+            return Err(no_page_matches(&unmatched));
+        }
         let render = Rendering { links: link_map(&placements), ctx: ConvertContext::load(ws)? };
         let view = PullView {
             remote: &remote,

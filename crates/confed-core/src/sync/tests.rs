@@ -10,6 +10,29 @@ fn scope_patterns_select_paths_and_subtrees() {
 }
 
 #[test]
+fn a_folder_or_a_page_selects_its_subtree() {
+    for folder in ["Team Handbook", "Team Handbook/", "Team Handbook.md"] {
+        assert!(path_matches(folder, "Team Handbook.md"), "{folder}");
+        assert!(path_matches(folder, "Team Handbook/Onboarding.md"), "{folder}");
+        assert!(path_matches(folder, "Team Handbook/Onboarding/Week One.md"), "{folder}");
+        assert!(!path_matches(folder, "Team Handbook 2.md"), "{folder}");
+        assert!(!path_matches(folder, "Team Handbook 2/Plan.md"), "{folder}");
+    }
+    assert!(path_matches("docs/", "docs/Style guide.md"));
+    assert!(path_matches(".", "Anything.md"));
+    assert!(path_matches("", "Anything.md"));
+}
+
+#[test]
+fn a_scope_argument_that_selects_nothing_is_named() {
+    let pages = [("1001", "Team Handbook.md"), ("1002", "Team Handbook/Onboarding.md")];
+    let scope: Vec<String> =
+        ["Team Handbook", "1002", "nosuch.md"].iter().map(|s| s.to_string()).collect();
+    assert_eq!(unmatched_scope(&scope, pages), ["nosuch.md"]);
+    assert_eq!(no_page_matches(&["nosuch.md"]).exit_code(), crate::error::ExitCode::NotFound);
+}
+
+#[test]
 fn atomic_writes_leave_no_temp_file_behind() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("nested/Page.md");
