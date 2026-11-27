@@ -501,9 +501,15 @@ impl Renderer<'_> {
                 for mark in &wrapping {
                     self.push_sentinel(mark, true, out);
                 }
-                let ticks = "`".repeat(longest_run(&text, '`') + 1);
-                let pad = if text.starts_with('`') || text.ends_with('`') { " " } else { "" };
-                out.push_str(&format!("{ticks}{pad}{text}{pad}{ticks}"));
+                // Right after another code span, backticks would join the two
+                // into one run: written as HTML there instead.
+                if out.ends_with('`') {
+                    out.push_str(&format!("<code>{}</code>", escape_md(&dom::escape_text(&text))));
+                } else {
+                    let ticks = "`".repeat(longest_run(&text, '`') + 1);
+                    let pad = if text.starts_with('`') || text.ends_with('`') { " " } else { "" };
+                    out.push_str(&format!("{ticks}{pad}{text}{pad}{ticks}"));
+                }
                 for mark in wrapping.iter().rev() {
                     self.push_sentinel(mark, false, out);
                 }
@@ -1643,6 +1649,14 @@ mod user_mention_tests {
             let md = crate::storage_to_markdown(storage, &opts).unwrap().markdown;
             assert_eq!(crate::markdown_to_storage(&md, &opts).unwrap().trim_end(), storage, "{md}");
         }
+    }
+
+    #[test]
+    fn two_code_spans_side_by_side_stay_two() {
+        let opts = ConvertOptions::default();
+        let storage = "<p><code>a</code><code>b*c</code></p>";
+        let md = crate::storage_to_markdown(storage, &opts).unwrap().markdown;
+        assert_eq!(crate::markdown_to_storage(&md, &opts).unwrap().trim_end(), storage, "{md}");
     }
 
     #[test]
