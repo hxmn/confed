@@ -49,14 +49,51 @@ fn lock_all(spaces: &BTreeMap<String, Workspace>, keys: &[String]) -> Result<Vec
     Ok(locks)
 }
 
-fn open_all(instance: &Instance) -> Result<BTreeMap<String, Workspace>> {
+/// Every enabled member's workspace, and why each one that would not open
+/// did not: a move that needs one says so rather than taking it for gone.
+fn open_all(instance: &Instance) -> Result<(BTreeMap<String, Workspace>, Unopened)> {
     let mut spaces = BTreeMap::new();
+    let mut unopened = Unopened::new();
     for member in instance.enabled_members()? {
-        if let Ok(ws) = instance.open_workspace(&member) {
-            spaces.insert(member.space_key.clone(), ws);
+        match instance.open_workspace(&member) {
+            Ok(ws) => {
+                spaces.insert(member.space_key.clone(), ws);
+            }
+            Err(e) => {
+                unopened.insert(member.space_key.clone(), e);
+            }
         }
     }
-    Ok(spaces)
+    Ok((spaces, unopened))
+}
+
+type Unopened = BTreeMap<String, ConfedError>;
+
+/// The workspaces of `keys` must all have opened; the first that did not is
+/// the error, with its cause (exit 7).
+fn require_open(
+    spaces: &BTreeMap<String, Workspace>,
+    unopened: &Unopened,
+    keys: &[String],
+) -> Result<()> {
+    for key in keys {
+        if spaces.contains_key(key) {
+            continue;
+        }
+        return Err(match unopened.get(key) {
+            Some(e) => ConfedError::state_with_hint(
+                format!("the workspace of space {key} cannot be opened: {e}"),
+                e.hint().map_or_else(
+                    || format!("run `confed -C <{key} directory> doctor`"),
+                    str::to_string,
+                ),
+            ),
+            None => {
+                ConfedError::state(format!("space {key} is not a registered workspace any more"))
+            }
+        });
+    }
+    Ok(())
 }
 
 fn engine_for(
@@ -190,7 +227,12 @@ pub async fn run(
 
     let concurrency = ctx.concurrency();
     let dest_member = dest.member().clone();
-    let mut spaces = open_all(&instance)?;
+    let (mut spaces, unopened) = open_all(&instance)?;
+    require_open(
+        &spaces,
+        &unopened,
+        &[src_member.space_key.clone(), dest_member.space_key.clone()],
+    )?;
     let src_ref = space_ref(&src_member, &spaces[&src_member.space_key])?;
     let dst_ref = space_ref(&dest_member, &spaces[&dest_member.space_key])?;
 
@@ -971,14 +1013,8 @@ pub async fn resume(
     }
     let mut plan: MovePlan = serde_json::from_value(entry.plan.clone())?;
     let client = connection.client(ctx)?;
-    let mut spaces = open_all(&instance)?;
-    for key in plan.spaces_written() {
-        if !spaces.contains_key(&key) {
-            return Err(ConfedError::state(format!(
-                "space {key}, which the move writes to, is not a registered workspace any more"
-            )));
-        }
-    }
+    let (mut spaces, unopened) = open_all(&instance)?;
+    require_open(&spaces, &unopened, &plan.spaces_written())?;
     let locks = lock_all(&spaces, &plan.spaces_written())?;
     crossmove::execute(
         &instance,

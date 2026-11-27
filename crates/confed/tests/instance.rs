@@ -894,6 +894,38 @@ async fn status_reports_every_space_and_one_failing_space_is_exit_8() {
 }
 
 #[tokio::test]
+async fn a_move_into_a_workspace_that_will_not_open_says_why() {
+    let (server, _) = server().await;
+    let root = instance_root(&server);
+    std::fs::remove_file(root.path().join("ENG/.state.db")).unwrap();
+
+    for args in [
+        &["instance", "mv", "1002", "ENG:", "--dry-run", "--json"][..],
+        &[
+            "instance",
+            "mv",
+            "--children-of",
+            "DOCS:Team Handbook.md",
+            "ENG:",
+            "--dry-run",
+            "--json",
+        ],
+    ] {
+        let out = run(root.path(), args);
+        assert_eq!(
+            code(&out),
+            7,
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            stderr(&out)
+        );
+        let env = envelope(&out, "instance");
+        let message = env["errors"][0]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("ENG"), "{env}");
+    }
+}
+
+#[tokio::test]
 async fn a_dry_run_move_with_push_first_is_refused_before_any_write() {
     let (server, confluence) = server().await;
     let root = instance_root(&server);
