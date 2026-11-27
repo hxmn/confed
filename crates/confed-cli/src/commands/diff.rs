@@ -148,7 +148,71 @@ fn collect(ctx: &Context, args: &DiffArgs, against_remote: bool) -> Result<Vec<P
         });
         let _ = left_label;
     }
+
+    // Pages that exist on one side only, as `status` counts them: a file
+    // with no page yet is added, a tracked page whose file is gone deleted.
+    if !against_remote {
+        for local in files.iter().filter(|f| f.file.frontmatter.page_id().is_none()) {
+            if !in_scope(&scope, &local.path, "") {
+                continue;
+            }
+            out.push(one_sided(
+                local.path.clone(),
+                String::new(),
+                &local.file.frontmatter.title,
+                "",
+                &local.file.body,
+                "added",
+                args,
+            ));
+        }
+        for record in &base {
+            let tracked = files.iter().any(|f| {
+                f.file.frontmatter.page_id() == Some(record.page_id.as_str())
+                    || f.path == record.local_path
+            });
+            if tracked || !in_scope(&scope, &record.local_path, &record.page_id) {
+                continue;
+            }
+            let convert_opts = confed_core::sync::page_convert_options(ws, &record.local_path)?;
+            let base_text = render_side(&record.storage_body, &convert_opts, args)?;
+            out.push(one_sided(
+                record.local_path.clone(),
+                record.page_id.clone(),
+                &record.title,
+                &base_text,
+                "",
+                "deleted",
+                args,
+            ));
+        }
+    }
     Ok(out)
+}
+
+/// A page on one side only: everything it has is an addition, or a deletion.
+fn one_sided(
+    path: String,
+    page_id: String,
+    title: &str,
+    before: &str,
+    after: &str,
+    change: &'static str,
+    args: &DiffArgs,
+) -> PageDiff {
+    let diff = TextDiff::from_lines(before, after);
+    let (additions, deletions) = count_changes(&diff);
+    PageDiff {
+        page_id,
+        path,
+        title: title.to_string(),
+        change,
+        additions,
+        deletions,
+        hunks: if args.name_only || args.stat { Vec::new() } else { build_hunks(&diff) },
+        frontmatter_changes: None,
+        remote_hunks: Vec::new(),
+    }
 }
 
 fn render_side(storage: &str, opts: &ConvertOptions, args: &DiffArgs) -> Result<String> {

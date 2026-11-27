@@ -431,6 +431,32 @@ async fn a_folder_scope_selects_its_pages_and_a_typo_exits_6() {
 }
 
 #[tokio::test]
+async fn diff_counts_new_and_deleted_pages_as_status_does() {
+    let server = dc_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull"]))), 0);
+    std::fs::write(dir.path().join("Brand new.md"), "---\ntitle: Brand new\n---\n\nNew text.\n")
+        .unwrap();
+    std::fs::remove_file(dir.path().join(CHILD_FILE)).unwrap();
+
+    let output = run(confed(dir.path(), &["diff", "--exit-code"]));
+    assert_eq!(exit_code(&output), 10, "{}", stdout(&output));
+    let names = stdout(&run(confed(dir.path(), &["diff", "--name-only"])));
+    assert!(names.contains("Brand new.md") && names.contains(CHILD_FILE), "{names}");
+
+    let value = envelope(&run(confed(dir.path(), &["diff", "--json"])), "diff");
+    let changes: Vec<(&str, &str)> = value["result"]["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["path"].as_str().unwrap(), p["change"].as_str().unwrap()))
+        .collect();
+    assert!(changes.contains(&("Brand new.md", "added")), "{changes:?}");
+    assert!(changes.contains(&(CHILD_FILE, "deleted")), "{changes:?}");
+}
+
+#[tokio::test]
 async fn pull_materializes_the_hierarchy_and_status_is_then_clean() {
     let server = dc_server().await;
     let dir = tempfile::tempdir().unwrap();
