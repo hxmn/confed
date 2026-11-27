@@ -134,6 +134,7 @@ pub async fn push(
         interactive: false,
         message: message.clone(),
         allow_delete: args.allow_delete,
+        allow_empty: false,
         no_attachments: args.no_attachments,
         no_comments: args.no_comments,
     };

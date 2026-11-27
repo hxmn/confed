@@ -398,6 +398,11 @@ pub struct PushArgs {
     #[arg(long)]
     pub allow_delete: bool,
 
+    /// Upload an empty file over an attachment that has content (held back
+    /// otherwise).
+    #[arg(long)]
+    pub allow_empty: bool,
+
     /// Do not upload attachments.
     #[arg(long)]
     pub no_attachments: bool,

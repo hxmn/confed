@@ -74,6 +74,9 @@ pub struct PushOptions {
     /// With `dry_run`: report the storage each page body and comment would be
     /// sent as, so a conversion can be checked before it reaches the server.
     pub show_storage: bool,
+    /// Upload an empty file over an attachment that has content. Without it
+    /// such an upload is held back: it is almost never meant.
+    pub allow_empty: bool,
 }
 
 impl PushOptions {
@@ -472,6 +475,23 @@ impl SyncEngine {
                         }
                         attachments::AttachmentAction::Upload { .. } => {
                             (AttachmentOpKind::Upload, None)
+                        }
+                        attachments::AttachmentAction::Reupload { filename, .. }
+                            if !opts.allow_empty
+                                && attachments::file_size(&sidecar.join(filename)) == Some(0)
+                                && recorded.iter().any(|r| {
+                                    &r.filename == filename && r.file_size.unwrap_or(0) > 0
+                                }) =>
+                        {
+                            plan.skipped.push(BlockedPage {
+                                page_id: page_id.clone(),
+                                path: format!("{sidecar_rel}/{filename}"),
+                                reason: "the file is empty and the attachment is not; pass \
+                                         --allow-empty to upload it anyway"
+                                    .into(),
+                                kind: Blocked::Other,
+                            });
+                            continue;
                         }
                         attachments::AttachmentAction::Reupload { attachment_id, .. } => {
                             (AttachmentOpKind::Reupload, Some(attachment_id.clone()))

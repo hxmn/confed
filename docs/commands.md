@@ -353,6 +353,7 @@ and comment drafts.
 | `--interactive` | Confirm each page before uploading. Requires a terminal; exits 2 without one. |
 | `-m`, `--message <TEXT>` | Version comment recorded on the server. |
 | `--allow-delete` | Actually delete pages and attachments on the server that were deleted locally. |
+| `--allow-empty` | Upload an empty file over an attachment that has content. Held back otherwise, with a reason under `skipped`: it is almost never meant. |
 | `--no-attachments` | Do not upload attachments. |
 | `--no-comments` | Do not post comment drafts. |
 

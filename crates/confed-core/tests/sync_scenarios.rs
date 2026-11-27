@@ -1134,6 +1134,39 @@ both_flavors!(a_new_page_takes_its_sidecar_files_with_it, |mut h: Harness| async
     assert!(again.attachments_uploaded.is_empty(), "{again:?}");
 });
 
+// An emptied attachment is not uploaded over one that has content, unless
+// asked: it is what a copy onto itself once produced, and almost never meant.
+both_flavors!(
+    an_empty_file_does_not_replace_an_attachment_with_content,
+    |mut h: Harness| async move {
+        h.mock.seed_page("1001", "Diagrams", None, "<p>See the diagram.</p>");
+        h.mock.attach_directly("1001", "diagram.png", b"real bytes");
+        h.pull().await;
+        std::fs::write(h.path(".Diagrams/diagram.png"), b"").unwrap();
+
+        let dry = h
+            .engine
+            .push(&mut h.ws, &PushOptions { dry_run: true, ..push_attachments() })
+            .await
+            .unwrap();
+        assert!(dry.attachments_uploaded.is_empty(), "{dry:?}");
+        assert!(dry.skipped.iter().any(|s| s.reason.contains("--allow-empty")), "{dry:?}");
+
+        let push = h.engine.push(&mut h.ws, &push_attachments()).await.unwrap();
+        assert!(push.attachments_uploaded.is_empty(), "{push:?}");
+        let listed =
+            h.engine.client().list_attachments(&confed_api::PageId::new("1001")).await.unwrap();
+        assert_eq!(listed[0].file_size, Some(10), "the server's version is unchanged");
+
+        let forced = h
+            .engine
+            .push(&mut h.ws, &PushOptions { allow_empty: true, ..push_attachments() })
+            .await
+            .unwrap();
+        assert_eq!(forced.attachments_uploaded.len(), 1, "{forced:?}");
+    }
+);
+
 /// Removing an attachment locally needs the same explicit opt-in as deleting a
 /// page: it destroys content on the server.
 #[tokio::test]

@@ -232,6 +232,7 @@ pub mod push {
             scope: ctx.workspace_paths(&args.paths),
             dry_run: args.dry_run,
             allow_delete: args.allow_delete,
+            allow_empty: args.allow_empty,
             allow_attachment_delete: args.allow_delete,
             message: args.message.clone(),
             with_attachments: !args.no_attachments,
