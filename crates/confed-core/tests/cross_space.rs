@@ -355,6 +355,23 @@ async fn a_dirty_page_a_taken_title_and_the_home_page_are_all_refused_together()
 }
 
 #[tokio::test]
+async fn new_titles_are_checked_in_the_source_and_against_each_other() {
+    let h = Harness::new().await;
+    let mut request = h.request("1002", "2002");
+    // Renamed in DOCS before it moves, to a title DOCS already has.
+    request.on_conflict = OnConflict::Map([("1002".to_string(), "Policies".to_string())].into());
+    let err = h.plan(&request).await.unwrap_err();
+    assert!(err.to_string().contains("\"Policies\""), "{err}");
+
+    // Two moved pages given one title.
+    request.on_conflict = OnConflict::Map(
+        [("1002".to_string(), "Same".to_string()), ("1003".to_string(), "Same".to_string())].into(),
+    );
+    let err = h.plan(&request).await.unwrap_err();
+    assert!(err.to_string().contains("both be titled \"Same\""), "{err}");
+}
+
+#[tokio::test]
 async fn a_home_page_below_a_moved_root_is_refused() {
     let h = Harness::new().await;
     h.mock.set_homepage("DOCS", "1003");

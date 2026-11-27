@@ -912,6 +912,52 @@ impl Checks<'_> {
                 }
             }
         }
+
+        // A page that takes a new title is renamed in the source space, before
+        // it moves: the title must be free there too (but for the pages that
+        // are leaving), and no two moved pages may end up with one title.
+        let moving: HashSet<&str> = pages.iter().map(|p| p.page_id.as_str()).collect();
+        let source_taken: HashMap<String, String> = self
+            .src
+            .state()
+            .all_remote()?
+            .into_iter()
+            .filter(|r| !r.deleted && !moving.contains(r.page_id.as_str()))
+            .map(|r| (r.title.to_lowercase(), r.page_id))
+            .collect();
+        let mut finals: HashMap<String, &PlannedPage> = HashMap::new();
+        for page in pages.iter() {
+            let wanted = page.final_title().to_string();
+            if page.new_title.is_some() {
+                if let Some(existing) = source_taken.get(&wanted.to_lowercase()) {
+                    let mut blocker = Blocker::new(
+                        "title_taken",
+                        format!(
+                            "{} would be renamed \"{wanted}\" in space {} before it moves, and \
+                             that title is already used there",
+                            page.from_path, req.source.key
+                        ),
+                    )
+                    .page(&page.page_id, src_key, &page.from_path);
+                    blocker.title = Some(wanted.clone());
+                    blocker.existing_page_id = Some(existing.clone());
+                    self.blocking.push(blocker);
+                }
+            }
+            if let Some(other) = finals.insert(wanted.to_lowercase(), page) {
+                let mut blocker = Blocker::new(
+                    "title_taken",
+                    format!(
+                        "{} and {} would both be titled \"{wanted}\"",
+                        other.from_path, page.from_path
+                    ),
+                )
+                .page(&page.page_id, src_key, &page.from_path);
+                blocker.title = Some(wanted);
+                blocker.existing_page_id = Some(other.page_id.clone());
+                self.blocking.push(blocker);
+            }
+        }
         Ok(())
     }
 
