@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs all of this for the tagged commit.
+  workflow_call:
 
 # Jobs that need more say so.
 permissions:

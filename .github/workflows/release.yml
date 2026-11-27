@@ -12,10 +12,18 @@ permissions:
   contents: read
 
 jobs:
-  # What CI checks, again for the tagged commit itself: nothing irrevocable
-  # happens unless it passes.
+  # All of CI — every system's tests, lints, MSRV, audit, licences — for the
+  # tagged commit itself: nothing irrevocable happens unless it passes. The
+  # same workflow, not a part of it repeated, so the two cannot disagree.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      checks: write
+
   verify:
-    name: tests and package check
+    name: package check and tag
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -33,7 +41,6 @@ jobs:
             echo "tag $GITHUB_REF_NAME, but Cargo.toml says $version" >&2
             exit 1
           fi
-      - run: cargo test --locked --workspace
       - run: cargo publish --locked --workspace --dry-run
 
   binaries:
