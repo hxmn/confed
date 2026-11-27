@@ -25,6 +25,7 @@ pub struct Cli {
 }
 
 #[derive(Args, Debug, Clone, Default)]
+#[command(next_help_heading = "Global options")]
 pub struct GlobalArgs {
     /// Machine-readable output. Implies --non-interactive.
     #[arg(long, global = true, env = "CONFED_JSON", value_parser = BoolishValueParser::new())]
