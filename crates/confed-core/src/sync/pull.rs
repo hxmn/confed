@@ -229,6 +229,12 @@ pub(super) fn decide_pull(
             }
         }
         PageState::Behind => PullAction::Overwrite,
+        // A conflicted file holds the markers of the last merge. Merging over
+        // it again would take the markers for local text — a "clean" merge that
+        // marks the page unchanged and lets push upload them — so it waits for
+        // `confed resolve`, whatever the server did meanwhile (`plan_pull`
+        // warns when it did).
+        PageState::Conflicted if !(opts.force || opts.reset) => PullAction::Nothing,
         PageState::Diverged | PageState::Conflicted => {
             if opts.force || opts.reset {
                 PullAction::Overwrite
@@ -442,6 +448,15 @@ impl SyncEngine {
                 _ => false,
             };
             let mut action = decide_pull(remote_page, status, base_record, opts, stale_rendering);
+            if let Some(status) = status.filter(|s| {
+                s.state == PageState::Conflicted && s.remote_ahead && action == PullAction::Nothing
+            }) {
+                outcome.warnings.push(format!(
+                    "{}: changed on the server again, but its last merge conflict is not resolved; \
+                     run `confed resolve`, push, then pull",
+                    status.path
+                ));
+            }
             // Unsent comment work is local work too: a page deleted on the server
             // is not removed with its drafts unless told to.
             if action == PullAction::Delete && !opts.force && !opts.reset {

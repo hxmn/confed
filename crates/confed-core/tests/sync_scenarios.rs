@@ -241,6 +241,23 @@ both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async 
     assert_eq!(push.skipped.len(), 1);
     assert!(push.skipped[0].reason.contains("conflict"));
     assert_eq!(h.mock.page_body("1001").unwrap(), before, "the server is untouched");
+
+    // A second pull, with the server where it was, must not merge over the
+    // markers and call the result clean.
+    let again = h.pull().await;
+    assert!(again.merged.is_empty(), "nothing to merge: {:?}", again.merged);
+    assert_eq!(h.status("1001"), PageState::Conflicted);
+    assert!(h.read("Doc.md").contains("<<<<<<< local"));
+    let push = h.push().await;
+    assert!(push.pushed.is_empty(), "still refused after a second pull");
+    assert_eq!(h.mock.page_body("1001").unwrap(), before);
+
+    // Nor when the server moves on: the conflict is still the user's to resolve.
+    h.mock.remote_edit("1001", "<p>Their version of the sentence, again.</p>");
+    let third = h.pull().await;
+    assert!(third.merged.is_empty());
+    assert_eq!(h.status("1001"), PageState::Conflicted);
+    assert!(h.read("Doc.md").contains("<<<<<<< local"));
 });
 
 both_flavors!(a_stale_base_is_refused_until_the_page_is_pulled, |mut h: Harness| async move {
