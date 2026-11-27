@@ -20,6 +20,15 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.24.2] - 2026-11-28
+
+### Fixed
+
+- Cancelling a running push or pull in the TUI dropped it wherever it was, which could
+  fall between a page's request and its record: the page updated on the server with
+  nothing in the workspace knowing it. A cancel now stops the job at its next page
+  boundary, as Ctrl-C does in the CLI (#85).
+
 ## [0.24.1] - 2026-11-27
 
 Fixes from the review's triage list (#85), mostly in what an interruption leaves
@@ -1739,7 +1748,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.24.1...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.24.2...HEAD
+[0.24.2]: https://github.com/hxmn/confed/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/hxmn/confed/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/hxmn/confed/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/hxmn/confed/compare/v0.22.0...v0.23.0
