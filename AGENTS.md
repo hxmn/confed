@@ -59,6 +59,12 @@ Fixing it in a new commit is not enough: the old commit still carries it. Stop, 
 the maintainer, and rewrite history (`git filter-repo --replace-text`) before anything
 else is pushed.
 
+## Security fixes
+
+A vulnerability is reported privately (see `SECURITY.md`), never in a public issue. Its
+fix is described in `CHANGELOG.md` once the release carrying it is out — not in an issue,
+a pull request or a commit message that is public before then.
+
 ## Releasing
 
 Every change that reaches the binary is a release:
