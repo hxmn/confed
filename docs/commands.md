@@ -288,6 +288,12 @@ not be read; the failures are listed in `result.failed` and repeated as warnings
 that fails is a warning (`result.attachment_check_failed`, `result.comment_check_failed`),
 not a failure.
 
+A page missing from the listing is asked for by itself, and marked deleted only when the
+server says it is gone. If that would mark at least five pages and more than half of the
+space deleted, the fetch stops with exit 7 (`kind` `mass_delete`) and marks nothing: a
+wrong server behind the URL, a permission change or an outage is far likelier than an
+emptied space. `--allow-mass-delete` (on `fetch` and `pull`) lets it through.
+
 ```bash
 confed fetch
 confed fetch --since 2026-08-01T00:00:00Z --json
@@ -311,6 +317,7 @@ Fetch, then materialize pages, attachments and comment sidecars into files.
 | `--dry-run` | Report what would be written without writing it. |
 | `--no-attachments` | Skip downloading attachments. |
 | `--no-comments` | Skip writing comment sidecars. |
+| `--allow-mass-delete` | Mark pages deleted, and remove their files, even when the server says most of the space is gone (see `fetch`). |
 
 Safety rule: `pull` decides the whole plan before writing anything. If any page in scope
 would lose local work, nothing is written at all and the command exits 7 listing what was

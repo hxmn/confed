@@ -21,7 +21,12 @@ pub mod fetch {
 
         let ws = ctx.workspace_mut()?;
         let _lock = ws.lock()?;
-        let outcome = engine.fetch(ws, &FetchOptions { pages, since: args.since.clone() }).await?;
+        let opts = FetchOptions {
+            pages,
+            since: args.since.clone(),
+            allow_mass_delete: args.allow_mass_delete,
+        };
+        let outcome = engine.fetch(ws, &opts).await?;
 
         let style = &ctx.style;
         let mut human = String::new();
@@ -130,6 +135,7 @@ pub mod pull {
             dry_run: args.dry_run,
             with_attachments: !args.no_attachments,
             with_comments: !args.no_comments,
+            allow_mass_delete: args.allow_mass_delete,
         };
 
         let ws = ctx.workspace_mut()?;

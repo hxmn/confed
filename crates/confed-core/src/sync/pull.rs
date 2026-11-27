@@ -21,6 +21,8 @@ pub struct PullOptions {
     pub dry_run: bool,
     pub with_attachments: bool,
     pub with_comments: bool,
+    /// See [`FetchOptions::allow_mass_delete`].
+    pub allow_mass_delete: bool,
 }
 
 impl PullOptions {
@@ -420,7 +422,9 @@ impl SyncEngine {
         let mut read = ExtrasRead::default();
         let mut interrupted = false;
         if !opts.no_fetch {
-            let (fetch, fetched) = self.fetch_tracking(ws, &FetchOptions::default()).await?;
+            let fetch_opts =
+                FetchOptions { allow_mass_delete: opts.allow_mass_delete, ..Default::default() };
+            let (fetch, fetched) = self.fetch_tracking(ws, &fetch_opts).await?;
             read = fetched;
             interrupted = fetch.interrupted;
             // A page that could not be fetched is pulled as it was last seen;

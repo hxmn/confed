@@ -58,7 +58,8 @@ pub async fn fetch(
     let instance = ctx.instance()?;
     let members = selected(ctx, &instance)?;
     let clients = connection.clients(ctx)?;
-    let single = FetchArgs { pages: Vec::new(), since: args.since.clone() };
+    let single =
+        FetchArgs { pages: Vec::new(), since: args.since.clone(), allow_mass_delete: false };
     let single = &single;
     let runs = each_space(ctx, &instance, &members, Some(&clients), |mut child| async move {
         fetch_cmd::run(&mut child, single).await
@@ -87,6 +88,7 @@ pub async fn pull(
         dry_run: args.dry_run,
         no_attachments: args.no_attachments,
         no_comments: args.no_comments,
+        allow_mass_delete: false,
     };
     let single = &single;
     let runs = each_space(ctx, &instance, &members, Some(&clients), |mut child| async move {

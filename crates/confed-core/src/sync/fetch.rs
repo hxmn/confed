@@ -51,7 +51,13 @@ pub struct FetchOptions {
     pub pages: Vec<String>,
     /// Only consider pages modified at or after this timestamp.
     pub since: Option<String>,
+    /// Mark pages deleted even when the server says most of the space is
+    /// gone, which is otherwise refused as more likely a wrong server.
+    pub allow_mass_delete: bool,
 }
+
+/// A fetch that would mark at least this many pages deleted…
+const MASS_DELETE_MIN: usize = 5;
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct FetchOutcome {
@@ -441,6 +447,8 @@ impl SyncEngine {
             .filter(|r| !r.deleted && !live.contains(&r.page_id))
             .map(|r| r.page_id)
             .collect();
+        let tracked = state.remote_index()?.iter().filter(|r| !r.deleted).count();
+        let mut gone_ids = Vec::new();
         for page_id in vanished {
             let gone = match self.client.get_page(&PageId::new(&page_id), BodyFormat::Storage).await
             {
@@ -462,9 +470,34 @@ impl SyncEngine {
                     false
                 }
             };
-            if !gone {
+            if gone {
+                gone_ids.push(page_id);
+            } else {
                 live.insert(page_id);
             }
+        }
+        // …and more than half of what it tracks is far more likely another
+        // site behind the same URL, or an outage that answers 200, than a
+        // space emptied. Nothing is marked, so the next pull removes nothing.
+        if !opts.allow_mass_delete
+            && gone_ids.len() >= MASS_DELETE_MIN
+            && gone_ids.len() * 2 > tracked
+        {
+            return Err(ConfedError::refused(
+                "mass_delete",
+                crate::error::ExitCode::State,
+                format!(
+                    "the server says {} of the {tracked} pages of space {} are gone; nothing was \
+                     marked deleted",
+                    gone_ids.len(),
+                    self.space.key
+                ),
+                Some(
+                    "check the base URL and your permissions; if the pages really are gone, run \
+                     again with --allow-mass-delete"
+                        .into(),
+                ),
+            ));
         }
 
         // What the listing says about every page goes in as one write: a

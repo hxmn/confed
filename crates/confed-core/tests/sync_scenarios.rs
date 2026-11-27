@@ -590,6 +590,24 @@ both_flavors!(
     }
 );
 
+both_flavors!(a_fetch_that_would_empty_the_space_is_refused, |mut h: Harness| async move {
+    for i in 0..8 {
+        h.mock.seed_page(&format!("100{i}"), &format!("Page {i}"), None, "<p>Body.</p>");
+    }
+    h.pull().await;
+    for i in 1..8 {
+        h.mock.delete_page_directly(&format!("100{i}"));
+    }
+    let err = h.engine.fetch(&mut h.ws, &Default::default()).await.unwrap_err();
+    assert_eq!(err.kind(), Some("mass_delete"), "{err:?}");
+    assert!(h.ws.state().all_remote().unwrap().iter().all(|r| !r.deleted), "nothing marked");
+    assert!(h.path("Page 3.md").exists());
+
+    let opts = confed_core::sync::FetchOptions { allow_mass_delete: true, ..Default::default() };
+    let fetch = h.engine.fetch(&mut h.ws, &opts).await.expect("allowed");
+    assert_eq!(fetch.deleted_on_remote.len(), 7);
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;
@@ -3596,7 +3614,7 @@ async fn fetching_a_named_page_reads_its_comments() {
     let mark = h.ws.state().get_meta(COMMENTS_CHECKED_AT_KEY).unwrap();
     h.mock.delete_comment_directly(&id);
 
-    let opts = confed_core::sync::FetchOptions { pages: vec!["1001".into()], since: None };
+    let opts = confed_core::sync::FetchOptions { pages: vec!["1001".into()], ..Default::default() };
     let outcome = h.engine.fetch(&mut h.ws, &opts).await.expect("fetch");
     assert_eq!(outcome.comments_refreshed, 1, "{outcome:?}");
     assert_eq!(outcome.comments_changed, ["1001"], "{outcome:?}");
@@ -4195,7 +4213,7 @@ async fn a_push_does_not_upload_back_what_the_server_deleted() {
     h.pull().await;
     h.mock.delete_attachment_directly(&gone);
 
-    let opts = confed_core::sync::FetchOptions { pages: vec!["1001".into()], since: None };
+    let opts = confed_core::sync::FetchOptions { pages: vec!["1001".into()], ..Default::default() };
     let outcome = h.engine.fetch(&mut h.ws, &opts).await.expect("fetch");
     assert_eq!(outcome.attachments_refreshed, 1, "{outcome:?}");
     assert_eq!(outcome.attachments_changed, ["1001"], "{outcome:?}");
@@ -4399,7 +4417,7 @@ async fn fetching_a_named_page_lists_its_attachments() {
     h.mock.attach_directly("1001", "report.pdf", b"numbers");
     h.mock.age_attachments(24 * 60);
 
-    let opts = confed_core::sync::FetchOptions { pages: vec!["1001".into()], since: None };
+    let opts = confed_core::sync::FetchOptions { pages: vec!["1001".into()], ..Default::default() };
     let outcome = h.engine.fetch(&mut h.ws, &opts).await.expect("fetch");
     assert_eq!(outcome.attachments_refreshed, 1, "{outcome:?}");
     assert_eq!(outcome.attachments_changed, ["1001"], "{outcome:?}");

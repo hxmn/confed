@@ -323,6 +323,11 @@ pub struct FetchArgs {
     /// Only pages modified at or after this RFC 3339 timestamp.
     #[arg(long)]
     pub since: Option<String>,
+
+    /// Mark pages deleted even when the server says most of the space is
+    /// gone (refused otherwise, exit 7).
+    #[arg(long)]
+    pub allow_mass_delete: bool,
 }
 
 #[derive(Args, Debug)]
@@ -370,6 +375,11 @@ pub struct PullArgs {
     /// Skip writing comment sidecars.
     #[arg(long)]
     pub no_comments: bool,
+
+    /// Mark pages deleted, and remove their files, even when the server says
+    /// most of the space is gone (refused otherwise, exit 7).
+    #[arg(long)]
+    pub allow_mass_delete: bool,
 }
 
 #[derive(Args, Debug)]
