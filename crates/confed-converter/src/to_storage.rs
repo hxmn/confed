@@ -14,7 +14,7 @@ use comrak::nodes::{AstNode, ListType, NodeValue};
 use comrak::Arena;
 use similar::{capture_diff_slices, Algorithm, DiffOp};
 
-use crate::blockmap::{hash_text, slice_lines, BlockMap};
+use crate::blockmap::{hash_text, slice_lines, BlockKind, BlockMap};
 use crate::dom;
 use crate::error::{ConvertError, ConvertResult};
 use crate::macros;
@@ -771,8 +771,42 @@ pub fn patch(
             DiffOp::Insert { new_index, new_len, .. } => {
                 self_generate(&new_texts, &new_ranges, new_index, new_len, opts, &mut out)?;
             }
-            DiffOp::Replace { new_index, new_len, .. } => {
-                self_generate(&new_texts, &new_ranges, new_index, new_len, opts, &mut out)?;
+            DiffOp::Replace { old_index, old_len, new_index, new_len } => {
+                // One table, list or task list edited in place: its unchanged
+                // rows or items keep their bytes, and only the edited ones are
+                // regenerated — a one-word fix in a cell does not rewrite the
+                // table, and what Markdown cannot spell survives in the rest.
+                let inside = (old_len == 1 && new_len == 1)
+                    .then(|| {
+                        let block = &base_map.blocks[old_index];
+                        let raw = &base_storage[block.storage_span.0..block.storage_span.1];
+                        let base_text =
+                            slice_lines(base_markdown, block.md_span.0, block.md_span.1);
+                        patch_inside(
+                            block.kind,
+                            raw,
+                            &base_text,
+                            &new_texts[new_index],
+                            new_ranges[new_index].0,
+                            opts,
+                        )
+                    })
+                    .flatten();
+                match inside {
+                    Some(patched) => {
+                        out.push_str(&patched);
+                        let (_, end) = base_map.blocks[old_index].storage_span;
+                        let gap_end = base_map
+                            .blocks
+                            .get(old_index + 1)
+                            .map(|b| b.storage_span.0)
+                            .unwrap_or(base_storage.len());
+                        out.push_str(&base_storage[end..gap_end.max(end)]);
+                    }
+                    None => {
+                        self_generate(&new_texts, &new_ranges, new_index, new_len, opts, &mut out)?
+                    }
+                }
             }
         }
     }
@@ -873,6 +907,126 @@ fn lossy_in(raw: &str) -> Vec<String> {
         out.push("non-breaking spaces".to_string());
     }
     out
+}
+
+/// The rows of a table, or the items of a list or task list, as one block
+/// holds them: in its Markdown, each unit's text; in its storage, each unit's
+/// byte span and the container's tag.
+struct Units {
+    texts: Vec<String>,
+}
+
+/// The top-level units of a table or list block's Markdown: its rows (the
+/// delimiter row is not one) or its items, each with its lines.
+fn md_units(markdown: &str) -> Option<(String, Units)> {
+    use comrak::nodes::NodeValue;
+    let arena = comrak::Arena::new();
+    let root = mdblock::parse(&arena, markdown);
+    let mut blocks = root.children();
+    let block = blocks.next()?;
+    if blocks.next().is_some() {
+        return None;
+    }
+    let kind = match &block.data.borrow().value {
+        NodeValue::Table(_) => "table".to_string(),
+        NodeValue::List(l) => format!("list:{:?}:{}", l.list_type, l.start),
+        _ => return None,
+    };
+    let lines: Vec<&str> = markdown.lines().collect();
+    let texts = block
+        .children()
+        .map(|unit| {
+            let pos = unit.data.borrow().sourcepos;
+            let (start, end) = (pos.start.line.saturating_sub(1), pos.end.line.min(lines.len()));
+            hash_text(&lines.get(start..end).map(|l| l.join("\n")).unwrap_or_default())
+        })
+        .collect();
+    Some((kind, Units { texts }))
+}
+
+/// The byte spans of a table's `<tr>`s, or a list's `<li>`s, or a task
+/// list's `<ac:task>`s, in `storage` — with the name of the element holding
+/// them, so two blocks can be told to be of one kind.
+fn storage_units(storage: &str) -> Option<(String, Vec<(usize, usize)>)> {
+    let nodes = dom::parse_fragment(storage).ok()?;
+    let mut elements = nodes.iter().filter(|n| !n.is_blank());
+    let top = elements.next()?.as_element()?;
+    if elements.next().is_some() {
+        return None;
+    }
+    let (container, unit) = match top.local() {
+        "table" => {
+            let body = top.child_elements().find(|c| c.local() == "tbody").unwrap_or(top);
+            (body, "tr")
+        }
+        "ul" | "ol" => (top, "li"),
+        "task-list" => (top, "task"),
+        _ => return None,
+    };
+    let mut spans = Vec::new();
+    for child in &container.children {
+        match child.as_element() {
+            Some(el) if el.local() == unit => spans.push(el.span),
+            Some(_) => return None,
+            None if child.is_blank() => {}
+            None => return None,
+        }
+    }
+    Some((top.name.clone(), spans))
+}
+
+/// [`patch`] inside one table, list or task list: the base's own bytes for
+/// every unit whose Markdown is unchanged, the generated ones for the rest,
+/// inside the base's container — its attributes, `<colgroup>` and all. `None`
+/// whenever the block cannot be matched unit for unit; the caller then
+/// regenerates it whole, as before.
+fn patch_inside(
+    kind: BlockKind,
+    base_raw: &str,
+    base_md: &str,
+    new_md: &str,
+    line_offset: usize,
+    opts: &ConvertOptions,
+) -> Option<String> {
+    if !matches!(kind, BlockKind::Table | BlockKind::List | BlockKind::TaskList) {
+        return None;
+    }
+    let (base_kind, base_units) = md_units(base_md)?;
+    let (new_kind, new_units) = md_units(new_md)?;
+    if base_kind != new_kind {
+        return None;
+    }
+    let (base_tag, base_spans) = storage_units(base_raw)?;
+    let generated = generate_at(new_md, opts, line_offset, 0).ok()?;
+    let (new_tag, new_spans) = storage_units(&generated)?;
+    if base_tag != new_tag
+        || base_spans.len() != base_units.texts.len()
+        || new_spans.len() != new_units.texts.len()
+        || base_spans.is_empty()
+    {
+        return None;
+    }
+    let mut out = String::with_capacity(base_raw.len());
+    out.push_str(&base_raw[..base_spans[0].0]);
+    for op in capture_diff_slices(Algorithm::Myers, &base_units.texts, &new_units.texts) {
+        match op {
+            DiffOp::Equal { old_index, len, .. } => {
+                for (start, end) in &base_spans[old_index..old_index + len] {
+                    out.push_str(&base_raw[*start..*end]);
+                }
+            }
+            DiffOp::Delete { .. } => {}
+            DiffOp::Insert { new_index, new_len, .. }
+            | DiffOp::Replace { new_index, new_len, .. } => {
+                for (start, end) in &new_spans[new_index..new_index + new_len] {
+                    out.push_str(&generated[*start..*end]);
+                }
+            }
+        }
+    }
+    out.push_str(&base_raw[base_spans[base_spans.len() - 1].1..]);
+    dom::check_well_formed(&out).ok()?;
+    Some(out)
 }
 
 fn self_generate(
@@ -1417,6 +1571,57 @@ mod page_link_tests {
         o.page_titles.insert("900000098561".into(), "CH-200.5. Подготовить план (v.1.1)".into());
         o.page_titles.insert("42".into(), "Разделы (с учетом всех примечаний)".into());
         o
+    }
+
+    fn patched(storage: &str, edit: (&str, &str)) -> String {
+        let opts = ConvertOptions::default();
+        let base = crate::storage_to_markdown(storage, &opts).unwrap();
+        let edited = base.markdown.replace(edit.0, edit.1);
+        assert_ne!(edited, base.markdown, "the edit applies: {}", base.markdown);
+        crate::markdown_to_storage_patched(storage, &base.block_map, &base.markdown, &edited, &opts)
+            .unwrap()
+    }
+
+    #[test]
+    fn editing_one_cell_keeps_every_other_row_and_the_tables_own_markup() {
+        let rows = [
+            "<tr><th><p>Task</p></th><th><p>Owner</p></th></tr>",
+            r#"<tr><td><p>Ship it</p></td><td><p><span style="color: red">Alice</span></p></td></tr>"#,
+            r#"<tr><td style="background: #eee"><p>Test it</p></td><td><p>Bob</p></td></tr>"#,
+        ];
+        let storage = format!(
+            r#"<table data-layout="wide"><colgroup><col style="width: 200px" /><col /></colgroup><tbody>{}</tbody></table>"#,
+            rows.concat()
+        );
+        let out = patched(&storage, ("Ship it", "Ship it now"));
+        assert!(out.starts_with(r#"<table data-layout="wide"><colgroup><col style="width: 200px" /><col /></colgroup><tbody>"#), "{out}");
+        assert!(out.contains(rows[0]) && out.contains(rows[2]), "{out}");
+        assert!(out.contains("Ship it now"), "{out}");
+        assert!(!out.contains(rows[1]), "the edited row is regenerated: {out}");
+    }
+
+    #[test]
+    fn editing_one_item_keeps_every_other_item() {
+        let items = [
+            r#"<li><span style="color: red">first</span> item</li>"#,
+            "<li>second item</li>",
+            r#"<li>third <span style="color: blue">item</span></li>"#,
+        ];
+        let storage = format!("<ul>{}</ul>", items.concat());
+        let out = patched(&storage, ("second item", "second item, edited"));
+        assert_eq!(
+            out.trim_end(),
+            format!("<ul>{}<li>second item, edited</li>{}</ul>", items[0], items[2])
+        );
+
+        // An added item, and a removed one.
+        let out = patched(&storage, ("- second item\n", "- second item\n- new one\n"));
+        assert!(
+            out.contains(items[0]) && out.contains(items[2]) && out.contains("<li>new one</li>"),
+            "{out}"
+        );
+        let out = patched(&storage, ("- second item\n", ""));
+        assert_eq!(out.trim_end(), format!("<ul>{}{}</ul>", items[0], items[2]));
     }
 
     #[test]
