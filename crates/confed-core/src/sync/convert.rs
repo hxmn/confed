@@ -130,9 +130,20 @@ impl ConvertContext {
         })
     }
 
-    /// page id → file path, for the pages the workspace has files for.
+    /// page id → file path: where the workspace has each page's file, and
+    /// for a page it has none for — not pulled, or its body still owed — the
+    /// path pull would give it. Pull renders links to those paths, so push
+    /// must read them back as the same pages, or the link goes up dead.
     pub fn base_links(&self, ws: &Workspace) -> Result<HashMap<String, String>> {
-        Ok(ws.state().page_index()?.into_iter().map(|p| (p.page_id, p.local_path)).collect())
+        let state = ws.state();
+        let base = state.all_pages()?;
+        let mut links: HashMap<String, String> =
+            paths::plan_from_records(&state.all_remote()?, &base)
+                .into_iter()
+                .map(|(id, placement)| (id, placement.path))
+                .collect();
+        links.extend(base.into_iter().map(|p| (p.page_id, p.local_path)));
+        Ok(links)
     }
 
     /// Options for the page whose file is `path`, with `links` (page id →

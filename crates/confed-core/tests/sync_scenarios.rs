@@ -360,6 +360,26 @@ both_flavors!(crlf_line_endings_are_not_a_change, |mut h: Harness| async move {
     assert!(body.contains("<p>First.</p>"), "{body}");
 });
 
+both_flavors!(a_link_to_a_page_not_pulled_goes_back_as_a_page_link, |mut h: Harness| async move {
+    h.mock.seed_page(
+        "1001",
+        "A",
+        None,
+        r#"<p>Read <ac:link><ri:page ri:content-title="B" /></ac:link> first.</p>"#,
+    );
+    h.mock.seed_page("1002", "B", None, "<p>B.</p>");
+    pull_page(&mut h, "1001").await;
+    let file = h.read("A.md");
+    assert!(file.contains("(B.md)"), "{file}");
+    assert!(!h.path("B.md").exists(), "B is not pulled");
+
+    h.write("A.md", &file.replace("first.", "before anything else."));
+    assert_eq!(h.push().await.pushed.len(), 1);
+    let body = h.mock.page_body("1001").unwrap();
+    assert!(!body.contains("href=\"B.md\""), "a dead link went up: {body}");
+    assert!(body.contains("<ac:link"), "{body}");
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;
