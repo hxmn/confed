@@ -259,9 +259,9 @@ impl SyncEngine {
                     }
                 };
                 if posted.parent_comment_id.is_some() {
-                    work.replies.push(posted.id.0.clone());
+                    work.replies.push(posted.id.0);
                 } else {
-                    work.added.push(posted.id.0.clone());
+                    work.added.push(posted.id.0);
                 }
                 // Posted: out of the sidecar now, so a failure later in this
                 // push cannot post it twice on the retry.

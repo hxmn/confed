@@ -1077,7 +1077,7 @@ impl SyncEngine {
                         id,
                         id_attr: attr,
                         username: user.username.clone(),
-                        display_name: user.display_name.clone(),
+                        display_name: user.display_name,
                         profile_url,
                         fetched_at: now(),
                     })?;

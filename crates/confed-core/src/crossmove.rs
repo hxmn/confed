@@ -730,7 +730,7 @@ impl Checks<'_> {
                 rename_reason: None,
                 parent_id: base.parent_id.clone(),
                 depth: *depth,
-                from_path: base.local_path.clone(),
+                from_path: base.local_path,
                 to_path: String::new(),
                 comments: src.state().page_comments(id)?.len(),
                 attachments: src.state().page_attachments(id)?.len(),
@@ -883,7 +883,7 @@ impl Checks<'_> {
                             ),
                         )
                         .page(&page.page_id, src_key, &page.from_path);
-                        blocker.title = Some(wanted.clone());
+                        blocker.title = Some(wanted);
                         blocker.existing_page_id = Some(existing.clone());
                         blocking.push(blocker);
                     }
@@ -899,7 +899,7 @@ impl Checks<'_> {
                         ),
                     )
                     .page(&page.page_id, src_key, &page.from_path);
-                    blocker.title = Some(wanted.clone());
+                    blocker.title = Some(wanted);
                     blocker.existing_page_id = Some(existing.clone());
                     blocker.suggested_title = suffix_free.then_some(suffixed);
                     blocking.push(blocker);
@@ -1064,7 +1064,7 @@ impl Checks<'_> {
                     page_id: page.page_id.clone(),
                     space: key.clone(),
                     path: page.local_path.clone(),
-                    title: page.title.clone(),
+                    title: page.title,
                     count,
                     moved,
                 });
