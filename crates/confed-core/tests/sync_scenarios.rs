@@ -608,6 +608,53 @@ both_flavors!(a_fetch_that_would_empty_the_space_is_refused, |mut h: Harness| as
     assert_eq!(fetch.deleted_on_remote.len(), 7);
 });
 
+both_flavors!(
+    deleting_the_text_of_an_open_comment_warns_that_it_will_be_orphaned,
+    |mut h: Harness| async move {
+        h.mock.seed_page(
+        "1001",
+        "Onboarding",
+        None,
+        "<p>Read this during your first week checklist and then ask questions.</p><p>Other.</p>",
+    );
+        // The mock seeds an inline anchor on "first week checklist".
+        h.mock.seed_comment("1001", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+        h.pull().await;
+
+        // The paragraph moves to another page: its text leaves this one.
+        let file = h.read("Onboarding.md");
+        let kept: String =
+            file.lines().filter(|l| !l.contains("first week")).map(|l| format!("{l}\n")).collect();
+        h.write("Onboarding.md", &kept);
+
+        let dry = h
+            .engine
+            .push(&mut h.ws, &PushOptions { dry_run: true, ..Default::default() })
+            .await
+            .unwrap();
+        assert!(dry.warnings.iter().any(|w| w.contains("will be orphaned")), "{:?}", dry.warnings);
+        let push = h.push().await;
+        assert!(
+            push.warnings.iter().any(|w| w.contains("will be orphaned")),
+            "{:?}",
+            push.warnings
+        );
+
+        // An edit that keeps the text says nothing.
+        h.mock.seed_page(
+            "1002",
+            "Kept",
+            None,
+            "<p>Read this during your first week checklist.</p><p>B.</p>",
+        );
+        h.mock.seed_comment("1002", "<p>Link the template?</p>", confed_api::CommentKind::Inline);
+        h.pull().await;
+        h.write("Kept.md", &h.read("Kept.md").replace("B.", "B, edited."));
+        let push = h.push().await;
+        assert!(push.warnings.is_empty(), "{:?}", push.warnings);
+    }
+);
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

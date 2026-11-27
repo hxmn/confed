@@ -618,6 +618,7 @@ impl SyncEngine {
                 };
                 self.drop_foreign_marks(ws, page_id, &op.path, &mut file)?;
                 let convert_opts = page_convert_options(ws, &op.path)?;
+                self.warn_orphans(ws, &base, &op.path, &file, &convert_opts)?;
                 let _ = self.build_storage(&base, &file.marked_body(), &convert_opts);
             }
             outcome.warnings.extend(self.take_notes());
@@ -1073,6 +1074,7 @@ impl SyncEngine {
                 let convert_opts = page_convert_options(ws, &path)?;
                 let mut file = file;
                 self.drop_foreign_marks(ws, &page_id, &path, &mut file)?;
+                self.warn_orphans(ws, &base_record, &path, &file, &convert_opts)?;
                 // The marked body: a regenerated block keeps its inline comment
                 // markers, so an edit next to a thread does not orphan it.
                 let body_storage = if op.ops.iter().any(|o| o == "body") {
@@ -1300,6 +1302,41 @@ impl SyncEngine {
             if one { "it is" } else { "they are" },
             if one { "it" } else { "them" },
         ));
+        Ok(())
+    }
+
+    /// Say which open inline comments this edit leaves without their text:
+    /// pushed, each would be orphaned on the server.
+    fn warn_orphans(
+        &self,
+        ws: &Workspace,
+        base: &PageRecord,
+        path: &str,
+        file: &MarkdownFile,
+        opts: &ConvertOptions,
+    ) -> Result<()> {
+        let records = ws.state().page_comments(&base.page_id)?;
+        let open: Vec<_> = super::inline_marks::live_inline(&records)
+            .filter(|(_, anchor)| !anchor.orphaned && !anchor.text.trim().is_empty())
+            .collect();
+        if open.is_empty() {
+            return Ok(());
+        }
+        let squash = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+        let now = squash(&confed_converter::marks::plain_text(&file.body));
+        let before = confed_converter::storage_to_markdown(&base.storage_body, opts)
+            .map(|c| squash(&confed_converter::marks::plain_text(&c.markdown)))
+            .unwrap_or_default();
+        for (record, anchor) in open {
+            let text = squash(&anchor.text);
+            if before.contains(&text) && !now.contains(&text) {
+                self.note(format!(
+                    "{path}: inline comment {} on \"{}\" will be orphaned: its text is no \
+                     longer on the page",
+                    record.comment_id, anchor.text
+                ));
+            }
+        }
         Ok(())
     }
 
