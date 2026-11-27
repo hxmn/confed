@@ -279,6 +279,29 @@ both_flavors!(
     }
 );
 
+both_flavors!(a_page_moved_on_the_server_moves_locally, |mut h: Harness| async move {
+    use confed_api::{ConfluenceClient, PageId, Position};
+    h.mock.seed_page("1001", "A", None, "<p>A.</p>");
+    h.mock.seed_page("1002", "B", None, "<p>B.</p>");
+    h.mock.seed_page("1003", "Child", Some("1001"), "<p>Child.</p>");
+    h.pull().await;
+    assert!(h.path("A/Child.md").exists());
+    h.mock.move_page(&PageId::new("1003"), &PageId::new("1002"), Position::Append).await.unwrap();
+
+    let pull = h.pull().await;
+    assert!(!h.path("A/Child.md").exists(), "{pull:?}");
+    let file = h.read("B/Child.md");
+    assert!(file.contains("parent_id: '1002'"), "{file}");
+    assert_eq!(h.status("1003"), PageState::Unchanged);
+
+    // A later edit pushes the body only, and leaves the page where the server put it.
+    h.write("B/Child.md", &file.replace("Child.", "Child, edited."));
+    let push = h.push().await;
+    assert_eq!(push.pushed.len(), 1, "{push:?}");
+    assert!(!push.pushed[0].ops.iter().any(|o| o == "parent"), "{push:?}");
+    assert_eq!(h.mock.page_parent("1003").as_deref(), Some("1002"));
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

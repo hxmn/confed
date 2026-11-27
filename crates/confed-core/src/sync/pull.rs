@@ -203,6 +203,22 @@ pub(super) fn decide_pull(
         return PullAction::Overwrite;
     }
 
+    // A move or a rename on the server need not raise the version, so the
+    // page is neither behind nor diverged — but where it sits is remote work
+    // all the same. A clean page follows it: the file moves and `parent_id`
+    // with it. Left alone, the file would keep the old parent, and the next
+    // push of the page would move it back.
+    if status.state == PageState::Unchanged {
+        if let Some(base) = base {
+            let placed_elsewhere = remote.parent_id != base.parent_id
+                || remote.title != base.title
+                || remote.position != base.position;
+            if placed_elsewhere && remote.storage_body.is_some() {
+                return PullAction::Overwrite;
+            }
+        }
+    }
+
     // `--reset` answers one question for every tracked page: what does the
     // server have? Local edits, merges and conflicts are all discarded.
     if opts.reset && remote.storage_body.is_some() {
