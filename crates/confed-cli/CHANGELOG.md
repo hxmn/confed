@@ -20,6 +20,161 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-27
+
+The fixes from the review of 0.21.0 and 0.22.0, and from an agent's editing session on
+Data Center: merges and conflicts that lost or uploaded the wrong text, commands that
+deleted or sent more than they were asked to, converter round trips that lost markup on
+an edit, and moves between spaces that could strand their journal. And the first release
+that publishes binaries: the macOS builds had been refused since 0.20.0.
+
+### Changed
+
+These change what a script sees; before 1.0 they bump the minor version.
+
+- **A 403 is a permission, not a bad credential**: exit 7 with `errors[].kind`
+  `no_permission`, naming the request, where it was exit 3 with a hint to re-run
+  `confed init`. A sign-in page answering in place of the API is named as one (#54).
+- **`rm --push` asks before it removes anything**, and unattended (`--json`, no terminal)
+  it needs `--yes`, or exits 2 and changes nothing (#24).
+- **A scope argument that selects no page exits 6**, naming it, in `pull`, `push` and
+  `diff`; a folder (`Handbook`, `Handbook/`) now selects its pages and `.` the current
+  directory (#25).
+- **A base URL on another server than the session's is refused** (exit 2) unless a token
+  is given with it — from `--base-url`, `CONFED_BASE_URL` or the config. The stored
+  credential is only ever sent to the server it was stored for (#5). `config --set
+  base_url` to another server needs `--force`, and `config --set` validates `flavor` and
+  `concurrency` the way their flags are (#50).
+- **A fetch that would mark most of the space deleted stops** (exit 7, `mass_delete`) and
+  marks nothing; `--allow-mass-delete` on `fetch` and `pull` lets it through (#44). A page
+  missing from one listing is asked for by itself before it is marked deleted (#21).
+- **Labels are lowercase**, as Confluence stores them, so changing only a label's case is
+  no change (#45).
+- **`confed new` scaffolds an empty body**: Confluence shows the title above it (#96).
+- **The converter keeps more blocks as they are.** A block holding a status lozenge, a date
+  (`<time>`), a link by id to a page the workspace does not know, or a file attached to
+  another page is now a `confluence` fence, which goes back byte for byte (#34, #61, #36,
+  #37). An admonition's title is written on the alert line, `> [!NOTE] Title` (#39); an
+  `expand` is written GitHub's way, its blocks apart (#41); emphasis that hugs punctuation
+  and a letter is written as `<strong>`/`<em>`/`<del>` (#38); an anchor keeps its spaces
+  (`#Section%20One`) (#35). The converter version moves, so the next pull re-renders clean
+  pages with these rules.
+- **Bare URLs and e-mail addresses are text** in the Markdown, as Confluence stores them;
+  write a link as `<https://…>` or `[label](…)` (#81).
+- `confed-api`: `PageSummary.labels` is `Option<Vec<String>>` (`None` where a response
+  carries no labels), and a 403 is `ApiError::Forbidden` (#22, #54).
+
+### Added
+
+- **`confed instance journal`** lists the moves between spaces the journal holds, and
+  `--discard ID` drops one that neither `resume` nor `abort` can finish. The stored plan
+  carries a version, and a plan written by a newer confed is refused (exit 7) (#59).
+- **`confed comment prune-markers <page>`** removes the inline-comment markers deleted
+  comments left in a page, keeping their text, as one new version (#94).
+- **`push --allow-empty`**: an empty file is no longer uploaded over an attachment that has
+  content without it (#95).
+- `push --json` reports each page once in `pages` — ops, versions, files, what was skipped
+  or failed — beside the existing lists (#98); `warnings` names a page whose body went up
+  regenerated whole (#43), an open inline comment the push will orphan (#92), and a comment
+  mark carried in from another page, which is left out of the upload (#93). A dry run names
+  the parent of each page it would create (`created[].parent`) (#97).
+- `attach --rm --json` says the server delete still needs `--allow-delete` (`needs`, and a
+  warning) (#91).
+- `diff` shows new and deleted pages, as `added` and `deleted`, and counts them for
+  `--exit-code` (#26).
+- `status`, `pull` and `push` in a member workspace warn when it is part of an unfinished
+  move between spaces, and say how to finish it (#60).
+- `init` and `doctor` warn about a plain `http://` base URL that is not this machine (#55);
+  `doctor` reports a session stored for another server than the workspace's (#5).
+- `--help` lists a command's own options first and the global ones under their own
+  heading (#74).
+- Release archives for Linux, macOS and Windows, with SHA-256 sums — including static
+  `*-linux-musl` builds that run on older distributions — and a README section on which to
+  take (#11, #71, #70).
+- `SECURITY.md`: how to report a vulnerability privately (#84).
+- A JSON schema for every command's result — `new`, `mv`, `rm`, `attach`, `comment`,
+  `open`, `spaces`, `user`, `config`, `export` and `completion` had none — and a test that
+  fails when a command has none (#53).
+
+### Fixed
+
+**Sync**
+- A clean merge left the page `unchanged`: its local half was never pushed and the next
+  pull overwrote it. It is now `modified` and pushes (#2).
+- A second pull on a conflicted page merged over its markers and let push upload them. A
+  conflicted page stays conflicted until `confed resolve` (#3), and push refuses any body
+  that still holds a conflict hunk, whatever its recorded state (#12).
+- Two pages could be placed on one file — a page whose parent is not listed and a
+  top-level page with the same slug (#4).
+- A cross-space move dropped edits made to a moved page after the plan (#8); a pull of the
+  source after an interrupted move left a journal entry nothing could finish (#31);
+  `abort` succeeded while a move the server had accepted was still running (#32).
+- The push that created a page did not upload the files already in its sidecar (#87), and
+  `attach` with a file already in the sidecar emptied it and uploaded it empty (#88).
+- pull removed the whole sidecar of a page deleted on the server, files confed never wrote
+  included (#13).
+- A page moved, renamed or reordered on the server was not followed locally, and a later
+  push moved it back (#14); a renamed parent left its children's folder behind (#90).
+- Removing `parent_id` was reported as pushed but did not move the page; the page is now
+  made top-level (#15). A local parent change was dropped by a merge (#16). A new child
+  was created at the top of the space when its new parent failed (#19).
+- A file saved with CRLF line endings read as modified (#17); table padding read as a
+  change to `diff` and made the next push regenerate the whole body (#89); a stale block
+  map regenerated the whole body (#43).
+- One failed attachment or comment aborted the push and discarded the report of what was
+  already pushed (#18).
+- push uploaded a dead relative `.md` link to a page that was not pulled (#20).
+- Cloud: every page listing overwrote the stored labels with an empty list (#22).
+- A file saved while push or pull was running was overwritten (#46).
+
+**Commands**
+- `confed mkdocs` deleted `<workspace>/docs/` whatever it held (#6).
+- `pull --label`/`--cql` that matched nothing pulled the whole space (#7), and one that
+  matched more than 500 pages was cut short without a word; up to 10,000 are read, with a
+  warning beyond (#73).
+- `instance mv --push-first --dry-run` pushed for real (#9); `instance mv --dry-run` moved
+  a file that was never pushed (#28); `instance mv` panicked when the destination
+  workspace would not open (#30); `instance push --yes` left out a space whose plan was
+  refused (#29); the move plan missed a home page below a moved root (#58) and checked new
+  titles against the destination only (#57); the link fix rewrote `<ri:page>` inside code
+  samples (#33).
+- `rm --push`, `new --push` and `attach --push` exited 0 when the server refused (#23).
+- `init` and `doctor --fix` overwrote a hand-written `CLAUDE.md` or `AGENTS.md`; confed
+  now keeps the owner's text and writes its contract in a block of its own (#27).
+- `export --format html` wrote storage markup into the page as it was (#51).
+- `attach --rm` took a name with path separators (#75).
+- On macOS and Windows, `confed mv` into another space's folder did not point at
+  `confed instance mv` (#10).
+
+**Converter**
+- A page link with an anchor went back as a dead relative link (#35); a heading ending in
+  `#` lost it (#80); `<ol start="5">` lost its start (#79); a bullet starting with `[x]`
+  turned its list into a task list (#40); a code macro in the language `confluence` went up
+  as live markup (#63); a `<details>` written with blank lines was mangled (#62).
+
+**API and terminal**
+- A paginated listing that hit its request limit returned a partial list as complete; it
+  is now an error, and a repeated cursor is reported as one (#77).
+- Control characters from the server reached the terminal; human output shows them
+  escaped (#52).
+- From the review's triage list (#85): a title or parent changed on both sides of a merge
+  is now a warning, not a trace line; `comment rm A B` deletes what it can and reports the
+  rest; `push` no longer prints "Nothing to push." under a failure; `--select` applies to
+  the error envelope; `open` needs no credential; a pushed page's space key is the
+  server's, not the larger of two strings.
+
+### Security
+
+- The stored credential could be sent to another server through `--base-url` or
+  `CONFED_BASE_URL` (#5).
+- `.session.db` existed with the umask's mode for an instant before it was restricted to
+  0600; it is now created 0600 (#56).
+- A request path with a backslash or a control character could climb past the `.`/`..`
+  guard to another endpoint (#76).
+- `url` is updated to 2.5.9 for RUSTSEC-2026-0592.
+- The workflows' actions are pinned to commit SHAs and read-only by default, and a release
+  waits for all of CI on the tagged commit (#82, #72).
+
 ## [0.22.0] - 2026-11-11
 
 Administration without a script around it. Creating a space with a group like another
@@ -1486,7 +1641,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/hxmn/confed/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/hxmn/confed/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/hxmn/confed/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/hxmn/confed/compare/v0.20.1...v0.21.0
