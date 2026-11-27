@@ -341,6 +341,25 @@ both_flavors!(a_local_parent_change_survives_a_merge, |mut h: Harness| async mov
     assert_eq!(h.status("1003"), PageState::Modified);
 });
 
+both_flavors!(crlf_line_endings_are_not_a_change, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Doc", None, "<p>First.</p><p>Second.</p>");
+    h.pull().await;
+    let before = h.mock.page_body("1001").unwrap();
+    h.write("Doc.md", &h.read("Doc.md").replace('\n', "\r\n"));
+
+    assert_eq!(h.status("1001"), PageState::Unchanged);
+    let push = h.push().await;
+    assert!(push.pushed.is_empty(), "{push:?}");
+    assert_eq!(h.mock.page_body("1001").unwrap(), before);
+
+    // An edit to a CRLF file goes up without carriage returns.
+    h.write("Doc.md", &h.read("Doc.md").replace("Second.", "Second, edited."));
+    assert_eq!(h.push().await.pushed.len(), 1);
+    let body = h.mock.page_body("1001").unwrap();
+    assert!(!body.contains('\r'), "{body:?}");
+    assert!(body.contains("<p>First.</p>"), "{body}");
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

@@ -270,7 +270,8 @@ pub fn split(content: &str) -> Option<(&str, &str)> {
         if trimmed == "---" || trimmed == "..." {
             let yaml = &rest[..offset];
             let body = &rest[offset + line.len()..];
-            return Some((yaml, body.strip_prefix('\n').unwrap_or(body)));
+            let body = body.strip_prefix("\r\n").or_else(|| body.strip_prefix('\n'));
+            return Some((yaml, body.unwrap_or(&rest[offset + line.len()..])));
         }
         offset += line.len();
     }
@@ -349,9 +350,12 @@ pub fn parse(content: &str, path: &str) -> Result<MarkdownFile> {
         })?),
     };
 
+    // Line endings are not content: a CRLF file (an editor setting, git's
+    // `autocrlf`) reads exactly like its LF copy, so it is neither dirty nor
+    // pushed with stray carriage returns.
     Ok(MarkdownFile::new(
         Frontmatter { title, labels, parent_id, managed, extra: map },
-        body.to_string(),
+        body.replace("\r\n", "\n"),
     ))
 }
 
@@ -414,6 +418,14 @@ mod tests {
         let once = file.render().unwrap();
         let twice = parse(&once, "x.md").unwrap().render().unwrap();
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn a_crlf_copy_hashes_like_the_lf_file() {
+        let lf = parse(SAMPLE, "x.md").unwrap();
+        let crlf = parse(&SAMPLE.replace('\n', "\r\n"), "x.md").unwrap();
+        assert_eq!(crlf.body, lf.body);
+        assert_eq!(crlf.content_hash(), lf.content_hash());
     }
 
     #[test]
