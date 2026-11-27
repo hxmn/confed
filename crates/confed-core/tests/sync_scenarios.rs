@@ -426,6 +426,26 @@ both_flavors!(a_stale_base_is_refused_until_the_page_is_pulled, |mut h: Harness|
     assert!(h.mock.page_body("1001").unwrap().contains("changed elsewhere"));
 });
 
+both_flavors!(a_child_waits_for_a_parent_that_failed_to_be_created, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Home", None, "<p>Home.</p>");
+    h.pull().await;
+    std::fs::create_dir_all(h.path("Home/Guide")).unwrap();
+    // An unclosed `confluence` fence does not convert.
+    h.write("Home/Guide.md", "---\ntitle: Guide\nlabels: []\n---\n\n```confluence\n<p>open\n");
+    h.write("Home/Guide/Chapter.md", "---\ntitle: Chapter\nlabels: []\n---\n\nChapter one.\n");
+
+    let outcome = h.push().await;
+    assert!(outcome.created.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.failed.len(), 2, "{outcome:?}");
+    let chapter = outcome.failed.iter().find(|f| f.title == "Chapter").expect("chapter failed");
+    assert!(chapter.error.contains("parent"), "{}", chapter.error);
+    assert!(
+        !h.mock.mutating_calls().iter().any(|c| c.starts_with("create_page")),
+        "nothing was created: {:?}",
+        h.mock.mutating_calls()
+    );
+});
+
 both_flavors!(a_new_local_file_is_created_on_the_server, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Parent", None, "<p>Parent page.</p>");
     h.pull().await;

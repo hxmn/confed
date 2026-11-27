@@ -1211,7 +1211,16 @@ impl SyncEngine {
             let content = std::fs::read_to_string(&parent_file)
                 .map_err(|e| ConfedError::io(format!("reading {parent_path}"), e))?;
             if let Ok(parsed) = crate::frontmatter::parse(&content, &parent_path) {
-                return Ok(parsed.frontmatter.page_id().map(str::to_string));
+                return match parsed.frontmatter.page_id() {
+                    Some(id) => Ok(Some(id.to_string())),
+                    // A parent page that does not exist yet — its create
+                    // failed, or was left out of this push. Created without
+                    // it, the child would land at the top of the space.
+                    None => Err(ConfedError::state_with_hint(
+                        format!("{path}: its parent {parent_path} was not created"),
+                        "push the parent first; the next push creates this page under it",
+                    )),
+                };
             }
         }
         Ok(None)
