@@ -1003,7 +1003,7 @@ impl SyncEngine {
                     None
                 };
 
-                let updated = self
+                let mut updated = self
                     .client
                     .update_page(
                         &PageId::new(&page_id),
@@ -1046,6 +1046,14 @@ impl SyncEngine {
                     None
                 };
 
+                // `parent_id` taken out of the file: the page goes to the top
+                // of the space. An update can only name a new parent, not
+                // none, so it is moved beside a top-level page instead.
+                if op.ops.iter().any(|o| o == "parent") && file.frontmatter.parent_id.is_none() {
+                    self.move_to_top(ws, &page_id).await?;
+                    updated.summary.parent_id = None;
+                }
+
                 self.commit_page(
                     ws,
                     &updated,
@@ -1086,6 +1094,38 @@ impl SyncEngine {
                 }))
             }
         }
+    }
+
+    /// Make `page_id` a top-level page, placed after the last top-level page
+    /// this workspace knows of.
+    async fn move_to_top(&self, ws: &Workspace, page_id: &str) -> Result<()> {
+        let mut top: Vec<RemotePage> = ws
+            .state()
+            .all_remote()?
+            .into_iter()
+            .filter(|r| !r.deleted && r.parent_id.is_none() && r.page_id != page_id)
+            .collect();
+        top.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.title.cmp(&b.title)));
+        let Some(beside) = top.last() else {
+            return Err(ConfedError::state(format!(
+                "page {page_id}: no top-level page to place it beside; its body was pushed, \
+                 its parent was not changed"
+            )));
+        };
+        self.client
+            .move_page_to(
+                &PageId::new(page_id),
+                confed_api::MovePosition::After,
+                &PageId::new(&beside.page_id),
+            )
+            .await
+            .map_err(|e| {
+                ConfedError::Other(format!(
+                    "page {page_id}: updated, but it could not be moved to the top of the space \
+                     ({e}); the next push tries again"
+                ))
+            })?;
+        Ok(())
     }
 
     /// Regenerate storage, patching only the blocks the user changed.

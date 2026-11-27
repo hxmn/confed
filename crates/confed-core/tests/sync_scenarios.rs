@@ -302,6 +302,26 @@ both_flavors!(a_page_moved_on_the_server_moves_locally, |mut h: Harness| async m
     assert_eq!(h.mock.page_parent("1003").as_deref(), Some("1002"));
 });
 
+both_flavors!(removing_parent_id_makes_the_page_top_level, |mut h: Harness| async move {
+    h.mock.seed_page("1001", "Home", None, "<p>Home.</p>");
+    h.mock.seed_page("1002", "Child", Some("1001"), "<p>Child.</p>");
+    h.pull().await;
+    let file = h.read("Home/Child.md");
+    let without: String =
+        file.lines().filter(|l| !l.starts_with("parent_id:")).map(|l| format!("{l}\n")).collect();
+    h.write("Home/Child.md", &without);
+
+    let push = h.push().await;
+    assert_eq!(push.pushed.len(), 1, "{push:?}");
+    assert_eq!(h.mock.page_parent("1002"), None);
+    assert_eq!(h.status("1002"), PageState::Unchanged);
+    let again = h.push().await;
+    assert!(again.pushed.is_empty(), "nothing is owed: {again:?}");
+    h.pull().await;
+    assert_eq!(h.status("1002"), PageState::Unchanged);
+    assert_eq!(h.mock.page_parent("1002"), None);
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;
