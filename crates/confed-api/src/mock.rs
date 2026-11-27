@@ -289,7 +289,7 @@ impl MockClient {
             position: None,
             version: 1,
             status: PageStatus::Current,
-            labels: vec![],
+            labels: Some(vec![]),
             author: Some("Test User".into()),
             created_at: Some("2026-01-01T00:00:00Z".into()),
             updated_at: Some("2026-01-01T00:00:00Z".into()),
@@ -774,7 +774,14 @@ impl ConfluenceClient for MockClient {
             .values()
             .filter(|p| !p.deleted && p.summary.space_key == space.key)
             .filter(|p| !state.skipped_in_listing.contains(&p.summary.id.0))
-            .map(|p| p.summary.clone())
+            .map(|p| {
+                let mut summary = p.summary.clone();
+                // The Cloud page listing carries no labels, as the real one.
+                if self.capabilities.flavor == Flavor::Cloud {
+                    summary.labels = None;
+                }
+                summary
+            })
             .collect();
         pages.sort_by(|a, b| a.id.0.cmp(&b.id.0));
         Ok(pages)
@@ -809,7 +816,7 @@ impl ConfluenceClient for MockClient {
             position: None,
             version: 1,
             status: PageStatus::Current,
-            labels: new.labels.clone(),
+            labels: Some(new.labels.clone()),
             author: Some(self.user.display_name.clone()),
             created_at: Some("2026-08-16T00:00:00Z".into()),
             updated_at: Some("2026-08-16T00:00:00Z".into()),
@@ -1003,7 +1010,7 @@ impl ConfluenceClient for MockClient {
 
     async fn get_labels(&self, id: &PageId) -> ApiResult<Vec<String>> {
         let state = self.state.lock().expect("mock poisoned");
-        Ok(state.pages.get(id.as_str()).map(|p| p.summary.labels.clone()).unwrap_or_default())
+        Ok(state.pages.get(id.as_str()).and_then(|p| p.summary.labels.clone()).unwrap_or_default())
     }
 
     async fn add_label(&self, id: &PageId, label: &str) -> ApiResult<()> {
@@ -1013,8 +1020,9 @@ impl ConfluenceClient for MockClient {
             return Err(ApiError::Auth(format!("POST labels of {id}: HTTP 403")));
         }
         if let Some(page) = state.pages.get_mut(id.as_str()) {
-            if !page.summary.labels.iter().any(|l| l == label) {
-                page.summary.labels.push(label.to_string());
+            let labels = page.summary.labels.get_or_insert_with(Vec::new);
+            if !labels.iter().any(|l| l == label) {
+                labels.push(label.to_string());
             }
         }
         Ok(())
@@ -1024,7 +1032,9 @@ impl ConfluenceClient for MockClient {
         self.record(format!("remove_label:{id}:{label}"));
         let mut state = self.state.lock().expect("mock poisoned");
         if let Some(page) = state.pages.get_mut(id.as_str()) {
-            page.summary.labels.retain(|l| l != label);
+            if let Some(labels) = page.summary.labels.as_mut() {
+                labels.retain(|l| l != label);
+            }
         }
         Ok(())
     }

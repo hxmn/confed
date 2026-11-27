@@ -399,6 +399,25 @@ both_flavors!(a_page_one_listing_skipped_is_not_taken_for_deleted, |mut h: Harne
     assert_eq!(pull.deleted.len(), 1, "{pull:?}");
 });
 
+both_flavors!(labels_survive_a_listing_that_carries_none, |mut h: Harness| async move {
+    use confed_api::{ConfluenceClient, PageId};
+    h.mock.seed_page("1001", "Guide", None, "<p>Guide.</p>");
+    for label in ["guide", "team"] {
+        h.mock.add_label(&PageId::new("1001"), label).await.unwrap();
+    }
+    h.mock.remote_edit("1001", "<p>Guide, edited.</p>");
+    h.pull().await;
+    for _ in 0..2 {
+        h.engine.fetch(&mut h.ws, &Default::default()).await.expect("fetch");
+    }
+    h.pull().await;
+    let file = h.read("Guide.md");
+    assert!(file.contains("guide") && file.contains("team"), "{file}");
+    let mut stored = h.ws.state().get_remote("1001").unwrap().unwrap().labels;
+    stored.sort();
+    assert_eq!(stored, ["guide", "team"]);
+});
+
 both_flavors!(overlapping_edits_conflict_and_block_push, |mut h: Harness| async move {
     h.mock.seed_page("1001", "Doc", None, "<p>Shared sentence.</p>");
     h.pull().await;

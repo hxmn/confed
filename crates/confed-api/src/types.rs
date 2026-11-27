@@ -227,7 +227,9 @@ pub struct PageSummary {
     pub position: Option<i64>,
     pub version: u32,
     pub status: PageStatus,
-    pub labels: Vec<String>,
+    /// `None` when the response does not carry labels — the Cloud page
+    /// listing never does — which is not the same as a page with none.
+    pub labels: Option<Vec<String>>,
     pub author: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,

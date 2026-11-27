@@ -179,7 +179,7 @@ async fn get_page_parses_body_version_parent_and_labels() {
     assert_eq!(page.body_storage, "<p>Welcome</p>");
     assert_eq!(page.summary.version, 7);
     assert_eq!(page.summary.parent_id, Some(PageId::new("900")));
-    assert_eq!(page.summary.labels, vec!["guide", "hr"]);
+    assert_eq!(page.summary.labels.unwrap_or_default(), vec!["guide", "hr"]);
     assert_eq!(page.summary.space_key, "DOCS", "spaceId resolved back to the key");
     assert_eq!(page.summary.title, "Onboarding");
     assert_eq!(page.summary.updated_at.as_deref(), Some("2026-02-02T00:00:00Z"));
@@ -304,7 +304,7 @@ async fn create_page_posts_the_v2_shape_and_applies_labels_through_v1() {
     let page = client(&server).create_page(&new).await.unwrap();
     assert_eq!(page.summary.id, PageId::new("2002"));
     assert_eq!(page.body_storage, "<p>Body</p>", "echoed back when v2 omits the body");
-    assert_eq!(page.summary.labels, vec!["draft"]);
+    assert_eq!(page.summary.labels.unwrap_or_default(), vec!["draft"]);
 }
 
 #[tokio::test]

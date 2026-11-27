@@ -1610,7 +1610,9 @@ pub async fn transfer(
         remote.title = summary.title.clone();
         remote.parent_id = summary.parent_id.as_ref().map(|p| p.0.clone());
         remote.position = summary.position;
-        remote.labels = summary.labels.clone();
+        if let Some(labels) = &summary.labels {
+            remote.labels = labels.clone();
+        }
         if summary.version != remote.version {
             // Changed beyond the move: the closing pull fetches it.
             remote.storage_body = None;

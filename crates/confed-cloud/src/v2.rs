@@ -117,8 +117,7 @@ impl Page {
             labels: self
                 .labels
                 .as_ref()
-                .map(|l| l.results.iter().map(|x| x.name.clone()).collect())
-                .unwrap_or_default(),
+                .map(|l| l.results.iter().map(|x| x.name.clone()).collect()),
             // v2 only exposes account ids on pages; the display name would cost an
             // extra user lookup per page, so callers resolve it lazily if they care.
             author: version.and_then(|v| v.author_id.clone()).or_else(|| self.author_id.clone()),
@@ -317,7 +316,7 @@ mod tests {
         assert_eq!(domain.summary.version, 7);
         assert_eq!(domain.summary.parent_id, Some(PageId::new("900")));
         assert_eq!(domain.summary.space_key, "DOCS");
-        assert_eq!(domain.summary.labels, vec!["guide", "team"]);
+        assert_eq!(domain.summary.labels, Some(vec!["guide".to_string(), "team".to_string()]));
         assert_eq!(domain.summary.status, PageStatus::Current);
         assert_eq!(domain.summary.updated_at.as_deref(), Some("2026-02-02T00:00:00Z"));
     }

@@ -186,7 +186,7 @@ async fn get_page_parses_body_version_parent_and_labels() {
     assert_eq!(page.body_storage, "<p>Welcome</p>");
     assert_eq!(page.summary.version, 7);
     assert_eq!(page.summary.parent_id, Some(PageId::new("900")));
-    assert_eq!(page.summary.labels, vec!["guide", "hr"]);
+    assert_eq!(page.summary.labels.unwrap_or_default(), vec!["guide", "hr"]);
     assert_eq!(page.summary.space_key, "DOCS");
     assert_eq!(page.summary.author.as_deref(), Some("Alice Ng"));
     assert_eq!(page.summary.created_at.as_deref(), Some("2026-01-01T00:00:00Z"));
@@ -290,7 +290,7 @@ async fn create_page_posts_the_v1_shape_and_applies_labels() {
     assert_eq!(page.summary.id, PageId::new("2002"));
     assert_eq!(page.summary.parent_id, Some(PageId::new("900")));
     assert_eq!(page.body_storage, "<p>Body</p>");
-    assert_eq!(page.summary.labels, vec!["draft"]);
+    assert_eq!(page.summary.labels.unwrap_or_default(), vec!["draft"]);
 }
 
 #[tokio::test]

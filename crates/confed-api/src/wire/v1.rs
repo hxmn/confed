@@ -295,12 +295,11 @@ impl Content {
             .unwrap_or_default()
     }
 
-    fn labels(&self) -> Vec<String> {
+    fn labels(&self) -> Option<Vec<String>> {
         self.metadata
             .as_ref()
             .and_then(|m| m.labels.as_ref())
             .map(|l| l.results.iter().filter_map(|x| x.name.clone()).collect())
-            .unwrap_or_default()
     }
 
     /// The deepest ancestor is the direct parent; v1 lists them root-first.
@@ -910,7 +909,7 @@ mod tests {
         assert_eq!(page.summary.space_key, "DOCS");
         assert_eq!(page.summary.version, 4);
         assert_eq!(page.summary.author.as_deref(), Some("Alice Ng"));
-        assert_eq!(page.summary.labels, vec!["guide"]);
+        assert_eq!(page.summary.labels, Some(vec!["guide".to_string()]));
         assert_eq!(page.body_storage, "<p>hi</p>");
         assert_eq!(page.summary.created_at.as_deref(), Some("2026-01-01T00:00:00Z"));
     }

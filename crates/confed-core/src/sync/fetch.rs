@@ -505,7 +505,12 @@ impl SyncEngine {
                     position: summary.position,
                     version: summary.version,
                     status: summary.status.as_str().to_string(),
-                    labels: summary.labels.clone(),
+                    // A listing without labels (Cloud's) keeps the ones stored.
+                    labels: summary
+                        .labels
+                        .clone()
+                        .or_else(|| existing.as_ref().map(|r| r.labels.clone()))
+                        .unwrap_or_default(),
                     author: summary.author.clone(),
                     created_at: summary.created_at.clone(),
                     updated_at: summary.updated_at.clone(),
@@ -861,7 +866,10 @@ impl SyncEngine {
             position: summary.position,
             version: summary.version,
             status: summary.status.as_str().to_string(),
-            labels: summary.labels.clone(),
+            labels: match &summary.labels {
+                Some(labels) => labels.clone(),
+                None => state.get_remote(id)?.map(|r| r.labels).unwrap_or_default(),
+            },
             author: summary.author.clone(),
             created_at: summary.created_at.clone(),
             updated_at: summary.updated_at.clone(),

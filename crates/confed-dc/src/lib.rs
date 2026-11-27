@@ -655,8 +655,8 @@ impl ConfluenceClient for DcClient {
         for label in &new.labels {
             self.add_label(&page.summary.id, label).await?;
         }
-        if page.summary.labels.is_empty() {
-            page.summary.labels = new.labels.clone();
+        if page.summary.labels.as_ref().is_none_or(Vec::is_empty) {
+            page.summary.labels = Some(new.labels.clone());
         }
         Ok(page)
     }

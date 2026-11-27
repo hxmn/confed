@@ -1408,7 +1408,7 @@ mod lost_create_tests {
                 position: None,
                 version,
                 status: PageStatus::Current,
-                labels: Vec::new(),
+                labels: Some(Vec::new()),
                 author: Some(author.into()),
                 created_at: Some(created.into()),
                 updated_at: Some(created.into()),
