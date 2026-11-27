@@ -256,9 +256,23 @@ async fn remove(ctx: &mut Context, ids: &[String]) -> Result<Output> {
     let _lock = ws.lock()?;
     let mut deleted = Vec::new();
     let mut replies = Vec::new();
+    let mut failed: Vec<crate::output::ErrorEntry> = Vec::new();
+    let mut first_exit = None;
     for id in ids {
-        replies.extend(engine.delete_comment(ws, id).await?);
-        deleted.push(id.clone());
+        // Each one on its own: one the server refuses must not hide the ones
+        // already deleted before it.
+        match engine.delete_comment(ws, id).await {
+            Ok(gone) => {
+                replies.extend(gone);
+                deleted.push(id.clone());
+            }
+            Err(e) => {
+                first_exit.get_or_insert(e.exit_code());
+                let mut entry = crate::output::ErrorEntry::from_error(&e);
+                entry.message = format!("comment {id}: {}", entry.message);
+                failed.push(entry);
+            }
+        }
     }
     let mut human =
         format!("Deleted {}", crate::output::plural(deleted.len(), "comment", "comments"));
@@ -269,7 +283,18 @@ async fn remove(ctx: &mut Context, ids: &[String]) -> Result<Output> {
         ));
     }
     human.push_str(".\n");
-    Ok(Output::new(json!({ "deleted": deleted, "replies_deleted": replies }), human))
+    let failures = failed.len();
+    let deleted_any = !deleted.is_empty();
+    let mut output = Output::new(json!({ "deleted": deleted, "replies_deleted": replies }), human)
+        .with_errors(failed);
+    // Some deleted and some not is partial (8); none deleted is the failure's own.
+    if failures > 0 {
+        output.exit = match (deleted_any, first_exit) {
+            (false, Some(exit)) => exit,
+            _ => confed_core::ExitCode::Partial,
+        };
+    }
+    Ok(output)
 }
 
 fn sidecar_path(ctx: &Context, page_id: &str) -> Result<std::path::PathBuf> {
