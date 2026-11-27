@@ -1631,6 +1631,24 @@ mod user_mention_tests {
     }
 
     #[test]
+    fn a_numbered_list_keeps_its_start_through_an_edit() {
+        let storage = r#"<ol start="5"><li>five</li><li>six</li></ol>"#;
+        let opts = ConvertOptions::default();
+        let base = crate::storage_to_markdown(storage, &opts).unwrap();
+        let edited = base.markdown.replace("six", "six!");
+        let out = crate::markdown_to_storage_patched(
+            storage,
+            &base.block_map,
+            &base.markdown,
+            &edited,
+            &opts,
+        )
+        .unwrap();
+        assert_eq!(out.trim_end(), r#"<ol start="5"><li>five</li><li>six!</li></ol>"#);
+        assert_eq!(crate::markdown_to_storage("1. one\n", &opts).unwrap(), "<ol><li>one</li></ol>");
+    }
+
+    #[test]
     fn a_heading_that_ends_in_a_hash_keeps_it() {
         let opts = ConvertOptions::default();
         for storage in ["<h2>Use C #</h2>", "<h2>Count ##</h2>", "<h3>#</h3>"] {

@@ -177,11 +177,15 @@ impl<'a> Generator<'a> {
                     }
                     out.push_str("</ac:task-list>");
                 } else {
-                    let (open, close) = match l.list_type {
-                        ListType::Ordered => ("<ol>", "</ol>"),
-                        _ => ("<ul>", "</ul>"),
+                    // A numbered list that does not start at 1 keeps its start.
+                    let open = match l.list_type {
+                        ListType::Ordered if l.start != 1 => format!(r#"<ol start="{}">"#, l.start),
+                        ListType::Ordered => "<ol>".to_string(),
+                        _ => "<ul>".to_string(),
                     };
-                    out.push_str(open);
+                    let close =
+                        if matches!(l.list_type, ListType::Ordered) { "</ol>" } else { "</ul>" };
+                    out.push_str(&open);
                     for item in node.children() {
                         self.item(item, out)?;
                     }
