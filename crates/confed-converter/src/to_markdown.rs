@@ -632,9 +632,12 @@ impl Renderer<'_> {
         let is_punct = |c: char| !c.is_alphanumeric() && !c.is_whitespace();
         let touches = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
         // And a delimiter written right after another of the same character
-        // fuses with it into one run — `**a**` then `*b*` reads `**a***b*` —
-        // so emphasis that would touch one is written as HTML too.
-        let fuses = lead.is_empty() && before.is_some_and(|c| open.starts_with(c));
+        // fuses with it into one run: `**a***b*` still reads as two, but
+        // `**a***(bar)*` does not — a run between a letter and punctuation
+        // only closes. Such emphasis is written as HTML too.
+        let fuses = lead.is_empty()
+            && before.is_some_and(|c| open.starts_with(c))
+            && core.chars().next().is_some_and(is_punct);
         let refused = fuses
             || (lead.is_empty() && touches(before) && core.chars().next().is_some_and(is_punct))
             || (trail_len == 0 && touches(after) && core.chars().last().is_some_and(is_punct));
