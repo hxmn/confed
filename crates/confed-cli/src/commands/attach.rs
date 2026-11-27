@@ -49,8 +49,12 @@ pub async fn run(ctx: &mut Context, args: &AttachArgs) -> Result<Output> {
             ));
         }
         let dest = sidecar.join(name);
-        std::fs::copy(file, &dest)
-            .map_err(|e| ConfedError::io(format!("copying {}", file.display()), e))?;
+        // A file already in the sidecar is attached as it is. Copying a file
+        // onto itself opens it for writing first, which empties it.
+        if !same_file(file, &dest) {
+            std::fs::copy(file, &dest)
+                .map_err(|e| ConfedError::io(format!("copying {}", file.display()), e))?;
+        }
 
         let sha = attachments::file_sha256(&dest)?;
         let size = attachments::file_size(&dest);
@@ -266,4 +270,12 @@ async fn remove(
         output.exit = confed_core::error::ExitCode::Partial;
     }
     Ok(output)
+}
+
+/// Are `a` and `b` one file on disk? Both must exist to be.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }

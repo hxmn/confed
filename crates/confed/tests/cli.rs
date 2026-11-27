@@ -623,6 +623,55 @@ async fn a_dry_run_push_reports_the_page_without_sending_anything() {
     assert!(read(dir.path(), ROOT_FILE).contains("version: 4"));
 }
 
+/// A file already in the page's sidecar is attached as it is, not emptied by
+/// a copy onto itself.
+#[tokio::test]
+async fn attaching_a_file_from_its_own_sidecar_keeps_its_bytes() {
+    let server = dc_server().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/rest/api/content/{ROOT_PAGE}/child/attachment")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [{
+                "id": "att-9", "type": "attachment", "title": "a.png",
+                "version": { "number": 1 },
+                "extensions": { "fileSize": 150000, "mediaType": "image/png" }
+            }],
+            "size": 1
+        })))
+        .mount(&server)
+        .await;
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(exit_code(&init(dir.path(), &server)), 0);
+    assert_eq!(exit_code(&run(confed_authed(dir.path(), &["pull", "--json"]))), 0);
+
+    let bytes: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+    let inside = dir.path().join(".Team Handbook/a.png");
+    std::fs::create_dir_all(inside.parent().unwrap()).unwrap();
+    std::fs::write(&inside, &bytes).unwrap();
+
+    let output = run(confed_authed(
+        dir.path(),
+        &["attach", ROOT_FILE, inside.to_str().unwrap(), "--push", "--json"],
+    ));
+    assert_eq!(exit_code(&output), 0, "stderr: {}", stderr(&output));
+    let value = envelope(&output, "attach");
+    assert_eq!(value["result"]["attached"][0]["size"], json!(150_000), "{value}");
+    assert_eq!(std::fs::read(&inside).unwrap(), bytes, "the file on disk is untouched");
+
+    let uploads: Vec<_> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.method.as_str() == "POST" && r.url.path().ends_with("/child/attachment"))
+        .collect();
+    assert_eq!(uploads.len(), 1);
+    assert!(
+        uploads[0].body.windows(bytes.len()).any(|w| w == bytes.as_slice()),
+        "the upload carries the file's bytes"
+    );
+}
+
 /// `attach --rm` must never report a removal it did not make. With `--push` it
 /// deletes on the server; without it, it says the deletion is only staged.
 #[tokio::test]
