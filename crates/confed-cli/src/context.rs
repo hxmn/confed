@@ -713,10 +713,10 @@ pub fn split_space_ref(reference: &str) -> Option<(&str, &str)> {
 /// [`split_space_ref`], also taking a key that is not all capitals — Confluence
 /// allows `docs` — but only when `is_key` knows it for a space: `Notes:draft.md`
 /// stays a file name unless a space is called `Notes`.
-pub fn split_space_ref_with<'a>(
-    reference: &'a str,
+pub fn split_space_ref_with(
+    reference: &str,
     is_key: impl Fn(&str) -> bool,
-) -> Option<(&'a str, &'a str)> {
+) -> Option<(&str, &str)> {
     if let Some(found) = split_space_ref(reference) {
         return Some(found);
     }
