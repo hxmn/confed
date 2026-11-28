@@ -20,6 +20,18 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.24.3] - 2026-11-28
+
+The fix 0.24.2 carried, published: 0.24.2 was tagged but its release stopped on a
+failing test, so it has no binaries.
+
+### Fixed
+
+- Cancelling a running push or pull in the TUI stops it at the next page boundary
+  instead of dropping it mid-page (as described under 0.24.2).
+- The TUI's tests no longer race on the process-wide stop request, which failed the
+  0.24.2 release on Windows.
+
 ## [0.24.2] - 2026-11-28
 
 ### Fixed
@@ -1748,7 +1760,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.24.2...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.24.3...HEAD
+[0.24.3]: https://github.com/hxmn/confed/compare/v0.24.2...v0.24.3
 [0.24.2]: https://github.com/hxmn/confed/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/hxmn/confed/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/hxmn/confed/compare/v0.23.0...v0.24.0
