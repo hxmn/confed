@@ -76,7 +76,7 @@ keyring = { version = "3", default-features = false, features = [
     "windows-native",
 ] }
 percent-encoding = "2"
-quick-xml = "0.41"
+quick-xml = "0.42"
 # Only the crossterm backend; the others would only grow the lockfile.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "underline-color"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls", "rustls-tls-native-roots", "gzip"] }
