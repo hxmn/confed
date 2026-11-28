@@ -92,6 +92,11 @@ pub struct FetchOutcome {
     /// could not. Attachments of unchanged pages may then be out of date.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment_check_failed: Option<String>,
+    /// Pages under something confed does not sync — a Cloud folder,
+    /// whiteboard or database — by title, with what it is. They are placed as
+    /// top-level pages.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub under_containers: Vec<(String, String)>,
 }
 
 impl FetchOutcome {
@@ -136,9 +141,35 @@ impl FetchOutcome {
         out
     }
 
-    /// Both of the above, for whoever reports a fetch.
+    /// Both of the above, for whoever reports a fetch — and the pages that sit
+    /// under something confed does not sync.
     pub fn check_warnings(&self) -> Vec<String> {
-        self.attachment_check_warning().into_iter().chain(self.comment_check_warning()).collect()
+        let containers = (!self.under_containers.is_empty()).then(|| {
+            let mut kinds: Vec<&str> =
+                self.under_containers.iter().map(|(_, k)| k.as_str()).collect();
+            kinds.sort_unstable();
+            kinds.dedup();
+            let names: Vec<&str> =
+                self.under_containers.iter().take(5).map(|(title, _)| title.as_str()).collect();
+            format!(
+                "{} sit under a {} confed does not sync, and {} placed at the top of the \
+                 workspace: {}{}",
+                if self.under_containers.len() == 1 {
+                    "1 page".to_string()
+                } else {
+                    format!("{} pages", self.under_containers.len())
+                },
+                kinds.join(" or "),
+                if self.under_containers.len() == 1 { "is" } else { "are" },
+                names.join(", "),
+                if self.under_containers.len() > 5 { ", …" } else { "" }
+            )
+        });
+        self.attachment_check_warning()
+            .into_iter()
+            .chain(self.comment_check_warning())
+            .chain(containers)
+            .collect()
     }
 }
 
@@ -500,6 +531,10 @@ impl SyncEngine {
 
         self.progress.stage("Listing pages", None);
         let mut summaries = self.client.list_pages(&self.space).await?;
+        outcome.under_containers = summaries
+            .iter()
+            .filter_map(|s| Some((s.title.clone(), s.container_parent.clone()?)))
+            .collect();
         let mut live: std::collections::HashSet<String> =
             summaries.iter().map(|s| s.id.0.clone()).collect();
         // A workspace bound to part of the space records only that part:

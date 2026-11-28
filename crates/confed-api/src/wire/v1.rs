@@ -353,6 +353,7 @@ impl Content {
             author: self.author(),
             created_at: self.history.as_ref().and_then(|h| h.created_date.clone()),
             updated_at: self.version.as_ref().and_then(|v| v.when.clone()),
+            container_parent: None,
         }
     }
 

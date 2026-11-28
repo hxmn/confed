@@ -326,6 +326,7 @@ impl MockClient {
             author: Some("Test User".into()),
             created_at: Some("2026-01-01T00:00:00Z".into()),
             updated_at: Some("2026-01-01T00:00:00Z".into()),
+            container_parent: None,
         };
         let mut bodies = HashMap::new();
         bodies.insert(1, body_storage.to_string());
@@ -888,6 +889,7 @@ impl ConfluenceClient for MockClient {
             author: Some(self.user.display_name.clone()),
             created_at: Some("2026-08-16T00:00:00Z".into()),
             updated_at: Some("2026-08-16T00:00:00Z".into()),
+            container_parent: None,
         };
         let mut bodies = HashMap::new();
         bodies.insert(1, new.body_storage.clone());

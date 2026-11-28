@@ -1786,6 +1786,7 @@ mod lost_create_tests {
                 author: Some(author.into()),
                 created_at: Some(created.into()),
                 updated_at: Some(created.into()),
+                container_parent: None,
             },
             body_storage: body.into(),
         }

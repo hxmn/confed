@@ -321,6 +321,14 @@ When a comment shows or links a file that is not among its page's attachments â€
 since, usually â€” the pull that brings the comment in, or that names the page, says so:
 `comment 98211 references diagram.png, which is not among the page's attachments`.
 
+## Pages under a folder (Cloud)
+
+Confluence Cloud can put a page under a folder, a whiteboard or a database. confed syncs
+pages only, so it never lists what such a page sits under: the page is placed at the top
+of the workspace, with no `parent_id`, and every fetch names these pages in a warning
+(`under_containers` in `fetch --json`). A push leaves the page where it is on the server;
+only a `parent_id` you add yourself moves it.
+
 ## Optimistic version checking
 
 Confluence updates are optimistic: you send the version number you expect the page to

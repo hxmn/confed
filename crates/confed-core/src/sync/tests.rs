@@ -239,3 +239,21 @@ fn the_conversion_context_is_rebuilt_when_its_index_moves() {
     ws.state().set_meta("space_key", "ENG").unwrap();
     assert_eq!(page_convert_options(&ws, "Onboarding.md").unwrap().space_key, "ENG");
 }
+
+#[test]
+fn pages_under_a_folder_are_named_in_a_warning() {
+    let outcome = FetchOutcome {
+        under_containers: vec![
+            ("Notes".into(), "folder".into()),
+            ("Plan".into(), "whiteboard".into()),
+        ],
+        ..Default::default()
+    };
+    let warnings = outcome.check_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("2 pages") && warnings[0].contains("folder or whiteboard"),
+        "{warnings:?}"
+    );
+    assert!(warnings[0].contains("Notes, Plan"), "{warnings:?}");
+}

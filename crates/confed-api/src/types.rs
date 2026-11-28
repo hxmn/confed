@@ -230,6 +230,11 @@ pub struct PageSummary {
     /// `None` when the response does not carry labels — the Cloud page
     /// listing never does — which is not the same as a page with none.
     pub labels: Option<Vec<String>>,
+    /// The kind of what the page sits under when it is not a page — a Cloud
+    /// `folder`, `whiteboard` or `database`. confed syncs pages only, so such
+    /// a page is placed as top-level, with `parent_id` empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_parent: Option<String>,
     pub author: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,

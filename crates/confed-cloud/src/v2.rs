@@ -85,6 +85,9 @@ pub struct Page {
     pub space_id: Option<Id>,
     #[serde(default)]
     pub parent_id: Option<Id>,
+    /// `page`, or what else holds it: `folder`, `whiteboard`, `database`.
+    #[serde(default)]
+    pub parent_type: Option<String>,
     #[serde(default)]
     pub author_id: Option<String>,
     #[serde(default)]
@@ -110,7 +113,15 @@ impl Page {
             id: PageId::new(self.id.as_string()),
             title: self.title.clone().unwrap_or_default(),
             space_key: space_key.to_string(),
-            parent_id: self.parent_id.as_ref().map(|p| PageId::new(p.as_string())),
+            // Under something that is not a page, the page is top-level as
+            // far as confed can tell: its parent is never listed, and a push
+            // must not try to put it back under that id.
+            parent_id: self
+                .parent_id
+                .as_ref()
+                .filter(|_| self.parent_type.as_deref().is_none_or(|t| t == "page"))
+                .map(|p| PageId::new(p.as_string())),
+            container_parent: self.parent_type.clone().filter(|t| t != "page"),
             position: self.position,
             version: version.and_then(|v| v.number).unwrap_or(1),
             status: self.status.as_deref().map(PageStatus::parse).unwrap_or(PageStatus::Current),
@@ -319,6 +330,23 @@ mod tests {
         assert_eq!(domain.summary.labels, Some(vec!["guide".to_string(), "team".to_string()]));
         assert_eq!(domain.summary.status, PageStatus::Current);
         assert_eq!(domain.summary.updated_at.as_deref(), Some("2026-02-02T00:00:00Z"));
+    }
+
+    #[test]
+    fn a_page_under_a_folder_is_top_level_and_says_so() {
+        let page: Page = serde_json::from_value(serde_json::json!({
+            "id": "1001", "title": "Notes", "parentId": "77", "parentType": "folder"
+        }))
+        .unwrap();
+        let summary = page.summary("DOCS");
+        assert!(summary.parent_id.is_none(), "no parent confed could list");
+        assert_eq!(summary.container_parent.as_deref(), Some("folder"));
+
+        let page: Page = serde_json::from_value(serde_json::json!({
+            "id": "1002", "parentId": "1001", "parentType": "page"
+        }))
+        .unwrap();
+        assert_eq!(page.summary("DOCS").parent_id, Some(PageId::new("1001")));
     }
 
     #[test]

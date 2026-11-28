@@ -58,6 +58,11 @@
     "attachment_check_failed": {
       "type": "string",
       "description": "Present when the server could not be asked which attachments changed, with the reason. Attachments of unchanged pages may then be out of date; the same is in `warnings`."
+    },
+    "under_containers": {
+      "type": "array",
+      "description": "Cloud: pages under a folder, whiteboard or database, which confed does not sync, as [title, kind]. They are placed at the top of the workspace, with no parent_id, and a warning names them. Absent when none.",
+      "items": { "type": "array", "items": { "type": "string" } }
     }
   }
 }
