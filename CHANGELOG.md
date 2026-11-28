@@ -20,6 +20,30 @@ notes are compiled into it, so no network access or checkout is needed.
 
 ## [Unreleased]
 
+## [0.24.4] - 2026-11-28
+
+The last of the review's triage list (#85), apart from a check that needs a live Cloud
+site.
+
+### Changed
+
+- **Cloud: a page under a folder, whiteboard or database** is placed at the top of the
+  workspace with no `parent_id`, instead of naming a parent no file stands for, and a
+  push never tries to move it back under that id. Every fetch names such pages in a
+  warning, and `fetch --json` lists them under `under_containers`.
+
+### Fixed
+
+- Waiting for a move between spaces to finish read every page of the moved subtree with
+  its body on each poll; it now reads where each page is, without the body.
+  `confed-api` gains `get_page_summary`.
+
+### Internal
+
+- The link rewriter of a move moves out of `crossmove.rs` into a module of its own, with
+  a property test over generated storage: it always returns, changes nothing it does not
+  count, and a second pass changes nothing.
+
 ## [0.24.3] - 2026-11-28
 
 The fix 0.24.2 carried, published: 0.24.2 was tagged but its release stopped on a
@@ -1760,7 +1784,8 @@ Confluence flavors.
   SQLite file, with secrets that cannot be printed. `confed config
   --no-keychain` / `--force-keychain` moves the credential between the two.
 
-[Unreleased]: https://github.com/hxmn/confed/compare/v0.24.3...HEAD
+[Unreleased]: https://github.com/hxmn/confed/compare/v0.24.4...HEAD
+[0.24.4]: https://github.com/hxmn/confed/compare/v0.24.3...v0.24.4
 [0.24.3]: https://github.com/hxmn/confed/compare/v0.24.2...v0.24.3
 [0.24.2]: https://github.com/hxmn/confed/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/hxmn/confed/compare/v0.24.0...v0.24.1
