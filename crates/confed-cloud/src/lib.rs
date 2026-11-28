@@ -303,6 +303,15 @@ impl ConfluenceClient for CloudClient {
         Ok(page.into_domain(&key))
     }
 
+    async fn get_page_summary(&self, id: &PageId) -> ApiResult<PageSummary> {
+        let page: v2::Page = self
+            .http
+            .get_json(&format!("api/v2/pages/{id}"), &[("include-version", "true".to_string())])
+            .await?;
+        let key = self.space_key_for(page.space_numeric()).await;
+        Ok(page.into_domain(&key).summary)
+    }
+
     async fn create_page(&self, new: &NewPage) -> ApiResult<Page> {
         let numeric = self.numeric_space_id(&new.space).await?;
         let mut payload = json!({

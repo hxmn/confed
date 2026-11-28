@@ -636,6 +636,12 @@ impl ConfluenceClient for DcClient {
         Ok(content.into_page(""))
     }
 
+    async fn get_page_summary(&self, id: &PageId) -> ApiResult<PageSummary> {
+        let content =
+            self.fetch_content(id.as_str(), &[("expand", PAGE_EXPAND.to_string())]).await?;
+        Ok(content.into_page("").summary)
+    }
+
     async fn create_page(&self, new: &NewPage) -> ApiResult<Page> {
         let payload = json!({
             "type": "page",

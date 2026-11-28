@@ -1555,23 +1555,25 @@ async fn wait_for_move(
     let limit = std::time::Duration::from_secs(plan.wait_secs);
     let mut interval = std::time::Duration::from_millis(250);
     let mut waiting_on: Vec<String> = plan.subtree_of(root);
+    // Polled by summary: where a page is takes no body to say, and a
+    // subtree of hundreds would otherwise be read whole on every poll.
     loop {
-        let page = client.get_page(&PageId::new(root), BodyFormat::Storage).await?;
-        if page.summary.space_key == plan.dest.key {
+        let root_summary = client.get_page_summary(&PageId::new(root)).await?;
+        if root_summary.space_key == plan.dest.key {
             let mut still = Vec::new();
             for id in &waiting_on {
-                let page = client.get_page(&PageId::new(id), BodyFormat::Storage).await?;
-                if page.summary.space_key != plan.dest.key {
+                let summary = client.get_page_summary(&PageId::new(id)).await?;
+                if summary.space_key != plan.dest.key {
                     still.push(id.clone());
                 }
             }
             waiting_on = still;
             if waiting_on.is_empty() {
-                return Ok(page);
+                return Ok(client.get_page(&PageId::new(root), BodyFormat::Storage).await?);
             }
         }
         if started.elapsed() >= limit {
-            return Ok(page);
+            return Ok(client.get_page(&PageId::new(root), BodyFormat::Storage).await?);
         }
         tokio::time::sleep(interval.min(limit.saturating_sub(started.elapsed()))).await;
         interval = (interval * 2).min(std::time::Duration::from_secs(10));

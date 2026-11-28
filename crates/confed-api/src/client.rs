@@ -74,6 +74,12 @@ pub trait ConfluenceClient: Send + Sync {
     async fn list_pages(&self, space: &SpaceId) -> ApiResult<Vec<PageSummary>>;
 
     async fn get_page(&self, id: &PageId, body: BodyFormat) -> ApiResult<Page>;
+
+    /// A page's place and version without its body: for what polls a page,
+    /// such as waiting for a move to finish.
+    async fn get_page_summary(&self, id: &PageId) -> ApiResult<PageSummary> {
+        Ok(self.get_page(id, BodyFormat::Storage).await?.summary)
+    }
     async fn create_page(&self, new: &NewPage) -> ApiResult<Page>;
     /// `update.version` must be `base + 1`; a stale value must surface as
     /// [`crate::error::ApiError::Conflict`].

@@ -323,6 +323,26 @@ async fn a_refused_label_does_not_turn_a_created_page_into_an_error() {
     assert_eq!(page.summary.labels, Some(vec![]), "the label did not go on");
 }
 
+/// A summary is read without the body: polling a moved subtree must not
+/// download it whole each time.
+#[tokio::test]
+async fn a_page_summary_is_read_without_its_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/confluence/rest/api/content/1001"))
+        .and(query_param("expand", "version,ancestors,metadata.labels,space"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1001", "type": "page", "status": "current", "title": "Onboarding",
+            "space": { "key": "ENG" }, "version": { "number": 4 }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let summary = client(&server).get_page_summary(&PageId::new("1001")).await.unwrap();
+    assert_eq!(summary.space_key, "ENG");
+    assert_eq!(summary.version, 4);
+}
+
 #[tokio::test]
 async fn moving_a_page_re_parents_it_with_a_version_bump() {
     let server = MockServer::start().await;
